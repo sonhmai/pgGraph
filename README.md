@@ -25,7 +25,8 @@ Your tables stay the source of truth. pgGraph builds a derived graph index and
 lets you query it from SQL using functions in the `graph` schema.
 
 > [!IMPORTANT]
-> pgGraph is in early alpha. Please avoid production use for now; try it in
+> pgGraph is in early alpha. Even though we have tested it to be stable,
+> please avoid production use for now; try it in
 > Docker or a dedicated development database and share feedback to help the
 > project grow.
 
@@ -37,7 +38,6 @@ require custom recursive SQL for each schema:
 - “Find records related to Alice within 2 hops.”
 - “Find the shortest path between this person and this company.”
 - “Search nodes across registered tables.”
-- “Explore connected records without moving data into another database.”
 
 pgGraph adds graph queries on top of your existing PostgreSQL tables, without
 requiring a separate graph database, graph-specific storage system, or a new
@@ -61,32 +61,29 @@ You need Docker or Docker Desktop installed and running:
 ```bash
 git clone https://github.com/evokoa/pggraph.git
 cd pggraph
-scripts/quickstart.sh               # run the full quickstart demo
-scripts/quickstart.sh docker my-postgres 17 appdb postgres  # install into existing Postgres Docker container
-scripts/quickstart.sh pgrx           # source build/install with pgrx into local PostgreSQL
-scripts/quickstart.sh playground panama # start Streamlit playground with a preset dataset (panama|ldbc)
+
+# run the full quickstart demo
+scripts/quickstart.sh
+
+# install into existing Postgres Docker container
+scripts/quickstart.sh docker my-postgres 17 appdb postgres
+
+# source build/install with pgrx into local PostgreSQL
+scripts/quickstart.sh pgrx
+
+# start Streamlit playground with a preset dataset (panama|ldbc)
+scripts/quickstart.sh playground panama 
 ```
 
 The script works on macOS and Linux from a normal terminal, and on Windows from
 WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
-## Docker And Install Options
-
-| Path | Use when | Start here |
-|---|---|---|
-| Quickstart script | You want the fastest local trial | `scripts/quickstart.sh` |
-| Docker Compose scratch database | You want a disposable pgGraph database | `docker compose up --build -d` then `docker compose exec postgres psql -U postgres -d graph` |
-| Streamlit playground | You want a browser SQL inspector with a real dataset | `sandbox/start_playground.sh` |
-| Existing PostgreSQL Docker container | You already have a container to install into | `scripts/install_into_docker_postgres.sh CONTAINER 17 DB_NAME postgres` |
-| Source build with pgrx | You are developing pgGraph or building against local PostgreSQL headers | [Installation docs](docs/user_guide/installation.mdx) |
-
 The root Docker image currently runs PostgreSQL 17. Package scripts can build
 extension artifacts for PostgreSQL 13 through 18. The PostgreSQL major version
 of the extension package must match the target server.
 
 For installation details, see:
-
 https://docs.evokoa.com/pggraph/user_guide
 
 ## Community
