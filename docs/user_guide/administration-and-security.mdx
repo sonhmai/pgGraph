@@ -1,0 +1,128 @@
+# Administration And Security
+
+Administrative functions mutate extension catalogs, build state, persisted
+artifacts, sync state, or run global graph algorithms. The code checks graph
+admin privileges before these operations.
+
+## Graph Admin Check
+
+A caller is considered a graph admin when either:
+
+| Condition | Source |
+|---|---|
+| Current role is a superuser | `pg_roles.rolsuper` |
+| Current role has `CREATE` privilege on schema `graph` | `has_schema_privilege(current_user, 'graph', 'CREATE')` |
+
+Grant a non-superuser admin role:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA graph TO graph_admin;
+```
+
+## Admin-Protected Functions
+
+Admin protection applies to catalog mutation, build/vacuum/maintenance, sync
+apply, reset, and global analytics.
+
+| Function family | Examples |
+|---|---|
+| Registration | `add_table`, `add_edge`, `add_filter_column`, `remove_table`, `remove_edge` |
+| Build lifecycle | `build`, `vacuum`, `maintenance`, `reset` |
+| Sync | `enable_sync`, `apply_sync` |
+| Global analytics | `connected_components`, `component_stats`, component pagination helpers |
+
+## Reader Functions
+
+Application roles typically need execute privileges on search/traversal/path
+functions and `SELECT` privilege on the source tables they query.
+
+```sql
+GRANT USAGE ON SCHEMA graph TO app_reader;
+GRANT SELECT ON public.users TO app_reader;
+GRANT SELECT ON public.orders TO app_reader;
+```
+
+Then grant only the functions your application uses. PostgreSQL function grants
+must match argument types; inspect installed signatures with:
+
+```sql
+SELECT p.oid::regprocedure
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'graph'
+ORDER BY p.proname, p.oid::regprocedure::text;
+```
+
+## Source Table ACL Checks
+
+Query functions check source-table `SELECT` privileges before accessing graph
+data for the relevant table coordinates. Missing privilege raises `PG002`.
+
+<Callout type="info">
+The graph artifact contains source primary keys and topology. ACL checks are
+part of query execution so a role cannot use graph queries to bypass source
+table `SELECT` permissions.
+</Callout>
+
+## Internal Catalog Tables
+
+Bootstrap SQL revokes direct writes from `PUBLIC` and grants read access:
+
+```text
+graph._registered_tables
+graph._registered_edges
+graph._registered_filter_columns
+graph._build_jobs
+graph._maintenance_jobs
+graph._sync_log
+graph._sync_buffer
+```
+
+Do not mutate these tables directly in application code. Use `graph.*`
+functions so validation, catalog fingerprints, and schema drift handling remain
+consistent.
+
+## Error Codes
+
+The extension emits custom SQLSTATEs through PostgreSQL's error reporting API.
+
+| SQLSTATE | Error | Common fix |
+|---|---|---|
+| `PG001` | Memory limit exceeded | Raise `graph.memory_limit_mb`, reduce registered graph size, or change OOM policy |
+| `PG002` | ACL denied | Grant `SELECT` on the relevant source table or graph admin privilege for admin functions |
+| `PG003` | Graph not built | Run `SELECT * FROM graph.build();` |
+| `PG004` | Edge type limit exceeded | Reduce distinct edge labels; max user labels are 254 |
+| `PG005` | Invalid filter | Register the filter column and use supported operators/types |
+| `PG006` | Build locked | Wait for current build/vacuum/maintenance |
+| `PG008` | Edge buffer full | Run `graph.vacuum()`/`graph.maintenance()` or increase `graph.edge_buffer_size` |
+| `PG009` | Corrupt graph file | Rebuild persisted artifact |
+| `PG010` | Node not found | Check table/primary key and rebuild/apply sync if data changed |
+| `PG011` | Incompatible graph file version | Rebuild artifact with current extension version |
+| `55000` | Extension disabled | `SET graph.enabled = on` |
+| `XX000` | Internal error | Report with full message and reproduction |
+
+## Disable Query Functions
+
+```sql
+SET graph.enabled = off;
+```
+
+When disabled, query functions fail with SQLSTATE `55000`. Administrative
+functions such as `status`, `build`, and `reset` are not intended as regular
+query paths and are not all gated by the kill switch.
+
+## Backup And Restore
+
+The bootstrap SQL marks extension-owned operational tables for config dump with
+`pg_extension_config_dump`. This preserves registration, jobs, and unapplied
+sync rows across dump/restore.
+
+Source tables remain authoritative for graph contents. After restore:
+
+```sql
+SELECT * FROM graph.status();
+SELECT * FROM graph.build();
+```
+
+If the persisted file was not restored with `$PGDATA`, rebuild from source
+tables.

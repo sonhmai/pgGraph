@@ -1,0 +1,152 @@
+# Traversal And Paths
+
+Traversal is split between SQL request normalization, engine dispatch, and
+low-level BFS/DFS execution over CSR arrays.
+
+## Hot Loop Data
+
+`bfs::execute()` receives:
+
+| Input | Purpose |
+|---|---|
+| `NodeStore` | active bit and table lookup for candidate filtering |
+| `EdgeStore` | CSR neighbor slices |
+| `FilterIndex` | typed filter checks |
+| `BfsConfig` | seed, limits, edge filter, tenant bitmaps, sync overlays |
+
+`BfsConfig` owns resolved, hot-loop-friendly values. SQL strings and labels are
+resolved before entering the traversal loop.
+
+## BFS Flow
+
+```text
+allocate visited bitmap
+allocate depth vector
+allocate parent vector
+allocate parent_edge_type vector
+seed frontier
+
+while frontier has nodes:
+  pop current
+  stop expanding at max_depth
+  stream neighbors from CSR plus overlay inserts
+  skip overlay-deleted edges
+  candidate filters:
+    already visited?
+    edge type allowed?
+    active node?
+    tenant membership allowed?
+    FilterIndex predicates pass?
+  mark visited
+  store depth, parent, parent edge type
+  enforce max_nodes
+  enqueue if depth allows
+  enforce max_frontier
+```
+
+The BFS neighbor iterator streams base CSR edges and overlay inserts without
+materializing all neighbors into a vector. DFS currently materializes and
+reverses the candidate vector to preserve deterministic depth-first order.
+
+## Circuit Breakers
+
+| Breaker | Enforced by | Result |
+|---|---|---|
+| `max_depth` | Current depth check | Node is included but not expanded at depth limit |
+| `max_nodes` | Visited counter | Traversal returns current partial result |
+| `max_frontier` | Frontier/stack length | Traversal returns current partial result |
+
+Circuit breakers stop traversal and return partial rows; they are not SQL
+errors.
+
+## Candidate Filtering Order
+
+The hot loop filters in this order:
+
+1. Already visited.
+2. Edge type not allowed.
+3. Node is inactive/tombstoned.
+4. Tenant membership excludes node.
+5. `FilterIndex` predicates fail.
+
+This order keeps cheap checks before typed filter lookups.
+
+## Path Reconstruction
+
+BFS/DFS stores:
+
+| Vector | Meaning |
+|---|---|
+| `parent[node_idx]` | Node that discovered this node |
+| `parent_edge_type[node_idx]` | Edge label ID from parent to this node |
+| `depth[node_idx]` | Hop depth; `-1` for unvisited |
+
+After traversal, `to_traversal_results()` reconstructs each path by walking
+parent links backward to the seed, reversing them, and converting node indices
+to `(table_oid, primary_key)` coordinates.
+
+## Shortest Path
+
+`Engine::shortest_path()`:
+
+1. Verifies engine built.
+2. Resolves source and target coordinates.
+3. Calls `path_finder::shortest_path()`.
+4. Returns path steps with edge labels.
+
+The path finder can use bidirectional search when safe. When the graph contains
+any unidirectional edges, correctness requires a forward search path that does
+not assume reverse reachability represents the original directed graph.
+
+## Weighted Shortest Path
+
+Weighted paths use registered edge weights and Dijkstra-style cost expansion.
+The path layer accumulates costs as `u64` values with checked addition so valid
+large path costs do not collide with the unreachable sentinel; the SQL wrapper
+still caps `total_cost` to its documented `integer` return type.
+The SQL wrapper returns no rows when:
+
+| Condition | Reason |
+|---|---|
+| No path exists | Nothing to return |
+| No weight data exists | Weighted path cannot be evaluated |
+
+Missing per-edge weights in a weighted store default to cost `1`.
+
+## Source-Table Search
+
+Search is intentionally not a graph-artifact lookup. `sql_search.rs` builds SQL
+over registered source tables and verifies matches against source rows.
+
+Search modes:
+
+| Mode | Meaning |
+|---|---|
+| `contains` | substring match |
+| `exact` | whole-value match |
+| `prefix` | prefix match |
+| `token` | token match |
+
+This keeps search correctness tied to source rows and lets PostgreSQL indexes
+accelerate search predicates.
+
+## Hydration
+
+Hydration happens after graph coordinates are known. It reads source rows by
+table OID and primary key and returns JSONB. Keep hydration out of internal
+traversal loops.
+
+## Aggregation Internals
+
+`sql_aggregation.rs` parses strict traversal JSON. It rejects unexpected keys so
+callers cannot silently rely on misspelled or ignored options.
+
+The aggregation path can operate on:
+
+| Scope | Internal behavior |
+|---|---|
+| returned nodes | Traverse and aggregate reached coordinates |
+| chosen parent path | Expand traversal rows to selected parent path |
+| all possible paths | Enumerate paths with a hard count cap |
+
+Path enumeration must stay capped. Do not add an unbounded aggregate mode.

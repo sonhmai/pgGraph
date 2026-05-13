@@ -1,0 +1,713 @@
+#[pg_test]
+fn sql_trigger_sync_handles_primary_key_changes() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.enabled = on").expect("enable graph failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_pk_update_pgtest CASCADE")
+        .expect("drop pk update table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_pk_update_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create pk update table failed");
+    Spi::run("INSERT INTO public.graph_test_pk_update_pgtest (id, name) VALUES ('old', 'Alice')")
+        .expect("insert pk update row failed");
+    super::insert_registered_table("public.graph_test_pk_update_pgtest", "id", "name", None)
+        .expect("insert registered pk update table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+
+    Spi::run(
+            "UPDATE public.graph_test_pk_update_pgtest SET id = 'new', name = 'Alice2' WHERE id = 'old'",
+        )
+        .expect("update pk failed");
+    let log_count = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_log")
+        .expect("sync log count failed")
+        .unwrap_or(0);
+    assert_eq!(log_count, 1);
+    let updates = Spi::get_one::<i64>("SELECT updates_applied FROM graph.apply_sync()")
+        .expect("apply sync failed")
+        .unwrap_or(0);
+
+    assert_eq!(updates, 1);
+    let new_seed = Spi::get_one::<String>(
+            "SELECT node_id FROM graph.traverse('graph_test_pk_update_pgtest'::regclass, 'new', 1) LIMIT 1",
+        )
+        .expect("new key traverse failed")
+        .unwrap_or_default();
+    let old_search_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM graph.search('name', 'Alice', 'graph_test_pk_update_pgtest'::regclass, mode := 'exact')",
+        )
+        .expect("old token search failed")
+        .unwrap_or(0);
+    let search_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM graph.search('name', 'Alice2', 'graph_test_pk_update_pgtest'::regclass, mode := 'exact')",
+        )
+        .expect("new token search failed")
+        .unwrap_or(0);
+
+    assert_eq!(new_seed, "new");
+    assert_eq!(old_search_count, 0);
+    assert_eq!(search_count, 1);
+}
+
+#[pg_test]
+fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.enabled = on").expect("enable graph failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.edge_buffer_size = 1000").expect("set edge buffer size failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_edge_overflow_pgtest CASCADE")
+        .expect("drop edge overflow table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_edge_overflow_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_edge_overflow_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create edge overflow table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_edge_overflow_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert root failed");
+    super::insert_registered_table(
+        "public.graph_test_edge_overflow_pgtest",
+        "id",
+        "name,parent_id",
+        None,
+    )
+    .expect("insert registered edge overflow table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_edge_overflow_pgtest'::regclass,
+                'parent_id',
+                'graph_test_edge_overflow_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add self edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_edge_overflow_pgtest (id, parent_id, name)
+             SELECT 'child-' || n::text, 'root', 'Child ' || n::text
+             FROM generate_series(1, 1001) AS n",
+    )
+    .expect("insert overflowing edge rows failed");
+
+    assert!(sql_raises("SELECT * FROM graph.apply_sync()"));
+    let (read_only, sync_status, edge_buffer_used) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT read_only, sync_status, edge_buffer_used FROM graph.status()",
+                None,
+                &[],
+            )
+            .expect("status query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(false),
+            row.get::<String>(2)?.unwrap_or_default(),
+            row.get::<i32>(3)?.unwrap_or(0),
+        ))
+    })
+    .expect("status read failed");
+
+    assert!(read_only);
+    assert_eq!(sync_status, "read_only");
+    assert_eq!(edge_buffer_used, 0);
+    Spi::run("SET graph.edge_buffer_size = 100000").expect("restore edge buffer size failed");
+}
+
+#[pg_test]
+fn maintenance_rebuilds_persisted_graph_from_source_with_pending_sync() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.enabled = on").expect("enable graph failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_crash_replay_pgtest CASCADE")
+        .expect("drop crash replay table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_crash_replay_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create crash replay table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_crash_replay_pgtest (id, name)
+             VALUES ('predelete', 'Gone')",
+    )
+    .expect("insert predelete row failed");
+    super::insert_registered_table("public.graph_test_crash_replay_pgtest", "id", "name", None)
+        .expect("insert registered crash replay table failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("DELETE FROM public.graph_test_crash_replay_pgtest WHERE id = 'predelete'")
+        .expect("delete prebuild row failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    let checkpoint =
+        crate::persistence::read_sync_checkpoint(&crate::persistence::graph_file_path())
+            .expect("checkpoint read failed")
+            .unwrap_or(0);
+    assert!(checkpoint >= 1);
+    Spi::run(
+        "INSERT INTO public.graph_test_crash_replay_pgtest (id, name)
+             VALUES ('after-crash', 'After')",
+    )
+    .expect("insert postbuild row failed");
+
+    crate::ENGINE.with(|e| {
+        *e.borrow_mut() = crate::engine::Engine::new();
+    });
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync_mode failed");
+
+    let stale_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'After',
+                'graph_test_crash_replay_pgtest'::regclass,
+                mode := 'exact'
+             )",
+    )
+    .expect("stale search failed")
+    .unwrap_or(0);
+    let maintenance_status =
+        Spi::get_one::<String>("SELECT status FROM graph.maintenance(concurrently := false)")
+            .expect("maintenance rebuild failed")
+            .unwrap_or_default();
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'After',
+                'graph_test_crash_replay_pgtest'::regclass,
+                mode := 'exact'
+             )",
+    )
+    .expect("crash replay search failed")
+    .unwrap_or(0);
+
+    assert_eq!(stale_count, 1);
+    assert_eq!(maintenance_status, "completed");
+    assert_eq!(count, 1);
+    Spi::run("SET graph.persist_on_build = off").expect("restore persist_on_build failed");
+}
+
+#[pg_test]
+fn apply_sync_accepts_auto_loaded_mmap_graph_node_edge_and_truncate_deltas() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.enabled = on").expect("enable graph failed");
+    Spi::run("SET graph.sync_mode = 'manual'").expect("set sync_mode failed");
+    clear_graph_catalog_for_test();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_mmap_sync_pgtest CASCADE")
+        .expect("drop mmap sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_mmap_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_mmap_sync_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create mmap sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_mmap_sync_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert mmap sync root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_mmap_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add mmap sync table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_mmap_sync_pgtest'::regclass,
+                'parent_id',
+                'graph_test_mmap_sync_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add mmap sync edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    crate::ENGINE.with(|e| {
+        *e.borrow_mut() = crate::engine::Engine::new();
+    });
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    let loaded_root = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Root',
+                'graph_test_mmap_sync_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("auto-load search failed")
+    .unwrap_or(0);
+    assert_eq!(loaded_root, 1);
+    let loaded_from_mmap = crate::ENGINE.with(|e| e.borrow().node_store.is_mmap_backed());
+    assert!(loaded_from_mmap);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_mmap_sync_pgtest (id, parent_id, name)
+             VALUES ('child', 'root', 'Child')",
+    )
+    .expect("insert child source row failed");
+    Spi::run(
+        "INSERT INTO graph._sync_log (
+                op,
+                table_oid,
+                table_name,
+                new_pk,
+                properties,
+                new_row
+             )
+             VALUES (
+                'I',
+                'public.graph_test_mmap_sync_pgtest'::regclass,
+                'public.graph_test_mmap_sync_pgtest',
+                'child',
+                '{\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb,
+                '{\"id\":\"child\",\"name\":\"Child\",\"parent_id\":\"root\"}'::jsonb
+             )",
+    )
+    .expect("insert child sync log failed");
+    let inserts = Spi::get_one::<i64>("SELECT inserts_applied FROM graph.apply_sync()")
+        .expect("apply mmap insert sync failed")
+        .unwrap_or(0);
+    let child_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Child',
+                'graph_test_mmap_sync_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("child search after mmap sync failed")
+    .unwrap_or(0);
+    let reaches_root = Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM graph.traverse('graph_test_mmap_sync_pgtest'::regclass, 'child', 1, hydrate := false)
+             WHERE node_id = 'root'",
+        )
+        .expect("mmap edge overlay traverse failed")
+        .unwrap_or(0);
+    let materialized = crate::ENGINE.with(|e| !e.borrow().node_store.is_mmap_backed());
+
+    assert_eq!(inserts, 1);
+    assert_eq!(child_count, 1);
+    assert_eq!(reaches_root, 1);
+    assert!(materialized);
+
+    Spi::run("TRUNCATE public.graph_test_mmap_sync_pgtest")
+        .expect("truncate mmap sync source table failed");
+    Spi::run(
+        "INSERT INTO graph._sync_log (op, table_oid, table_name)
+             VALUES (
+                'T',
+                'public.graph_test_mmap_sync_pgtest'::regclass,
+                'public.graph_test_mmap_sync_pgtest'
+             )",
+    )
+    .expect("insert truncate sync log failed");
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply mmap truncate sync failed");
+    let remaining = Spi::get_one::<i64>(
+        "SELECT (
+                SELECT count(*)
+                FROM graph.search(
+                    'name',
+                    'Root',
+                    'graph_test_mmap_sync_pgtest'::regclass,
+                    mode := 'exact',
+                    hydrate := false
+                )
+             ) + (
+                SELECT count(*)
+                FROM graph.search(
+                    'name',
+                    'Child',
+                    'graph_test_mmap_sync_pgtest'::regclass,
+                    mode := 'exact',
+                    hydrate := false
+                )
+             )",
+    )
+    .expect("remaining search after truncate failed")
+    .unwrap_or(0);
+
+    assert_eq!(remaining, 0);
+    Spi::run("SET graph.persist_on_build = off").expect("restore persist_on_build failed");
+}
+
+#[pg_test]
+fn maintenance_applies_trigger_sync_without_query_time_mutation() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_auto_sync_pgtest CASCADE")
+        .expect("drop auto sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_auto_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create auto sync table failed");
+    Spi::run("INSERT INTO public.graph_test_auto_sync_pgtest (id, name) VALUES ('one', 'Before')")
+        .expect("insert initial row failed");
+    super::insert_registered_table("public.graph_test_auto_sync_pgtest", "id", "name", None)
+        .expect("insert registered auto sync table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    Spi::run("INSERT INTO public.graph_test_auto_sync_pgtest (id, name) VALUES ('two', 'After')")
+        .expect("insert synced row failed");
+
+    let stale_found = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'After',
+                'graph_test_auto_sync_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("stale search failed")
+    .unwrap_or(0);
+    let pending_before = Spi::get_one::<i64>("SELECT pending_sync_rows FROM graph.status()")
+        .expect("pending status failed")
+        .unwrap_or(0);
+
+    let maintenance_status =
+        Spi::get_one::<String>("SELECT status FROM graph.maintenance(concurrently := false)")
+            .expect("maintenance failed")
+            .unwrap_or_default();
+
+    let found = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'After',
+                'graph_test_auto_sync_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("maintained search failed")
+    .unwrap_or(0);
+    let applied = Spi::get_one::<i64>("SELECT applied_sync_id FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(0);
+
+    assert_eq!(stale_found, 1);
+    assert!(pending_before > 0);
+    assert_eq!(maintenance_status, "completed");
+    assert_eq!(found, 1);
+    assert!(applied > 0);
+}
+
+#[pg_test]
+fn tenant_scope_filters_search_and_traversal() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.enforce_tenant_scope = on").expect("enable tenant enforcement failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_tenant_pgtest CASCADE")
+        .expect("drop tenant table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_tenant_pgtest (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                parent_id TEXT REFERENCES public.graph_test_tenant_pgtest(id)
+            )",
+    )
+    .expect("create tenant table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_tenant_pgtest (id, tenant_id, name, parent_id) VALUES
+                ('a1', 'tenant-a', 'Shared Name', NULL),
+                ('a2', 'tenant-a', 'Child A', 'a1'),
+                ('b1', 'tenant-b', 'Shared Name', NULL),
+                ('b2', 'tenant-b', 'Child B', 'b1')",
+    )
+    .expect("insert tenant rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_tenant_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add tenant table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_tenant_pgtest'::regclass,
+                'parent_id',
+                'graph_test_tenant_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := true
+            )",
+    )
+    .expect("add tenant edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let tenant_a_search = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Shared Name',
+                'graph_test_tenant_pgtest'::regclass,
+                mode := 'exact',
+                tenant := 'tenant-a',
+                hydrate := false
+             )",
+    )
+    .expect("tenant search failed")
+    .unwrap_or(0);
+    let tenant_a_traverse = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_tenant_pgtest'::regclass,
+                'a1',
+                2,
+                tenant := 'tenant-a',
+                hydrate := false
+             )
+             WHERE node_id LIKE 'b%'",
+    )
+    .expect("tenant traverse failed")
+    .unwrap_or(0);
+    let missing_tenant_rejected = sql_raises(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Shared Name',
+                'graph_test_tenant_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    );
+
+    Spi::run("SET graph.tenant_setting = 'app.tenant_id'").expect("set tenant_setting failed");
+    Spi::run("SET app.tenant_id = 'tenant-b'").expect("set app tenant failed");
+    let session_tenant_search = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Shared Name',
+                'graph_test_tenant_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("session tenant search failed")
+    .unwrap_or(0);
+    let session_tenant_traverse = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_tenant_pgtest'::regclass,
+                'b1',
+                2,
+                hydrate := false
+             )
+             WHERE node_id LIKE 'a%'",
+    )
+    .expect("session tenant traverse failed")
+    .unwrap_or(0);
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant_setting failed");
+    Spi::run("RESET app.tenant_id").expect("reset app tenant failed");
+
+    assert_eq!(tenant_a_search, 1);
+    assert_eq!(tenant_a_traverse, 0);
+    assert!(missing_tenant_rejected);
+    assert_eq!(session_tenant_search, 1);
+    assert_eq!(session_tenant_traverse, 0);
+}
+
+#[pg_test]
+fn catalog_tables_are_extension_owned_on_install() {
+    let not_owned = Spi::get_one::<i64>(
+        "WITH expected(relname) AS (
+             VALUES
+                 ('_registered_tables'),
+                 ('_registered_edges'),
+                 ('_build_jobs'),
+                 ('_sync_log'),
+                 ('_sync_buffer')
+         ),
+         owned AS (
+             SELECT c.relname, e.extname
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_depend d
+               ON d.objid = c.oid
+              AND d.deptype = 'e'
+             LEFT JOIN pg_extension e
+               ON e.oid = d.refobjid
+             WHERE n.nspname = 'graph'
+               AND c.relname IN (
+                   '_registered_tables',
+                   '_registered_edges',
+                   '_build_jobs',
+                   '_sync_log',
+                   '_sync_buffer'
+               )
+         )
+         SELECT count(*)
+         FROM expected
+         LEFT JOIN owned USING (relname)
+         WHERE owned.extname IS DISTINCT FROM 'graph'",
+    )
+    .expect("catalog ownership check failed")
+    .unwrap_or(0);
+
+    assert_eq!(not_owned, 0);
+}
+
+#[pg_test]
+fn status_exposes_v1_contract_field_names() {
+    reset_and_create_fixtures();
+    let has_v1_prefix = Spi::get_one::<bool>(
+            "WITH expected(result_prefix) AS (
+                VALUES (
+                    'TABLE(node_count integer, edge_count integer, memory_used_mb double precision, memory_limit_mb integer, sync_mode text, sync_status text, last_build timestamp with time zone, last_vacuum timestamp with time zone, edge_types text[], edge_buffer_used integer, has_unidirectional_edges boolean, schema_status text, sync_lag bigint, pending_edge_deltas integer, needs_vacuum boolean, needs_rebuild boolean'
+                )
+             )
+             SELECT left(pg_get_function_result(p.oid), length(expected.result_prefix)) = expected.result_prefix
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'status'",
+        )
+        .expect("status signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(has_v1_prefix);
+}
+
+#[pg_test]
+fn admin_remove_apis_update_catalog_side_effects() {
+    reset_and_create_fixtures();
+    Spi::run("SELECT graph.add_table('graph_test_users_pgtest'::regclass, 'id', ARRAY['name'])")
+        .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add edge failed");
+    Spi::run("SELECT graph.add_filter_column('graph_test_users_pgtest'::regclass, 'age')")
+        .expect("add filter column failed");
+
+    Spi::run("SELECT graph.remove_edge('friend')").expect("remove edge failed");
+    let edge_removed = Spi::get_one::<bool>(
+        "SELECT NOT EXISTS (
+                SELECT 1 FROM graph._registered_edges WHERE label = 'friend'
+            )",
+    )
+    .expect("edge removal inspection failed")
+    .unwrap_or(false);
+    assert!(edge_removed);
+
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("re-add edge failed");
+    Spi::run("SELECT graph.remove_table('graph_test_users_pgtest'::regclass)")
+        .expect("remove table failed");
+    let cleanup_complete = Spi::get_one::<bool>(
+        "SELECT NOT EXISTS (
+                    SELECT 1 FROM graph._registered_tables
+                    WHERE table_name = 'graph_test_users_pgtest'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM graph._registered_filter_columns
+                    WHERE table_name = 'graph_test_users_pgtest'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM graph._registered_edges
+                    WHERE from_table = 'graph_test_users_pgtest'
+                       OR to_table = 'graph_test_users_pgtest'
+                )",
+    )
+    .expect("table removal inspection failed")
+    .unwrap_or(false);
+
+    assert!(cleanup_complete);
+}
+
+#[pg_test]
+fn failed_apply_sync_rows_remain_buffered() {
+    reset_and_create_fixtures();
+    super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)
+        .expect("insert registered users table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("DELETE FROM graph._sync_buffer").expect("clear sync buffer failed");
+    Spi::run(
+        "INSERT INTO graph._sync_buffer (op, table_name, pk, old_pk, new_pk, properties)
+             VALUES ('U', 'public.graph_test_users_pgtest', 'missing', 'missing', 'missing',
+                     '{\"name\":\"Nobody\"}'::jsonb)",
+    )
+    .expect("insert failed sync row failed");
+
+    let updates = Spi::get_one::<i64>("SELECT updates_applied FROM graph.apply_sync()")
+        .expect("apply sync failed")
+        .unwrap_or(0);
+    let remaining = Spi::get_one::<i64>("SELECT count(*) FROM graph._sync_buffer")
+        .expect("sync buffer count failed")
+        .unwrap_or(0);
+
+    assert_eq!(updates, 0);
+    assert_eq!(remaining, 1);
+}

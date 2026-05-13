@@ -1,0 +1,104 @@
+# Limitations And Fit
+
+pgGraph is a PostgreSQL-local graph acceleration layer. It is a good fit when
+your source data already lives in PostgreSQL and you need SQL-accessible
+neighborhood traversal, path explanation, and source-row search without moving
+data into another system.
+
+## Good Fits
+
+| Use case | Why pgGraph fits |
+|---|---|
+| Local relationship traversal | Bounded BFS/DFS with depth, node, and frontier circuit breakers |
+| Path explanation | Shortest path functions return source table/primary-key coordinates and edge labels |
+| SQL-first applications | The public API is PostgreSQL SQL functions in the `graph` schema |
+| Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
+| Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
+| Fast backend startup | Persisted forward graph arrays and resolution bytes can be mmap-loaded |
+
+## Not The Target
+
+| Need | Better fit |
+|---|---|
+| Distributed graph execution across databases | A distributed graph system or application-level federation |
+| Cypher, Gremlin, SPARQL, or GQL compatibility | A database that implements that query language |
+| External graph storage as source of truth | A graph database or graph service |
+| Online mutable graph topology with no rebuild/maintenance phase | A mutable graph store |
+| Large global analytics in the OLTP query path | A read replica, batch job, or dedicated analytics engine |
+| Cross-database graph joins | ETL/materialization into one database or a federation layer |
+
+## Current Feature Boundaries
+
+| Area | Current boundary |
+|---|---|
+| WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
+| Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
+| Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
+| Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
+| Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
+| mmap sharing | Forward graph arrays and resolution bytes are mmap-backed; reverse CSR and bincode metadata are per-backend heap |
+| Query catch-up | Query functions do not secretly apply pending sync rows; use `graph.apply_sync()` or `graph.maintenance()` |
+| Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
+| Hydration | Hydrated rows come from source tables and require source-table privileges |
+| Components | Connected component functions are global admin operations and touch the whole active graph |
+
+## Data Freshness Model
+
+pgGraph does not replace your source tables. The graph is derived state.
+
+<TreeDiagram>
+  <TreeNode title="source table write">
+    <TreeBranch>
+      <TreeNode title="no sync mode: rebuild with graph.build()" />
+      <TreeNode title="trigger mode: row enters graph._sync_log">
+        <TreeBranch>
+          <TreeNode title="graph.apply_sync() for backend-local overlays" />
+          <TreeNode title="graph.maintenance() for rebuilt base graph" />
+        </TreeBranch>
+      </TreeNode>
+    </TreeBranch>
+  </TreeNode>
+</TreeDiagram>
+
+For read paths that need immediate consistency after writes, run the appropriate
+sync or maintenance step in the same operational workflow. For read paths that
+can tolerate scheduled refresh, use periodic build or maintenance jobs.
+
+## Memory Expectations
+
+The persisted `.pggraph` file reduces repeated startup cost, but it does not make
+every structure shared:
+
+| Structure | Sharing behavior |
+|---|---|
+| Node active bits, table OIDs, primary-key bytes | mmap-backed after load |
+| Forward CSR arrays | mmap-backed after load |
+| Resolution index | mmap-backed after load |
+| Reverse CSR | backend-local heap |
+| Filter index | backend-local heap after bincode deserialize |
+| Edge type registry | backend-local heap after bincode deserialize |
+| Sync overlays | backend-local heap |
+
+Use `graph.estimate()` before large builds and watch `memory_used_mb`,
+`edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`.
+
+## Operational Guidance
+
+| Pattern | Recommendation |
+|---|---|
+| Small or mostly static graph | Use manual builds and persisted auto-load |
+| Moderate writes with graph reads | Use trigger sync, scheduled `graph.apply_sync()`, and scheduled `graph.maintenance()` |
+| High write rate topology | Keep graph queries on a replica or schedule rebuild windows |
+| Multi-tenant data | Register tenant columns and keep `graph.enforce_tenant_scope = on` |
+| User-facing traversal | Set conservative `max_depth`, `max_nodes`, `max_frontier`, and pagination defaults |
+| Admin analytics | Run connected component functions as graph admins, preferably away from OLTP peaks |
+
+## Before Production
+
+1. Confirm source-table `SELECT` grants and RLS policies for query roles.
+2. Decide whether `graph.persist_on_build` and `graph.auto_load` should be on.
+3. Set memory and traversal circuit breakers for your workload.
+4. Choose `manual` or `trigger` sync mode.
+5. Define a rebuild/maintenance schedule.
+6. Exercise backup/restore and rebuild from source tables.
+7. Monitor `graph.status()` after build, after sync apply, and after maintenance.

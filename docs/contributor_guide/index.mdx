@@ -1,0 +1,107 @@
+# pgGraph Contributor Guide
+
+This guide documents the Rust internals of the `graph` extension: crate layout,
+engine ownership, memory model, build pipeline, traversal algorithms,
+persistence format, sync overlays, safety boundaries, and release validation.
+
+It is based on the current `graph/` codebase. SQL usage and function signatures
+belong in the [User Guide](/user_guide).
+
+## Crate Shape
+
+<FileTree root="graph/" items={[
+  { name: 'Cargo.toml', desc: 'pgrx extension crate, features, lints, dependencies' },
+  { name: 'sql/bootstrap.sql', desc: 'extension-owned SQL bootstrap objects and catalogs' },
+  { name: 'src/lib.rs', desc: 'pgrx entry point, GUC init, SQL facade includes, engine TLS' },
+  { name: 'src/engine.rs', desc: 'Engine orchestration and store ownership' },
+  { name: 'src/node_store.rs', desc: 'node struct-of-arrays and mmap backing' },
+  { name: 'src/edge_store.rs', desc: 'CSR edge storage and mmap backing' },
+  { name: 'src/builder.rs', desc: 'SPI cursor ingestion and graph construction' },
+  { name: 'src/persistence.rs', desc: '.pggraph writer/loader and format validation' },
+  { name: 'src/filter_index.rs', desc: 'typed traversal filter storage' },
+  { name: 'src/resolution_index.rs', desc: 'table+primary-key resolution index' },
+  { name: 'src/sql_facade/', desc: 'pgrx SQL wrappers included from lib.rs' },
+  { name: 'src/catalog/', desc: 'catalog read/write/validation helpers' },
+  { name: 'tests/heavy/', desc: 'external boundary, release, packaging, and stress tests' },
+  { name: 'fuzz/', desc: 'libFuzzer targets for parser and persistence boundaries' }
+]} />
+
+## Layer Diagram
+
+<ProcessTree title="PostgreSQL backend process">
+  <ProcessStep title="pgrx SQL facade">
+    - validates SQL call shape
+    - enforces admin/query boundaries
+    - translates SQL values to engine requests
+  </ProcessStep>
+  <ProcessStep title="Engine thread-local">
+    - NodeStore
+    - EdgeStore + reverse EdgeStore
+    - ResolutionIndex
+    - FilterIndex
+    - sync edge overlays
+    - tenant membership bitmaps
+  </ProcessStep>
+  <ProcessStep title="PostgreSQL SPI">
+    - source-row search
+    - build cursor reads
+    - hydration
+    - catalog reads/writes
+  </ProcessStep>
+</ProcessTree>
+
+## Design Constraints
+
+| Constraint | Implementation consequence |
+|---|---|
+| Runs inside PostgreSQL backends | Avoid unbounded memory, I/O, panics, or hidden background work in query hot paths |
+| Graph queries must stay SQL-native | SQL facade modules own user-facing call shapes and hydration |
+| Source tables are authoritative | Build, maintenance, and search read source tables through SPI |
+| Traversal must be bounded | Depth, node count, and frontier circuit breakers are first-class config |
+| Cross-backend memory should be shareable | Persisted fixed-width arrays are mmap-backed |
+| CSR base topology is immutable | Sync edge changes use overlays until rebuild |
+| PostgreSQL ACLs must still apply | Query paths check source table privileges |
+| Unsafe mmap reads need proof | Pointer metadata constructors validate bounds/alignment before stores use raw pointers |
+
+## Core Ownership Model
+
+The active graph is held in a backend-local thread-local:
+
+```rust
+thread_local! {
+    static ENGINE: RefCell<Engine> = RefCell::new(Engine::new());
+}
+```
+
+Each backend process has its own `Engine` value. Persisted graph files and the
+OS page cache provide sharing between processes; Rust heap structures and
+backend-local sync overlays are not shared across backends.
+
+## Contributing Rules Of Thumb
+
+1. Keep SQL argument parsing and PostgreSQL error reporting in the SQL facade.
+2. Keep engine methods independent of direct SQL where possible.
+3. Preserve store invariants before optimizing call sites.
+4. Avoid adding hot-loop string work to traversal.
+5. Treat persistence format changes as compatibility changes.
+6. Add SQL tests for user-facing behavior and Rust tests for store/parser
+   invariants.
+7. Keep unsafe contracts in rustdoc and local `// SAFETY:` comments.
+
+## Recommended Reading Order
+
+1. [Architecture](/contributor_guide/architecture) for crate graph, ownership, lifetimes, data flow, and design decisions.
+2. [Engine Internals](/contributor_guide/engine-internals) for `Engine` fields and traversal call paths.
+3. [Memory Model](/contributor_guide/memory-model) for owned vs mmap-backed vs per-backend heap state.
+4. [Persistence Format](/contributor_guide/persistence-format) before changing `.pggraph` layout or loader validation.
+5. [Safety And Security](/contributor_guide/safety-security) before touching unsafe code, ACLs, SQLSTATEs, or dynamic SQL.
+6. [SQL Tests](/contributor_guide/sql-tests) before adding or changing SQL-facing behavior.
+7. [Scripts](/contributor_guide/scripts) before using or changing repository automation.
+8. [Benchmarking](/contributor_guide/benchmarking) before interpreting benchmark or release-evidence timing.
+9. [Testing And Release](/contributor_guide/testing-release) before preparing a PR or release gate.
+
+<Callout type="warning">
+This crate already enables `missing_docs`, `broken_intra_doc_links`,
+`bare_urls`, `unsafe_op_in_unsafe_fn`, and `clippy::undocumented_unsafe_blocks`
+checks. New public Rust APIs need contract-quality docs.
+</Callout>

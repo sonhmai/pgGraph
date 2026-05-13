@@ -1,0 +1,183 @@
+# Known Issues
+
+<Callout type="warning">
+pgGraph is currently alpha software. Do not use it for production workloads
+until the next correctness, SQL contract, persistence, and operational
+hardening update lands.
+</Callout>
+
+<Callout type="info">
+pgGraph is built around a simple launch standard: the most critical correctness,
+durability, safety, and operational paths should be solid first. There is always
+another way to optimize a graph engine, especially inside PostgreSQL, so we are
+launching with the critical paths working and then continuously improving in
+the open.
+</Callout>
+
+This page documents known alpha limitations, next-update hardening work, and
+lower-priority follow-up items. The list is ranked by expected user impact, not
+by implementation difficulty.
+
+Low-level PostgreSQL extension work involves real tradeoffs. Some optimizations
+make a query faster by keeping more data in memory, while others reduce memory
+pressure by doing more work per request. pgGraph has to weigh those choices
+carefully because it runs inside PostgreSQL backend processes rather than a
+separate service with its own resource envelope.
+
+## Next Update Scope
+
+The next update is focused on issues that are either hard to change after users
+depend on SQL behavior, or important enough to fix before recommending
+production use.
+
+### Data Correctness and Corruption
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Edge endpoint validation | Edge-store construction can silently drop out-of-range edge endpoints in internal constructors. | Make invalid endpoints a hard structural error and update tests/callers accordingly. |
+| Hydration numeric comparisons | JSON hydration filters currently rely on floating-point coercion for some numeric comparisons. | Preserve exact integer and decimal behavior where practical, with documented string-number rules. |
+
+### SQL Contract and Query Semantics
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Weighted path output | `graph.weighted_shortest_path()` returns a compact array shape that is hard to evolve once callers build queries around it. | Replace it with a richer path-step row contract before treating the SQL API as stable. |
+| Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Implement the advertised behavior or reject/remove unsupported values before the API is documented as stable. |
+| Search pagination | Source search can materialize broad candidate sets before applying stable page boundaries. | Define and implement a bounded ordering, deduplication, limit, and offset contract. |
+| Traversal pagination | Hydration filters and full candidate sorting can happen before pagination. | Make pagination, ordering, hydration, and filter semantics explicit before users rely on page contents. |
+| Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Preserve documented path-count semantics while reducing avoidable materialization. |
+| Filter model | Legacy raw filters and structured typed filters still have separate paths. | Remove, deprecate, or unify the legacy path so public filter behavior has one source of truth. |
+| Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed values out of unsigned-only paths, or remove the legacy public path. |
+| Composite keys | Composite primary keys are represented through comma-separated strings in some sync and trigger paths. | Store and pass composite key columns as structured catalog data. |
+
+### SQL Safety and Schema Plumbing
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Dynamic table SQL | Some build queries interpolate catalog-derived table names directly. | Use validated regclass/catalog fragments for identifiers and parameters for values. |
+| Discovery SQL | Some discovery queries still use formatted OIDs or generated `IN (...)` lists. | Standardize on parameters, temp tables, or validated fragments depending on query shape. |
+| Search predicates | Search predicates embed literal values and patterns into generated SQL. | Return SQL plus SPI parameters from predicate builders. |
+
+### Persistence and File Format
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Resolution index collisions | Persisted lookup keys store table OID, a 64-bit hash, and node index without enough collision verification. | Add collision detection, wider keys, or collision buckets before artifacts are treated as stable. |
+| Mmap edge validation | Mmap edge-array metadata validates pointer presence and alignment but not the full backing region bounds at the API boundary. | Pass region bounds into validation and verify every slice fits inside the mapped artifact. |
+| Persisted primary keys | Persisted primary-key bytes need explicit UTF-8 validation before constructing mmap-backed stores. | Reject corrupt artifacts with `CorruptFile` before exposing invalid strings. |
+| Artifact writes | `.pggraph` writes build a full in-memory artifact buffer. | Move toward direct section writers or streaming writes while keeping load validation strict. |
+| Missing `PGDATA` | The graph artifact path can fall back to `/tmp` when `PGDATA` is unavailable. | Fail closed and require an explicit durable PostgreSQL data location. |
+
+### Sync, Jobs, and Operator Semantics
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Sync replay batching | Large sync backlogs are loaded and replayed in broad batches with limited partial-progress semantics. | Process rows in bounded ID-ordered batches and checkpoint committed progress deliberately. |
+| Sync metadata reuse | Some sync replay paths repeatedly resolve catalog and OID metadata per row. | Resolve batch metadata once and pass typed context through replay helpers. |
+| Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership, use table epochs, or queue a rebuild instead of scanning every node inline. |
+| Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Use old and new tenant values from trigger payloads to mutate only affected tenant membership. |
+| Edge buffer capacity | Read-only transitions near edge-buffer capacity need clearer operator status and recovery guidance. | Add clearer status, alerts, and documented recovery paths around capacity limits. |
+| Background worker metadata | Maintenance worker metadata is encoded as a fragile delimited string. | Pass durable job identity or use validated length-prefixed metadata. |
+| Background job failures | Failure status can be lost if the worker transaction aborts. | Separate job execution and failure-status recording transaction boundaries. |
+
+### Internal Construction and Performance
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Traversal allocations | BFS and path queries allocate full-graph-sized scratch vectors on some requests. | Benchmark sparse visited metadata, reusable scratch buffers, and other allocation strategies. |
+
+## P0: Operational Visibility and Resource Predictability
+
+These are the highest-priority public follow-ups because they affect operators
+running larger graphs or higher sync volume.
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Build and vacuum progress | Long build, vacuum, and persistence operations can use clearer progress and failure diagnostics. | Add more detailed status, sizing, and recovery guidance around build, vacuum, persistence, and reload. |
+| Memory estimates | Some memory estimates rely on rough constants instead of store-specific heap accounting. | Add `estimated_heap_bytes()` style accounting for node, edge, filter, and resolution stores. |
+| Sync backlog behavior | Sync replay is designed around explicit apply, but large backlogs need better operator feedback. | Improve batching visibility, backlog reporting, and recovery instructions. |
+| Persistence I/O | Persistence uses synchronous filesystem operations from PostgreSQL backend work. | Preserve durability while improving progress reporting, cancellation awareness, and background-worker ergonomics. |
+| Read-only state messages | Some sync paths can report `EdgeBufferFull` even when the engine is read-only for another reason. | Add a clearer `EngineReadOnly` or `GraphReadOnly` error class while preserving the capacity breach error. |
+| Error locations | PostgreSQL error reports can point at the reporting helper rather than the most useful graph call site. | Carry better construction or report-site context into SQLSTATE reporting. |
+
+## P1: Query Performance Follow-Ups
+
+These items are expected to improve latency or memory pressure, but they are
+not changes to the public SQL contract.
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Traversal internals | Some traversal paths still have avoidable per-query or per-node allocation. | Reuse scratch buffers, use sparse metadata where it wins, and benchmark each change. |
+| DFS neighbor expansion | DFS can eagerly allocate neighbor vectors. | Use iterator-based expansion on the DFS path. |
+| Edge overlays | Deleted overlay checks and overlay construction can add hot-path hash lookups. | Use cache-friendly overlay representations or maintain oriented overlays when buffers grow. |
+| Connected components | Component helpers recompute sizes and can materialize full row vectors before slicing. | Reuse component size data and delay row materialization until after filtering, sorting, and pagination where possible. |
+| Reverse graph build | Reversing a CSR graph can allocate intermediate edge structs and sort them. | Use a linear two-pass reverse build when measurements show build-time memory pressure. |
+| Build-time SPI setup | Some build and discovery paths open repeated SPI contexts or run per-table metadata queries. | Batch metadata reads and reuse SPI contexts where the query shape is straightforward. |
+| Source search recheck | Token search currently does exact token rechecks in Rust and allocates per candidate row. | Reduce per-row allocation or move exact token semantics into SQL deliberately. |
+| Hydration setup | Batched hydration can resolve all registered table OIDs before knowing which tables are needed. | Resolve only the table OIDs needed by the requested page and reduce SPI context churn. |
+| Aggregation hydration | Some aggregation paths clone node IDs, JSON values, roots, and table names for lookup ownership. | Use borrowed lookup shapes internally where pgrx row lifetimes allow it. |
+| Resolution delta lookups | Post-build sync inserts can accumulate in a delta structure that is scanned before the finalized index. | Add an indexed delta map if sync-delta growth becomes material. |
+
+## P2: SQL Ergonomics and Documented Semantics
+
+These items clarify behavior or broaden the API. They are planned, but should
+not block use of the current documented SQL surface.
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Auto-discovery text properties | Auto-discovery currently restricts discovered property columns to string-like values of bounded length. | Document the rule clearly and consider making the policy configurable. |
+| Auto-discovery internals | Name-based discovery uses internal sentinel values for missing OIDs. | Replace sentinels with `Option` or split name-based and OID-based discovery structs. |
+| Structured filter operators | Structured filters currently focus on equality, inequality, range comparisons, and `between`. | Add `in`, `not_in`, text search, and explicit null operators as product requirements demand. |
+| Legacy raw filters | The legacy raw filter parser is intentionally not the preferred public SQL surface. | Delete it or unify it with structured typed-filter construction if it needs to remain. |
+| Date and timestamp filters | Date/timestamptz filter parsing uses SPI casts and dynamic SQL. | Prefer parameterized SPI casts or PostgreSQL-native conversion helpers. |
+| Case-insensitive search | `lower(src.col::text)` needs matching expression indexes for good performance. | Document recommended indexes and consider helper DDL. |
+| Node reference input | Some internal compatibility paths use a double-encoded node reference string. | Prefer normal JSON arrays or objects at newer boundaries while preserving compatibility where needed. |
+| GUC enum behavior | Some typed Rust settings are exposed as string GUCs to preserve aliases and warning behavior. | Consider native PostgreSQL enum GUCs only with an explicit compatibility plan. |
+| Native identifier quoting | Local identifier quoting is intentionally narrow. | Move to PostgreSQL-native identifier quoting for consistency with server rules. |
+
+## P3: Internals and Maintainability
+
+These are mostly contributor-facing improvements. They help long-term velocity,
+but they do not change core user behavior.
+
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| SQL facade and pg test layout | Some SQL facade and pg test files are included textually from `lib.rs`. | Replace `include!` usage with normal modules and local imports. |
+| Build/vacuum pipeline | Build and vacuum share a lot of pipeline logic. | Extract a shared helper while keeping build-only and vacuum-only behavior explicit. |
+| Persistence section writing | Section padding and layout writes are still manual. | Add typed section writer helpers while keeping load-time validation strict. |
+| Persistence byte decoding | Some persisted structures use verbose manual byte decoding. | Use clearer slice conversion helpers without changing the file format casually. |
+| Edge-store builders | `SortedEdgeStoreBuilder` and `from_sorted_edges()` duplicate state-machine logic. | Route sorted-edge construction through one implementation. |
+| Edge registration helpers | Auto-discovery has duplicated edge registration construction for junction and standard foreign-key edges. | Extract a shared helper for registered edge construction. |
+| Engine state encapsulation | Some internal fields with invariants are still mutated directly. | Encapsulate state such as `built`, `sync_status`, `is_read_only`, `needs_vacuum`, mmap, and resolution state behind validated helpers. |
+| Mmap mutation API | Direct mutation on mmap-backed stores is not consistently represented. | Route mutations through engine helpers or make direct store mutation fail consistently. |
+| Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
+| Advisory lock keys | Build and vacuum lock keys are hardcoded literals. | Name constants and document their derivation. |
+| Job statuses | Background job status strings are repeated across SQL and Rust mapping code. | Add a small Rust enum and consider a PostgreSQL enum or CHECK constraint if schema validation is useful. |
+| Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
+| Legacy unsigned filter evaluation | A legacy `FilterOp::check` boundary still accepts typed variants and returns `false`. | Make unsigned-only evaluation explicit so typed variants are impossible at that API. |
+| Sync row parsing | Some sync paths parse the same row JSON more than once. | Parse once at the boundary and pass borrowed row values through replay helpers. |
+| Internal sync SQL | Some internal sync queries still interpolate numeric IDs or generated ID lists. | Parameterize where practical or use temp-table cleanup for larger applied ID sets. |
+| Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
+| Relation lookup helpers | Some internal table lookup helpers can be clearer about missing relations. | Use parameters and explicit no-row handling for relation lookup races. |
+| Aggregation parser shape | Aggregation scope is matched as raw strings in more than one place. | Parse scope once into an enum at the SQL boundary. |
+| Test locality | Some pure Rust helper tests live in a central `unit_tests.rs`. | Move tests beside the modules they exercise while keeping pgrx tests in the pg test module. |
+
+## Lower-Priority Optimizations
+
+These are intentionally deferred until measurement shows they matter:
+
+- Avoiding small string allocations in config parsing and UUID parsing.
+- Replacing bitmap serialized-size estimates with native roaring helpers if the
+  pinned crate exposes them.
+- Reducing low-level clone counts in builder, traversal, weighted path, and
+  aggregation paths.
+- Combining duplicate path reconstruction passes after the larger traversal
+  allocation work is complete.
+- Cleaning up long internal function signatures when the surrounding traversal
+  parameters stabilize.
+- Replacing manual pointer alignment checks with newer standard-library helpers
+  once the supported Rust version makes that clean.
+- Cleaning up padding-bit handling in `active_count()`.
+- Moving from custom parse helpers to `FromStr` for SQL-facing enums.
+- Introducing production newtypes for node indices and edge type IDs after
+  benchmarking the hot paths.

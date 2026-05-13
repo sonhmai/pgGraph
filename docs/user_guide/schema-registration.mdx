@@ -1,0 +1,224 @@
+# Schema Registration
+
+The extension builds its graph from explicit registration metadata stored in
+extension catalog tables. Register node tables, edge relationships, and optional
+filter columns before calling `graph.build()`.
+
+## Registration Flow
+
+<FlowDiagram
+  steps={[
+    { title: 'Choose source tables' },
+    { title: 'Register node tables' },
+    { title: 'Register edges' },
+    { title: 'Register filter columns' },
+    { title: 'Inspect graph.registered_*()' },
+    { title: 'graph.build()', isResult: true }
+  ]}
+/>
+
+## Register Node Tables
+
+```sql
+SELECT graph.add_table(
+  table_name := 'public.users'::regclass,
+  id_column := 'id',
+  columns := ARRAY['name', 'email', 'status'],
+  tenant_column := NULL
+);
+```
+
+The `id_column` must match a primary key or a unique `NOT NULL` index. The code
+validates this in `catalog/validate.rs` before writing the registration catalog.
+
+For composite identifiers, use the overload with `id_columns`:
+
+```sql
+SELECT graph.add_table(
+  table_name := 'public.memberships'::regclass,
+  id_columns := ARRAY['account_id', 'user_id'],
+  columns := ARRAY['role', 'state']
+);
+```
+
+Composite IDs are encoded as JSON array text during build. For example,
+`account_id = 10, user_id = 55` becomes a primary-key string similar to
+`["10","55"]`.
+
+### Arguments
+
+| Argument | Type | Required | Meaning |
+|---|---|---:|---|
+| `table_name` | `REGCLASS` | yes | Source table to index as graph nodes |
+| `id_column` | `TEXT` | yes for scalar overload | Primary key or unique not-null column |
+| `id_columns` | `TEXT[]` | yes for composite overload | Ordered primary key or unique not-null columns |
+| `columns` | `TEXT[]` | no | Source columns available to `graph.search()` |
+| `tenant_column` | `TEXT` | no | Per-row tenant value used for tenant-scoped traversal and search |
+
+<Callout type="warning">
+Search only considers columns registered in `columns`. Traversal filter pushdown
+uses `graph.add_filter_column()` separately.
+</Callout>
+
+## Register FK-Style Edges
+
+FK-style registration reads source rows from `from_table`, takes the row primary
+key as the source node, and uses `from_column` as the target primary-key value.
+
+```sql
+SELECT graph.add_edge(
+  from_table := 'public.orders'::regclass,
+  from_column := 'customer_id',
+  to_table := 'public.customers'::regclass,
+  to_column := 'id',
+  label := 'placed_by',
+  bidirectional := true
+);
+```
+
+This models:
+
+```text
+orders.id  --placed_by-->  customers.id
+source PK                   target PK from orders.customer_id
+```
+
+## Register Edge-Table Relationships
+
+Edge-table style registration is used when one table contains relationship rows.
+The source and target values both come from the edge table.
+
+```sql
+SELECT graph.add_edge(
+  from_table := 'public.relationships'::regclass,
+  from_column := 'node_id_start',
+  to_table := 'public.entities'::regclass,
+  to_column := 'node_id_end',
+  label := 'related_to',
+  bidirectional := false
+);
+```
+
+The builder first tries table-specific endpoint resolution. If needed, it falls
+back to resolving the endpoint primary-key value across registered tables,
+ordered by table OID. Prefer unambiguous primary keys across graph tables.
+
+## Dynamic Edge Labels
+
+When `label_column` is set, each edge row may provide its own label. Empty or
+NULL values fall back to the static `label`.
+
+```sql
+SELECT graph.add_edge(
+  from_table := 'public.weighted_edges'::regclass,
+  from_column := 'src',
+  to_table := 'public.nodes'::regclass,
+  to_column := 'dst',
+  label := 'route',
+  bidirectional := false,
+  label_column := 'rel_type'
+);
+```
+
+Edge labels are assigned compact `u8` IDs. The current maximum is 254 distinct
+user-facing labels; exceeding it raises `PG004`.
+
+## Weighted Edges
+
+Register `weight_column` to enable `graph.weighted_shortest_path()`:
+
+```sql
+SELECT graph.add_edge(
+  from_table := 'public.routes'::regclass,
+  from_column := 'src',
+  to_table := 'public.places'::regclass,
+  to_column := 'dst',
+  label := 'route',
+  bidirectional := false,
+  weight_column := 'cost'
+);
+```
+
+The weight column must be numeric. Build clamps loaded weights into `u32`; NULL
+or missing weights default to `1` when a weighted store is built.
+
+## Register Filter Columns
+
+Filter columns are separate from search columns. They are encoded into
+`FilterIndex` so traversal can evaluate predicates without joining back to SQL
+for every candidate neighbor.
+
+```sql
+SELECT graph.add_filter_column(
+  table_name := 'public.users'::regclass,
+  column_name := 'age',
+  column_type := 'numeric'
+);
+
+SELECT graph.add_filter_column(
+  table_name := 'public.users'::regclass,
+  column_name := 'state',
+  column_type := 'text'
+);
+```
+
+Supported `column_type` values:
+
+| Type | Encoding |
+|---|---|
+| `numeric` | Signed integer domain |
+| `boolean` | Boolean domain with sparse bitmap support |
+| `text` | Interned text dictionary token |
+| `date` | Days from `DATE '2000-01-01'` |
+| `timestamptz` | Microseconds from Unix epoch |
+| `uuid` | Canonical 128-bit UUID integer |
+
+## Inspect Registration
+
+```sql
+SELECT * FROM graph.registered_tables();
+SELECT * FROM graph.registered_edges();
+```
+
+## Remove Registration
+
+```sql
+SELECT graph.remove_edge('placed_by');
+SELECT graph.remove_table('public.orders'::regclass);
+```
+
+Removing a table also removes associated filter columns and edges where that
+table is either endpoint. Rebuild after removal:
+
+```sql
+SELECT * FROM graph.build();
+```
+
+## Auto-Discovery
+
+`graph.auto_discover(schema_name)` scans tables and foreign keys in one schema,
+registers discovered tables and FK edges, then calls `graph.build()`.
+
+```sql
+SELECT * FROM graph.auto_discover('public');
+```
+
+`graph.auto_discover_tables()` limits discovery to selected tables and FK edges
+between only those tables:
+
+```sql
+SELECT *
+FROM graph.auto_discover_tables(
+  ARRAY[
+    'public.users'::regclass,
+    'public.orders'::regclass
+  ],
+  tenant_column := 'account_id'
+);
+```
+
+<Callout type="info">
+Use auto-discovery for quick starts and formal FK schemas. Use manual
+registration when relationship tables, dynamic labels, weights, or custom
+tenant behavior matter.
+</Callout>

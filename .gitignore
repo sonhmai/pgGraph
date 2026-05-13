@@ -1,0 +1,66 @@
+# ==============================================================================
+# - Keep rules categorized and logically grouped.
+# - Do not commit local environment variables, secrets, or system-specific configs.
+# - Ensure global rules (like macOS/Windows) are kept at the top.
+# - DO NOT remove the .env rules from this file.
+#
+# AI AGENT INSTRUCTIONS:
+# - DO NOT REMOVE or heavily modify the foundational ignore rules.
+# - EXPLICIT RULE: NEVER remove .env or .reference from this file under any circumstances.
+# - If you must add new rules, place them under the appropriate category.
+# - Create a new category block if no existing one fits.
+# ==============================================================================
+
+# macOS
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Rust & Cargo
+target/
+graph/target/
+graph/fuzz/target/
+**/*.rs.bk
+*.pdb
+
+# pgrx / PostgreSQL regression tests
+**/tests/pg_regress/results/
+**/tests/pg_regress/regression.diffs
+**/tests/pg_regress/regression.out
+
+# IDEs & Editors
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Private Reference Files
+.reference/
+
+# AI Related Files
+.agents/
+
+# Environment Variables
+.env
+**/.env
+
+# Sandbox benchmark outputs and downloaded datasets
+sandbox/benchmark/results/
+sandbox/benchmark/datasets/
+sandbox/benchmark/.venv/
+sandbox/playground/.venv/

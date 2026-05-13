@@ -1,0 +1,129 @@
+# Safety And Security
+
+This extension runs inside PostgreSQL backend processes, so safety and security
+bugs can affect database stability. The codebase uses typed errors, explicit
+SQLSTATE emission, ACL checks, schema validation, and narrow unsafe boundaries.
+
+## Error Model
+
+`GraphError` maps internal errors to SQLSTATEs:
+
+| Variant | SQLSTATE |
+|---|---|
+| `Oom` | `PG001` |
+| `AclDenied` | `PG002` |
+| `NotBuilt` | `PG003` |
+| `EdgeTypeLimit` | `PG004` |
+| `InvalidFilter` | `PG005` |
+| `BuildLocked` | `PG006` |
+| `EdgeBufferFull` | `PG008` |
+| `CorruptFile` | `PG009` |
+| `NodeNotFound` | `PG010` |
+| `IncompatibleVersion` | `PG011` |
+| `Disabled` | `55000` |
+| `Internal` | `XX000` |
+
+`GraphError::report()` calls PostgreSQL's error reporting API directly so custom
+SQLSTATEs are visible at the client boundary.
+
+## Panic Boundary
+
+pgrx provides the actual panic boundary for `#[pg_extern]` functions. The local
+`with_panic_boundary()` helper is intentionally a uniform call site and does
+not catch panics itself, because catching pgrx error-report panics inside SPI
+paths can erase SQLSTATEs or abort the backend.
+
+## ACL Checks
+
+`acl::check_table_acl()` verifies `SELECT` privilege using:
+
+```text
+has_table_privilege(current_user, table_oid::regclass, 'SELECT')
+```
+
+Contributor rule: any code path that exposes source-table graph coordinates or
+hydrated data to a user must preserve the ACL preflight checks.
+
+## Admin Checks
+
+Admin-only operations require either superuser or `CREATE` privilege on schema
+`graph`. Keep mutation, build, sync, reset, and global analytics behind this
+boundary unless the security model is intentionally changed.
+
+## Schema Drift Validation
+
+`catalog/validate.rs` checks:
+
+| Object | Validation |
+|---|---|
+| Registered table | Still exists; ID columns match PK or unique `NOT NULL` index; registered columns still exist |
+| Registered edge | Source/target tables still exist; columns still exist; weight remains numeric |
+| Registered filter column | Type is supported and column still exists |
+
+Runtime helpers mark the engine invalid when drift is detected.
+
+## Unsafe Rules
+
+The crate lints deny undocumented unsafe blocks. Maintain both layers:
+
+| Unsafe site | Required docs |
+|---|---|
+| `unsafe fn` | rustdoc `# Safety` explaining caller obligations |
+| `unsafe {}` block | Local `// SAFETY:` comment explaining why this call is sound |
+
+Current unsafe areas:
+
+| Area | Why unsafe is needed |
+|---|---|
+| `_PG_init()` temporary mmap | Pre-warm existing file pages |
+| `NodeStore` mmap reads | Raw pointer array access |
+| `EdgeStore` mmap reads | Raw pointer CSR access |
+| `persistence::load_graph_file()` | Construct mmap and typed pointer metadata |
+| `sql_jobs.rs` background worker launch | Read PostgreSQL backend global `MyProcPid` for worker notification |
+| `safety::raise_graph_error()` | Direct PostgreSQL error API FFI |
+
+## Unsafe Invariants
+
+These invariants must remain true whenever an mmap-backed engine is returned
+from `load_graph_file()`.
+
+| Invariant | Established by |
+|---|---|
+| `Engine._mmap` owns the mapping for every mmap-backed store pointer | `load_graph_file()` moves the mmap into the returned `Engine` |
+| Node active bytes cover `ceil(node_count / 8)` bytes | `validate_section_layout()` and `MmapNodeArrays::new()` |
+| Node table OIDs contain `node_count` aligned `u32` values | Section size/alignment validation |
+| Primary-key offsets contain `node_count + 1` aligned `u64` values | Section size/alignment validation |
+| Primary-key offsets are monotonic and bounded by the PK byte section | `validate_persisted_contents()` |
+| Forward CSR offsets contain `node_count + 1` aligned `u32` values | Section size/alignment validation |
+| CSR offsets are monotonic and end at `edge_count` | `validate_persisted_contents()` |
+| Every target node index is less than `node_count` | `validate_persisted_contents()` |
+| `type_ids` length equals `edge_count` | Section size validation |
+| `weights` is empty or exactly `edge_count * 4` bytes | Section size validation |
+| Bincode payload length prefixes stay inside their sections | `validate_length_prefixed_section()` |
+| Edge registry index 0 is the reserved empty label | Loader registry validation |
+| Background worker notify PID is read only while a backend is registering a worker | `launch_build_worker()` and `launch_maintenance_worker()` call PostgreSQL's `MyProcPid` inside an active backend |
+
+The reverse CSR is not mmap-backed. It is rebuilt as an owned `EdgeStore` from
+the forward graph after the forward CSR has been validated.
+
+## Loader Hardening
+
+Never construct mmap-backed stores from unvalidated section metadata. The loader
+must validate file size, magic, version, CRC, offsets, section sizes,
+alignment, CSR content, primary-key offsets, and length-prefixed payload bounds
+before constructing pointer metadata.
+
+## SQL Injection Boundaries
+
+Dynamic SQL uses quoted identifiers and regclass-derived table names. When
+adding SQL generation:
+
+1. Use `regclass` OIDs and `regclass::text` where possible.
+2. Quote identifiers with local helpers.
+3. Pass values through SPI parameters instead of string interpolation.
+4. Avoid accepting raw SQL fragments from user input.
+
+## Secrets And Documentation
+
+Do not put credentials, private hostnames, production paths, or customer data in
+docs, tests, examples, logs, or panic messages.

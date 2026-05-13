@@ -1,0 +1,234 @@
+# Build And Persistence
+
+`graph.build()` constructs a backend-local active engine from registered tables,
+edges, and filter columns. When `graph.persist_on_build = true`, the base graph
+is written atomically to a `.pggraph` file and later backends can load it through
+mmap.
+
+When persistence is requested, build, maintenance, and vacuum paths fail closed:
+an artifact write error or immediate mmap reload error aborts the operation
+instead of installing an unpersisted in-memory fallback.
+
+<Callout type="info">
+Background workers are used for asynchronous build and maintenance jobs. They
+rebuild/apply/persist graph state, but there is no always-running worker that
+updates every backend's already-loaded `Engine` in place.
+</Callout>
+
+## Build Commands
+
+Synchronous build:
+
+```sql
+SELECT * FROM graph.build();
+```
+
+Compatibility overload:
+
+```sql
+SELECT * FROM graph.build(concurrently := false);
+```
+
+Background build:
+
+```sql
+SELECT * FROM graph.build(concurrently := true);
+SELECT * FROM graph.build_status('<build_id>');
+```
+
+The background path creates a row in `graph._build_jobs` and launches a dynamic
+background worker. If worker launch fails, the job row is marked failed and the
+SQL call reports the error.
+
+## Return Columns
+
+`graph.build()` returns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `nodes_loaded` | `BIGINT` | Nodes loaded from registered source tables |
+| `edges_loaded` | `BIGINT` | Directed edges loaded into the forward CSR store |
+| `build_time_ms` | `DOUBLE PRECISION` | Wall-clock build duration |
+| `memory_used_mb` | `DOUBLE PRECISION` | Engine memory estimate after build |
+| `sync_mode` | `TEXT` | Parsed sync mode at build time |
+
+`graph.build(concurrently := ...)` returns:
+
+| Column | Meaning |
+|---|---|
+| `build_id` | Durable job ID, or zero UUID for synchronous compatibility path |
+| `status` | `queued`, `running`, `completed`, or `failed` |
+| `nodes_loaded`, `edges_loaded`, `build_time_ms`, `memory_used_mb` | Populated after completion |
+| `sync_mode` | Sync mode captured for the job |
+
+## Build Pipeline
+
+<FlowDiagram
+  trigger="graph.build()"
+  steps={[
+    {
+      title: "Read graph catalog",
+      description: "Load registered tables, edges, and filter columns from extension catalog tables."
+    },
+    {
+      title: "Estimate memory",
+      description: "Use pg_class.reltuples to estimate node and edge volume before allocating stores."
+    },
+    {
+      title: "Load nodes",
+      description: "Read source rows with SPI cursors in graph.build_batch_size batches.",
+      substeps: [
+        "assign node_idx",
+        "write temp node lookup spool",
+        "insert table+primary key into ResolutionIndex",
+        "collect filter and tenant values"
+      ]
+    },
+    {
+      title: "Finalize resolution",
+      description: "Convert build-time resolution entries into a compact sorted binary-search index."
+    },
+    {
+      title: "Resolve edges",
+      description: "Read edge source rows, resolve endpoints through the temp lookup spool, and batch unresolved edges into a temp edge spool."
+    },
+    {
+      title: "Build CSR stores",
+      description: "Stream sorted temp edges into forward CSR and build a reverse CSR for inbound traversal."
+    },
+    {
+      title: "Persist when enabled",
+      description: "Write main.pggraph.tmp, fsync, atomic rename, and write main.pggraph.sync.",
+      isResult: true
+    }
+  ]}
+/>
+
+## Build Memory Guard
+
+Before loading rows, the builder estimates memory with the registered table and
+edge row estimates. If the estimate exceeds `graph.memory_limit_mb`:
+
+| `graph.oom_action` | Behavior |
+|---|---|
+| `error` | Raise `PG001` and stop before allocating the engine |
+| `readonly` | Log a warning, build anyway, and mark the engine read-only |
+
+Use:
+
+```sql
+SELECT * FROM graph.estimate();
+```
+
+to see estimated nodes, edges, memory, configured limit, and whether the graph
+fits the current limit.
+
+## Build Locking
+
+Build and vacuum/maintenance rebuild paths coordinate through a build lock. A
+concurrent build or vacuum reports `PG006`.
+
+```text
+session A: graph.build() holds build/vacuum lock
+session B: graph.build() -> PG006
+session C: graph.vacuum() -> PG006
+```
+
+## Persistence Files
+
+Default paths:
+
+```text
+$PGDATA/graph/main.pggraph
+$PGDATA/graph/main.pggraph.sync
+```
+
+`graph.data_dir` changes the subdirectory under `$PGDATA`.
+
+```sql
+ALTER SYSTEM SET graph.data_dir = 'graph';
+ALTER SYSTEM SET graph.persist_on_build = true;
+ALTER SYSTEM SET graph.auto_load = true;
+SELECT pg_reload_conf();
+```
+
+## Atomic Write Contract
+
+The current code writes the artifact as:
+
+```text
+main.pggraph.tmp
+  write all bytes
+  fsync file
+  rename to main.pggraph
+main.pggraph.sync.tmp
+  write applied_sync_id
+  fsync file
+  rename to main.pggraph.sync
+```
+
+This means a backend should either see the old complete graph file or the new
+complete graph file, not a partial file under the final name.
+
+## Auto-Load
+
+When a query needs a graph and the backend-local engine is empty:
+
+1. `ensure_current_graph()` calls `maybe_auto_load()`.
+2. If `graph.auto_load = false`, it does nothing.
+3. If the artifact does not exist, it does nothing.
+4. If the artifact exists, `load_graph_file()` validates and mmaps it.
+5. The engine is marked built and can answer queries.
+
+<Callout type="warning">
+Corrupt or incompatible artifacts are rejected. A corrupt file raises or logs a
+`PG009`-class loader failure depending on the call site; an incompatible file
+uses `PG011`. Rebuild from source tables with `SELECT * FROM graph.build();`.
+</Callout>
+
+## Status Checks
+
+```sql
+SELECT * FROM graph.status();
+```
+
+Important build and persistence columns:
+
+| Column | Meaning |
+|---|---|
+| `node_count` | Node slots in the active backend engine |
+| `edge_count` | Directed edge rows in the forward CSR store |
+| `memory_used_mb` | Engine memory estimate |
+| `last_build` | Last build timestamp for this backend engine |
+| `last_vacuum` | Last vacuum timestamp for this backend engine |
+| `schema_status` | `current`, `stale`, or `invalid` |
+| `needs_rebuild` | Catalog/schema drift requires rebuild |
+| `invalid_reason` | Human-readable reason for invalid schema state |
+| `read_only` | Engine has entered read-only mode |
+
+## Rebuild Triggers
+
+Rebuild with `graph.build()` when:
+
+| Situation | Why |
+|---|---|
+| Registered tables or edges changed | Catalog fingerprint no longer matches the built base graph |
+| Source topology changed without sync maintenance | CSR edges are immutable in the base graph |
+| Table schema changed | Validation may mark schema state invalid |
+| `.pggraph` format version changed | Old artifact cannot be loaded |
+| Corruption is detected | Loader rejects bad magic, CRC, offset, bounds, or section content |
+
+## Reset
+
+```sql
+SELECT graph.reset();
+```
+
+`graph.reset()` clears the backend-local engine and removes persisted
+`main.pggraph` and `main.pggraph.sync` files. It requires graph-admin privileges.
+
+<Callout type="error">
+`graph.reset()` removes the persisted artifact. The source tables remain
+unchanged, but graph queries need a rebuild or a new persisted artifact before
+they can run again.
+</Callout>

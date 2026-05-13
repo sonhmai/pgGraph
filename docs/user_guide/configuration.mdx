@@ -1,0 +1,122 @@
+# Configuration
+
+All extension settings are PostgreSQL GUCs with the `graph.` prefix. They are
+registered in `_PG_init()` by `graph/src/config.rs`.
+
+## Setting Values
+
+Use session-local settings for experiments:
+
+```sql
+SET graph.default_max_depth = 4;
+SET graph.max_nodes = 50000;
+```
+
+Use database or role settings for application defaults:
+
+```sql
+ALTER DATABASE mydb SET graph.default_search_mode = 'exact';
+ALTER ROLE app_user SET graph.default_hydrate = false;
+```
+
+Use `ALTER SYSTEM` or `postgresql.conf` for `SUSET` operational settings:
+
+```sql
+ALTER SYSTEM SET graph.memory_limit_mb = 4096;
+SELECT pg_reload_conf();
+```
+
+## Query Defaults
+
+| GUC | Type | Default | Context | Range or values | Used by |
+|---|---:|---:|---|---|---|
+| `graph.enabled` | bool | `true` | `USERSET` | `on`, `off` | Query kill switch |
+| `graph.default_max_depth` | int | `5` | `USERSET` | `1` to `100` | `graph.traverse()`, workflow wrappers |
+| `graph.default_search_mode` | string | `contains` | `USERSET` | `contains`, `exact`, `prefix`, `token` | `graph.traverse_search()`, workflow wrappers |
+| `graph.default_case_sensitive` | bool | `false` | `USERSET` | `on`, `off` | Search wrappers |
+| `graph.default_hydrate` | bool | `true` | `USERSET` | `on`, `off` | `graph.traverse_search()` hydrate default |
+| `graph.max_nodes` | int | `100000` | `USERSET` | `1` to `10000000` | Traversal circuit breaker |
+| `graph.max_frontier` | int | `100000` | `USERSET` | `1` to `10000000` | BFS/DFS frontier circuit breaker |
+| `graph.max_exact_path_count` | int | `100000` | `USERSET` | `1` to `10000000` | `graph.path_count_estimate()`, `graph.aggregate()` |
+| `graph.enforce_tenant_scope` | bool | `true` | `USERSET` | `on`, `off` | Tenanted graph queries |
+| `graph.tenant_setting` | string | empty | `USERSET` | Any session GUC name | Tenant fallback |
+| `graph.build_scan_mode` | string | `select` | `USERSET` | `select`; `copy` is reserved | Build scanner |
+
+<Callout type="warning">
+`graph.build_scan_mode = 'copy'` is present as a reserved mode, but the current
+code returns an error because safe server-side COPY hooks are not available
+through the pgrx path used here. Use `select`.
+</Callout>
+
+## Memory And Build Settings
+
+| GUC | Type | Default | Context | Range or values | Effect |
+|---|---:|---:|---|---|---|
+| `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
+| `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
+| `graph.oom_action` | string | `error` | `SUSET` | `error`, `readonly`, `read_only`, `read-only` | Behavior when estimated build memory exceeds the limit |
+
+`graph.build()` estimates memory from registered tables and edges before
+constructing the active engine. With `graph.oom_action = 'error'`, it raises `PG001`.
+With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
+engine read-only.
+
+```sql
+ALTER SYSTEM SET graph.memory_limit_mb = 8192;
+ALTER SYSTEM SET graph.oom_action = 'error';
+SELECT pg_reload_conf();
+```
+
+## Persistence Settings
+
+| GUC | Type | Default | Context | Effect |
+|---|---:|---:|---|---|
+| `graph.persist_on_build` | bool | `true` | `USERSET` | Writes the `.pggraph` artifact after successful build/vacuum/maintenance paths that request persistence |
+| `graph.auto_load` | bool | `true` | `SUSET` | Loads an existing artifact on first query in an empty backend |
+| `graph.data_dir` | string | `graph` | `SUSET` | Subdirectory under `$PGDATA` for `main.pggraph` and `main.pggraph.sync` |
+
+Default artifact path:
+
+```text
+$PGDATA/graph/main.pggraph
+$PGDATA/graph/main.pggraph.sync
+```
+
+## Sync Settings
+
+| GUC | Type | Default | Context | Range or values | Effect |
+|---|---:|---:|---|---|---|
+| `graph.sync_mode` | string | `manual` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
+| `graph.edge_buffer_size` | int | `100000` | `SUSET` | `1000` to `10000000` | Maximum pending edge mutations before read-only mode |
+| `graph.vacuum_interval_secs` | int | `60` | `SUSET` | `5` to `86400` | Reserved maintenance interval setting; not scheduled by current code |
+
+<Callout type="warning">
+`graph.sync_mode = 'wal'` is parsed but reserved. Current code rejects WAL mode
+for active sync operations and asks callers to use `manual` or `trigger`.
+</Callout>
+
+## Recommended Starting Configuration
+
+```conf
+shared_preload_libraries = 'graph'
+
+graph.memory_limit_mb = 4096
+graph.persist_on_build = on
+graph.auto_load = on
+graph.build_batch_size = 10000
+graph.max_nodes = 100000
+graph.max_frontier = 100000
+graph.default_max_depth = 5
+graph.default_search_mode = 'contains'
+graph.default_hydrate = on
+graph.sync_mode = 'manual'
+```
+
+Use lower traversal circuit breakers on multi-tenant OLTP primaries, and raise
+them only for trusted administrative or analytical roles.
+
+<Callout type="info">
+`graph.default_hydrate` currently affects `graph.traverse_search()` when its
+`hydrate` argument is omitted. Primitive `graph.search()` and `graph.traverse()`
+default their own `hydrate` arguments to `true`.
+</Callout>

@@ -1,0 +1,263 @@
+# Quickstart
+
+This guide shows the fastest ways to try pgGraph in a disposable PostgreSQL 17
+database, then walks through the SQL that creates a small graph and runs search,
+traversal, and shortest-path queries.
+
+Use this page for local evaluation. For in-depth installation, schema modeling,
+and query semantics, use the linked user guide pages instead of treating this as
+the full manual.
+
+## Prerequisites
+
+You need Docker or Docker Desktop installed and running:
+
+| Platform | Requirement |
+|---|---|
+| macOS | Docker Desktop |
+| Windows | Docker Desktop with WSL2 enabled; run commands from WSL2 or Git Bash |
+| Linux | Docker Engine and the Docker Compose plugin |
+
+The quickstart scripts are Bash scripts. They work from a macOS/Linux terminal,
+or from WSL2/Git Bash on Windows. They are not native PowerShell or Command
+Prompt scripts.
+
+<Callout type="info">
+  The root Docker image currently runs PostgreSQL 17. Package scripts can build
+  extension artifacts for PostgreSQL 13 through 18, but the PostgreSQL major
+  version of the extension package must match the target server. See
+  [Installation](/user_guide/installation) for source builds, pgrx setup,
+  package builds, and installation into existing servers.
+</Callout>
+
+## Get The Repository
+
+Clone pgGraph and move into the repository:
+
+```bash
+git clone https://github.com/evokoa/pggraph.git
+cd pggraph
+```
+
+## Fastest Path: Quickstart Script
+
+From the repository root, run the included script:
+
+```bash
+scripts/quickstart.sh
+```
+
+The default command builds and starts the Docker-backed PostgreSQL database,
+creates two ordinary PostgreSQL tables, discovers their foreign key
+relationship, builds the graph, and prints example query results.
+
+The script also has focused subcommands:
+
+| Command | What it does |
+|---|---|
+| `scripts/quickstart.sh` | Run the full demo. Same as `scripts/quickstart.sh demo`. |
+| `scripts/quickstart.sh setup` | Build and start PostgreSQL with pgGraph installed, without creating demo tables. |
+| `scripts/quickstart.sh psql` | Build and start PostgreSQL, create and build the demo graph, then open `psql`. |
+| `scripts/quickstart.sh clean` | Stop the Compose database and remove its disposable volume. |
+
+Use `setup` when you want an empty scratch database with pgGraph installed. Use
+`psql` when you want the sample graph created for interactive exploration.
+
+## Other Local Paths
+
+| Path | Use when | Start here |
+|---|---|---|
+| Quickstart script | You want the fastest local trial | `scripts/quickstart.sh` |
+| Docker Compose scratch database | You want a disposable pgGraph database and will run SQL yourself | `docker compose up --build -d` |
+| Streamlit playground | You want a browser SQL inspector with a real dataset | [Playground](/user_guide/playground) |
+| Existing PostgreSQL Docker container | You already have a container to install into | [Installation](/user_guide/installation#install-into-an-existing-postgresql-container) |
+| Source build with pgrx | You are developing pgGraph or building against local PostgreSQL headers | [Installation](/user_guide/installation) |
+
+## Manual Docker Compose Flow
+
+From the repository root:
+
+```bash
+docker compose up --build -d
+docker compose exec postgres psql -U postgres -d graph
+```
+
+The Compose service builds the root Docker image and starts PostgreSQL with
+pgGraph available. The rest of this page assumes you are inside that `psql`
+session.
+
+## Create A Small Graph
+
+Paste this whole block into `psql`:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS graph;
+SELECT graph.reset();
+
+DROP TABLE IF EXISTS people CASCADE;
+DROP TABLE IF EXISTS companies CASCADE;
+
+CREATE TABLE companies (
+  id text PRIMARY KEY,
+  name text NOT NULL
+);
+
+CREATE TABLE people (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  company_id text REFERENCES companies(id)
+);
+
+INSERT INTO companies VALUES
+  ('c1', 'Acme Bank'),
+  ('c2', 'Northwind Trading');
+
+INSERT INTO people VALUES
+  ('p1', 'Alice', 'c1'),
+  ('p2', 'Bob', 'c1'),
+  ('p3', 'Carol', 'c2');
+```
+
+## Register And Build
+
+Use auto-discovery for schemas with primary keys and foreign keys:
+
+```sql
+SELECT * FROM graph.auto_discover('public');
+```
+
+`graph.auto_discover('public')` registers discovered source tables, discovers
+foreign keys between them, and builds the graph.
+
+If you want to limit discovery to specific tables, use
+`graph.auto_discover_tables()`:
+
+```sql
+SELECT * FROM graph.auto_discover_tables(
+  ARRAY['public.companies'::regclass, 'public.people'::regclass]
+);
+```
+
+Confirm that pgGraph loaded nodes and edges:
+
+```sql
+SELECT node_count, edge_count, edge_types
+FROM graph.status();
+```
+
+You should see three nodes and at least one edge type.
+
+For composite keys, explicit labels, edge direction, weights, tenant columns,
+filter columns, and other modeling details, see
+[Schema Registration](/user_guide/schema-registration).
+
+## Query
+
+Search registered source-table columns:
+
+```sql
+SELECT node_table_name, node_id, node
+FROM graph.search(
+  'name',
+  'Alice',
+  table_filter := 'public.people'::regclass,
+  mode := 'exact'
+);
+```
+
+Traverse two hops from Alice:
+
+```sql
+SELECT depth, node_table_name, node_id, edge_path
+FROM graph.traverse(
+  'public.people'::regclass,
+  'p1',
+  2,
+  hydrate := false
+);
+```
+
+Find the shortest path from Alice to Acme Bank:
+
+```sql
+SELECT step, node_table_name, node_id, edge_label
+FROM graph.shortest_path(
+  'public.people'::regclass,
+  'p1',
+  'public.companies'::regclass,
+  'c1',
+  hydrate := false
+);
+```
+
+The examples above return compact output. Remove `hydrate := false` when you
+want hydrated node JSON in traversal and path results.
+
+For the full query surface, including traversal specs, filters, workflow
+wrappers, path reconstruction, weighted shortest paths, and connected
+components, see [Querying](/user_guide/querying) and the
+[SQL API Reference](/user_guide/api-reference).
+
+## Manual Registration
+
+Auto-discovery is the fastest start for primary-key and foreign-key schemas.
+Manual registration gives more control over labels, direction, weights, tenant
+columns, and search columns. This small example mirrors the graph above:
+
+```sql
+SELECT graph.reset();
+
+SELECT graph.add_table(
+  'public.people'::regclass,
+  id_column := 'id',
+  columns := ARRAY['name']
+);
+
+SELECT graph.add_table(
+  'public.companies'::regclass,
+  id_column := 'id',
+  columns := ARRAY['name']
+);
+
+SELECT graph.add_edge(
+  from_table := 'public.people'::regclass,
+  from_column := 'company_id',
+  to_table := 'public.companies'::regclass,
+  to_column := 'id',
+  label := 'works_at',
+  bidirectional := true
+);
+
+SELECT * FROM graph.build();
+```
+
+For production schemas, prefer the full
+[Schema Registration](/user_guide/schema-registration) guide before finalizing
+labels, weights, filters, sync behavior, or tenant boundaries.
+
+## Clean Up
+
+Exit `psql`, then stop and remove the disposable database:
+
+```bash
+docker compose down -v
+```
+
+If you used the quickstart script, the equivalent cleanup command is:
+
+```bash
+scripts/quickstart.sh clean
+```
+
+## Next Steps
+
+- [Playground](/user_guide/playground) to open a SQL inspector with a prepared
+  real dataset.
+- [Installation](/user_guide/installation) for source builds, pgrx, and
+  container installation.
+- [Schema Registration](/user_guide/schema-registration) to model tables,
+  edges, weights, labels, filters, and tenants.
+- [Querying](/user_guide/querying) for search, traversal, workflow wrappers,
+  paths, filters, and components.
+- [Security](/user_guide/administration-and-security) before exposing graph
+  functions to application roles.

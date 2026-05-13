@@ -1,0 +1,235 @@
+# Scripts
+
+This page explains what each repository script is for, when to run it, and how
+it fits into the release and maintenance workflow. The short index lives at
+[`scripts/scripts.md`](../../scripts/scripts.md).
+
+## Root Script Groups
+
+Root scripts live in `scripts/` and are intended to be run from the repository
+root unless noted otherwise.
+
+| Script | Use when | What it does |
+|---|---|---|
+| `check_doc_references.py` | Editing docs or moving files | Validates local Markdown/MDX references so docs do not point at missing local files. |
+| `check_docs_drift.sh` | Before PRs and releases | Runs the aggregate documentation drift suite: local references, SQL API/GUC drift, and Rust source-map drift. |
+| `check_rust_doc_map_drift.py` | Editing contributor internals docs | Checks that Rust source files and contributor documentation stay aligned. Supports `--list` for inventory inspection. |
+| `check_sql_api_drift.py` | Editing SQL APIs, GUCs, or API docs | Compares implemented SQL-facing functions and GUCs against documented API references. Supports `--list-implemented`. |
+| `clean_generated_artifacts.sh` | Before packaging, archiving, or release prep | Deletes generated local artifacts that should not ship: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. Has `--dry-run`. |
+| `inspect_pggraph_artifact.py` | Debugging persistence or release evidence | Reads a `.pggraph` artifact and prints section metadata as JSON. Used by synthetic release evidence workflows when an artifact is available. |
+| `build_docker_pggraph_package.sh` | Building extension artifacts with Docker | Builds `graph-pg<major>/` package directories for one PostgreSQL major or all supported majors. |
+| `copy_pggraph_package_to_docker_postgres.sh` | Installing a prebuilt package into a running container | Copies `graph.control`, `graph--<version>.sql`, and `graph.so` into a running PostgreSQL container, then optionally creates the extension. |
+| `install_into_docker_postgres.sh` | One-command install into an existing container | Builds a Docker package and immediately copies it into one running PostgreSQL container. This is a wrapper around the two Docker package scripts. |
+
+## Documentation Scripts
+
+Use the aggregate check first:
+
+```bash
+./scripts/check_docs_drift.sh
+```
+
+It runs:
+
+```bash
+./scripts/check_doc_references.py
+./scripts/check_sql_api_drift.py
+./scripts/check_rust_doc_map_drift.py
+```
+
+Run the underlying Python scripts directly when you need targeted diagnostics or
+inventory output:
+
+```bash
+python3 scripts/check_sql_api_drift.py --list-implemented
+python3 scripts/check_rust_doc_map_drift.py --list
+```
+
+Use these checks whenever you change:
+
+| Change | Script |
+|---|---|
+| SQL function signatures, GUCs, or API docs | `check_sql_api_drift.py` |
+| Contributor docs that map files/modules | `check_rust_doc_map_drift.py` |
+| Markdown/MDX links or moved docs | `check_doc_references.py` |
+| Release docs or broad documentation edits | `check_docs_drift.sh` |
+
+## Cleanup Script
+
+`clean_generated_artifacts.sh` removes only generated local artifacts:
+
+```bash
+./scripts/clean_generated_artifacts.sh --dry-run
+./scripts/clean_generated_artifacts.sh
+```
+
+It deletes:
+
+| Path | Reason |
+|---|---|
+| `graph/target/` | Cargo/pgrx build output |
+| `graph/fuzz/target/` | Fuzz build output |
+| `.DS_Store` files | macOS Finder metadata |
+
+It intentionally keeps test and release assets such as `graph/fuzz/corpus/`,
+`graph/fuzz/fuzz_targets/`, `graph/proptest-regressions/lib.txt`,
+`graph/tests/heavy/`, and `graph/src/pg_test.rs`.
+
+## Docker Packaging Scripts
+
+The Docker scripts are split into build and install phases so maintainers can
+build once and install the same package into multiple containers.
+
+### Build Package Artifacts
+
+```bash
+./scripts/build_docker_pggraph_package.sh 17 target/docker-packages
+```
+
+This builds the root `Dockerfile` builder stage for PostgreSQL 17 and copies the
+package directory to:
+
+```text
+target/docker-packages/graph-pg17/
+```
+
+To build all supported PostgreSQL majors:
+
+```bash
+./scripts/build_docker_pggraph_package.sh all target/docker-packages
+```
+
+Control the all-version set with `PG_VERSIONS`:
+
+```bash
+PG_VERSIONS="16 17 18" ./scripts/build_docker_pggraph_package.sh all
+```
+
+### Copy Package Into A Container
+
+```bash
+./scripts/copy_pggraph_package_to_docker_postgres.sh \
+  my-postgres target/docker-packages/graph-pg17 17 appdb postgres
+```
+
+The script verifies the package shape and the target container state, then
+copies:
+
+| Source | Target |
+|---|---|
+| `usr/share/postgresql/<major>/extension/.` | `/usr/share/postgresql/<major>/extension/` |
+| `usr/lib/postgresql/<major>/lib/graph.so` | `/usr/lib/postgresql/<major>/lib/graph.so` |
+
+By default it also runs:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS graph;
+```
+
+Set `SKIP_CREATE_EXTENSION=1` when you only want to copy files:
+
+```bash
+SKIP_CREATE_EXTENSION=1 ./scripts/copy_pggraph_package_to_docker_postgres.sh \
+  my-postgres target/docker-packages/graph-pg17
+```
+
+### One-Shot Container Install
+
+```bash
+./scripts/install_into_docker_postgres.sh my-postgres 17 appdb postgres
+```
+
+This wrapper builds a temporary package for the requested PostgreSQL major, then
+calls `copy_pggraph_package_to_docker_postgres.sh`. Use it for one-off local
+installs. Use the split build/copy flow when installing into multiple
+containers.
+
+The PostgreSQL major must match the target container. A package built for
+PostgreSQL 17 should not be copied into a PostgreSQL 16 container.
+
+## Artifact Inspection
+
+Use `inspect_pggraph_artifact.py` when debugging persistence or release evidence
+output:
+
+```bash
+python3 scripts/inspect_pggraph_artifact.py /path/to/main.pggraph
+```
+
+The script prints JSON with section sizes and offsets. It does not validate the
+full graph semantics; use persistence tests and release smoke scripts for that.
+
+## Heavy Script Groups
+
+Heavy scripts live in `graph/tests/heavy/` and are usually run from `graph/`.
+They cover operational behavior that pgrx tests do not model well: client/server
+SQLSTATEs, Docker images, package installation, backup/restore, upgrade,
+concurrency, memory, and synthetic release evidence.
+
+| Script | Use when | What it does |
+|---|---|---|
+| `run_release_gate.sh` | Final pre-release validation | Aggregates static checks, docs, Rust tests, pgrx tests, cargo-deny, fuzz compile, package validation, install smoke, metadata audit, boundary tests, backup/restore, lock tests, concurrency, synthetic smoke, and pgbench. |
+| `run_pg_matrix.sh` | Local PostgreSQL-major compatibility | Runs Rust and optionally pgrx SQL tests for PostgreSQL 13 through 18 using local `pg_config` binaries. |
+| `run_pg_matrix_docker.sh` | Matrix validation without local headers | Builds the Docker matrix image and runs supported PostgreSQL-major checks in Docker. |
+| `docker_smoke.sh` | Top-level Dockerfile check | Builds the root Docker image, starts Postgres, creates the extension, and runs a small graph workflow. |
+| `package_validate.sh` | Package artifact check | Runs `cargo pgrx package` and verifies control, SQL, shared library, and release companion files. |
+| `fresh_install_smoke.sh` | Installed extension smoke | Installs pgGraph into a local PostgreSQL major and runs a quick extension workflow. |
+| `function_metadata_audit.sh` | SQL metadata contract check | Audits SQL function volatility, security, cost, rows, and parallel-safety metadata. |
+| `run_sqlstate_acl_boundary.sh` | Client-visible errors and ACLs | Runs `sqlstate_acl_boundary.sql` through `psql` and asserts SQLSTATE/role behavior at the client boundary. |
+| `run_pgbench_sync.sh` | Trigger sync stress | Uses `pgbench_sync.sql` to drive concurrent DML and validate explicit sync apply behavior. |
+| `backup_restore_validate.sh` | Dump/restore behavior | Validates source tables, graph catalog state, sync state, and persisted graph behavior across backup and restore. |
+| `pg_upgrade_validate.sh` | Upgrade compatibility | Runs `pg_upgrade --check` for a database containing pgGraph. |
+| `crash_recovery.sh` | Disposable-cluster crash behavior | Kills a disposable postmaster, restarts it, checks persisted graph reload, and verifies corrupt artifact rejection. |
+| `background_job_lock_regression.sh` | Background job lock safety | Validates build/maintenance lock and failure-state behavior. |
+| `build_lock_regression.sh` | Build/vacuum conflict safety | Validates lock conflicts and persisted artifact behavior around build and vacuum. |
+| `concurrency_stress.sh` | Mixed operational concurrency | Exercises build, sync, vacuum, maintenance, and traversal under concurrent activity. |
+| `synthetic_release_smoke.sh` | Deterministic release fixture | Builds and queries a synthetic relational graph through SQL for release-gate evidence. |
+| `run_synthetic_release_evidence.sh` | Synthetic evidence capture | Runs synthetic release smoke, captures metadata, and inspects `.pggraph` artifacts when available. |
+| `measure_build_rss.sh` | Build memory evidence | Measures peak backend RSS during graph build. |
+| `measure_mmap_pss.sh` | mmap sharing evidence | Linux-only proportional set size check for mmap sharing across backends. |
+| `run_memory_sanitizers.sh` | Memory/FFI boundary checks | Runs pgrx tests and optional ASan/Valgrind checks where toolchains support them. |
+
+Most heavy scripts accept `PG_VERSION_FEATURE=pg17`. Many also accept `DBNAME`
+or other disposable database names. Scripts that kill, upgrade, or inspect
+PostgreSQL clusters require disposable `PGDATA` directories; do not point them
+at production clusters.
+
+## Common Workflows
+
+Fast pre-PR check:
+
+```bash
+./scripts/check_docs_drift.sh
+cd graph
+cargo fmt --check
+cargo test --features pg17
+cargo pgrx test pg17
+```
+
+Docker install into an existing container:
+
+```bash
+./scripts/install_into_docker_postgres.sh my-postgres 17 appdb postgres
+```
+
+Build once, install many:
+
+```bash
+./scripts/build_docker_pggraph_package.sh 17 target/docker-packages
+./scripts/copy_pggraph_package_to_docker_postgres.sh \
+  my-postgres target/docker-packages/graph-pg17 17 appdb postgres
+```
+
+Release gate:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+PostgreSQL-major matrix:
+
+```bash
+cd graph
+./tests/heavy/run_pg_matrix_docker.sh
+```

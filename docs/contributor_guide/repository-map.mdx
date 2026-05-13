@@ -1,0 +1,109 @@
+# Repository Map
+
+The `graph/` directory is the extension crate. Production code is under
+`graph/src`; SQL tests, heavy release checks, fuzz targets, and benchmarks live
+beside it in the crate tree.
+
+## Top-Level Files
+
+| Path | Purpose |
+|---|---|
+| `graph/Cargo.toml` | Crate metadata, pgrx features for PostgreSQL 13-18, dependency and lint policy |
+| `graph/Cargo.lock` | Locked dependency set |
+| `graph/rust-toolchain.toml` | Rust toolchain pin |
+| `graph/graph.control` | PostgreSQL extension control file |
+| `graph/sql/bootstrap.sql` | SQL bootstrap objects, durable catalog tables, privilege hardening |
+| `graph/deny.toml` | Dependency audit policy |
+
+## Source Modules
+
+| Module | Responsibility |
+|---|---|
+| `lib.rs` | pgrx module magic, `_PG_init()`, GUC registration, SQL facade includes, thread-local engine |
+| `config.rs` | PostgreSQL GUC declarations, parsing, defaults, and contexts |
+| `safety.rs` | `GraphError`, SQLSTATE mapping, PostgreSQL error emission |
+| `acl.rs` | Source table privilege checks |
+| `types.rs` | Shared domain types, traversal/search enums, filter operations, status rows |
+| `api_types.rs` | SQL-facing row aliases and request structures |
+| `engine.rs` | Store orchestration, resolution dispatch, traversal, paths, status |
+| `node_store.rs` | Node SoA store with owned and mmap backings |
+| `edge_store.rs` | CSR edge store with owned and mmap backings |
+| `resolution_index.rs` | Build-time and finalized table+PK lookup index |
+| `filter_index.rs` | Typed filter column encoding and hybrid dense/sparse storage |
+| `builder.rs` | SPI cursor build pipeline and temp spool loading |
+| `catalog.rs` | Catalog module boundary for registration reads, writes, and validation |
+| `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
+| `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
+| `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
+| `persistence.rs` | `.pggraph` writer/loader, CRC, bounds checks, mmap setup |
+| `bfs.rs` | BFS and DFS traversal hot loops |
+| `path_finder.rs` | Shortest path and weighted shortest path algorithms |
+| `connected_components.rs` | Union-find connected component analysis |
+| `discover.rs` | Schema/FK discovery |
+| `sync.rs` | Trigger SQL generation and sync table creation |
+| `sql_sync.rs` | Durable sync log reading and apply logic |
+| `sql_build.rs` | Build/vacuum orchestration and locks |
+| `sql_jobs.rs` | Durable background build/maintenance jobs |
+| `sql_search.rs` | Source-table search SQL and match verification |
+| `sql_traversal.rs` | Traversal request validation, formatting, pagination |
+| `sql_filters.rs` | Structured filter parsing, typed operator conversion, hydration filtering |
+| `sql_hydration.rs` | Source-row hydration |
+| `sql_aggregation.rs` | Strict traversal specs, path count, and aggregates |
+| `quote.rs` | SQL identifier/literal quoting helpers |
+
+## SQL Facade Includes
+
+`lib.rs` includes files from `src/sql_facade/` so pgrx sees the SQL functions in
+the extension crate module:
+
+| File | SQL-facing responsibility |
+|---|---|
+| `admin.rs` | Status, build, registration, filter helpers, sync, vacuum, maintenance |
+| `discovery.rs` | Auto-discovery wrappers |
+| `traversal.rs` | Traversal, shortest paths, aggregation entrypoints |
+| `search.rs` | Search and search-then-traverse entrypoints |
+| `workflow.rs` | App-friendly workflow wrappers |
+| `components.rs` | Connected component entrypoints |
+| `runtime.rs` | Reset, auto-load, current graph validation |
+
+Contributor changes to SQL behavior usually touch one facade file plus one or
+more supporting implementation modules.
+
+## Test Layout
+
+| Path | Scope |
+|---|---|
+| `src/unit_tests.rs` and module-local `#[cfg(test)]` blocks | Pure Rust invariants |
+| `src/pg_tests/*.rs` | pgrx SQL integration tests |
+| `tests/pg_regress/` | pg_regress setup smoke |
+| `tests/heavy/` | external SQLSTATE/ACL, crash, stress, packaging, backup/restore, matrix, release gates |
+| `fuzz/fuzz_targets/` | fuzz targets for file and parser boundaries |
+| `benches/` | Criterion internals benchmarks |
+
+See [SQL Tests](./sql-tests) for SQL test coverage and
+[Benchmarking](./benchmarking) for benchmark usage and interpretation.
+
+## Feature Flags
+
+| Feature | Purpose |
+|---|---|
+| `pg13` to `pg18` | Select pgrx PostgreSQL major |
+| `pg_test` | Enable pgrx SQL test modules |
+| `fuzzing` | Export fuzz support wrappers |
+| `development` | Enable hidden development/test helper functions and extra internals |
+
+Default feature: `pg17`.
+
+## Dependency Roles
+
+| Dependency | Use |
+|---|---|
+| `pgrx` | PostgreSQL extension bindings |
+| `roaring` | Visited sets, tenant bitmaps, filter bitmaps |
+| `bitvec` | Packed active-node bits |
+| `xxhash-rust` | Hashing support |
+| `bincode` | Persisted variable-size sections |
+| `crc32fast` | `.pggraph` file integrity |
+| `thiserror` | Error type derive |
+| `memmap2` | mmap-backed artifact loading |
+| `serde`, `serde_json` | JSONB parsing and persisted filter index |

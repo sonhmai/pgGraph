@@ -1,0 +1,134 @@
+# Persistence Format
+
+The `.pggraph` file is the launch artifact for fast backend startup. It stores
+fixed-width graph arrays in mmap-friendly sections and variable-size structures
+as length-prefixed bincode payloads.
+
+## File Layout
+
+```text
+Header, 128 bytes
+  magic              4 bytes   "PGGH"
+  version            u32       current version = 1
+  flags              u32       currently 0
+  node_count         u32
+  edge_count         u32
+  section_offsets    11 * u64
+  crc32              u32       CRC over bytes after header
+
+Section 0   active bits                 ceil(node_count / 8) bytes
+Section 1   table_oids                  node_count * 4
+Section 2   edge_offsets                (node_count + 1) * 4
+Section 3   targets                     edge_count * 4
+Section 4   type_ids                    edge_count
+Section 5   weights                     empty or edge_count * 4
+Section 6   resolution index            4 + entry_count * 16
+Section 7   primary key offsets         (node_count + 1) * 8
+Section 8   primary key bytes           UTF-8
+Section 9   filter index                u32 length + bincode payload
+Section 10  edge type registry          u32 length + bincode payload
+```
+
+## Write Path
+
+`write_graph_file()`:
+
+1. Creates parent directory.
+2. Reserves a zeroed 128-byte header.
+3. Appends sections in order.
+4. Aligns fixed-width sections as needed.
+5. Serializes `FilterIndex` and edge type registry.
+6. Computes CRC32 over the payload after the header.
+7. Writes header fields.
+8. Writes to `<path>.tmp`.
+9. `sync_all()`.
+10. Atomically renames to final path.
+11. Writes the sync checkpoint through a temp file and atomic rename.
+
+SQL build and vacuum orchestration treats requested persistence as required.
+After writing the artifact, it immediately reloads through `load_graph_file()`;
+write or reload failures propagate as build/vacuum errors.
+
+## Load Path
+
+`load_graph_file()`:
+
+```text
+open file
+mmap read-only
+validate header size
+validate magic
+validate version
+read counts and offsets
+validate CRC
+validate section layout
+validate CSR and primary-key offset content
+construct mmap-backed NodeStore arrays
+construct mmap-backed forward EdgeStore CSR
+keep ResolutionIndex section mmap-backed
+deserialize FilterIndex into backend heap
+deserialize edge_type_registry into backend heap
+build reverse EdgeStore CSR into backend heap
+set resolution mode to MmapBacked
+store mmap in Engine._mmap
+read sync checkpoint
+return Engine
+```
+
+<Callout type="info">
+The persisted forward graph arrays and resolution section are mmap-backed after
+load. The reverse CSR is not mmap-backed today; it is derived into backend-local
+heap. The bincode sections, including `FilterIndex` and `edge_type_registry`,
+are also deserialized into backend-local heap.
+</Callout>
+
+## Validation Boundaries
+
+Loader validation rejects:
+
+| Check | Failure reason |
+|---|---|
+| File smaller than header | Cannot read fixed header |
+| Magic mismatch | Not a graph file |
+| Version mismatch | Incompatible format |
+| CRC mismatch | Corrupt payload |
+| Section offsets out of order or out of file | Invalid layout |
+| Required alignment missing | Unsafe typed pointer would be invalid |
+| Required section too small | Out-of-bounds typed reads |
+| Weights section wrong size | Parallel arrays would diverge |
+| Resolution section malformed | Lookup index invalid |
+| Length-prefixed payload exceeds section | Bincode would read outside section |
+| CSR offsets not monotonic | Neighbor slices invalid |
+| Final CSR offset not equal to edge count | Missing or extra edges |
+| Target node index out of range | Traversal could index invalid node |
+| Primary-key offsets not monotonic or out of bytes | Invalid UTF-8 slice bounds |
+| Edge registry index 0 not empty | Root edge type invariant broken |
+
+## Mmap Lifetime
+
+The `Engine` owns the `Mmap` in `_mmap`. Mmap-backed stores hold raw pointers
+into that mapping. This is why the mmap must be installed in the engine before
+the returned engine escapes the loader.
+
+```text
+Engine
+  _mmap owns bytes
+  node_store has pointers into _mmap
+  forward edge_store has pointers into _mmap
+  resolution mode references _mmap section
+  reverse_edge_store owns heap CSR arrays
+  filter_index owns heap data deserialized from bincode
+  edge_type_registry owns heap strings deserialized from bincode
+```
+
+## Compatibility Rules
+
+Any change to fixed section ordering, binary representation, header semantics,
+or bincode payload interpretation should bump the format version and provide a
+clear regeneration path. The current loader rejects non-current versions with an
+incompatible-version error instructing users to rebuild.
+
+## Fuzz Surface
+
+The fuzz target `fuzz/fuzz_targets/load_graph_file.rs` exercises the loader.
+Keep parser and loader checks total and non-panicking for arbitrary bytes.

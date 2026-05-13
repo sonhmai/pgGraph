@@ -1,0 +1,181 @@
+# Memory Model
+
+The engine is designed around cache-friendly owned arrays during build and
+mmap-backed fixed-width arrays after persistence. PostgreSQL backends do not
+share Rust heap memory. After auto-load, they share the fixed-width persisted
+base graph pages through the operating system page cache, while derived and
+variable-size structures remain per-backend heap allocations.
+
+## Backend Ownership
+
+<SharedMemoryDiagram>
+  <SharedMemoryBackends title="Engine struct">
+    - `node_store` -> mmap pointers
+    - `edge_store` -> mmap pointers
+    - `resolution_store` -> mmap section
+    - `_mmap handle`
+  </SharedMemoryBackends>
+  <SharedMemoryTarget title="main.pggraph">
+    - OS page cache pages
+  </SharedMemoryTarget>
+  <SharedMemoryHeap title="Per-backend heap after load">
+    - **FilterIndex** — bincode section deserialized per backend
+    - **edge_type_registry** — bincode section deserialized per backend
+    - **reverse_edge_store** — derived owned CSR for inbound traversal
+    - **resolution_delta** — post-load sync inserts
+    - **edge_buffer** — post-load sync edge overlays
+    - **tenant_membership** — backend-local state
+  </SharedMemoryHeap>
+</SharedMemoryDiagram>
+
+<Callout type="info">
+The forward base graph is not copied wholesale into each connection's private
+heap after mmap load. Node arrays, forward CSR arrays, primary-key bytes, and
+resolution bytes are mmap-backed. The reverse CSR and bincode sections are
+currently per-backend heap structures.
+</Callout>
+
+## NodeStore
+
+`NodeStore` uses a struct-of-arrays layout:
+
+<StructDiagram title="NodeStore" fields={[
+  { name: 'is_active', type: 'BitVec or [u8]', desc: 'packed tombstone bits; hot path' },
+  { name: 'table_oids', type: 'Vec<u32> or [u32]', desc: 'source table OID by node index' },
+  { name: 'primary_keys', type: 'Vec<String> or offsets+bytes', desc: 'source primary key by node index' }
+]} />
+
+Owned mode supports mutation. Mmap mode is read-only and uses validated raw
+pointers into `Engine._mmap`. In the persisted format, active bits, table OIDs,
+primary-key offsets, and primary-key bytes are all mmap-backed.
+
+## EdgeStore
+
+`EdgeStore` uses compressed sparse row:
+
+<StructDiagram title="EdgeStore" fields={[
+  { name: 'edge_offsets', type: 'Vec<u32> or [u32]', desc: 'length node_count + 1; offsets into target arrays' },
+  { name: 'targets', type: 'Vec<u32> or [u32]', desc: 'neighbor node indices' },
+  { name: 'type_ids', type: 'Vec<u8> or [u8]', desc: 'parallel edge label IDs' },
+  { name: 'weights', type: 'Vec<u32> or [u32]', desc: 'optional parallel edge weights' }
+]} />
+
+CSR neighbor lookup:
+
+```text
+node i neighbors = targets[edge_offsets[i]..edge_offsets[i + 1]]
+node i labels    = type_ids[edge_offsets[i]..edge_offsets[i + 1]]
+node i weights   = weights[edge_offsets[i]..edge_offsets[i + 1]]
+```
+
+CSR invariants:
+
+| Invariant | Enforced by |
+|---|---|
+| `edge_offsets.len() == node_count + 1` | Builders and loader validation |
+| `edge_offsets[0] == 0` | Loader validation |
+| Offsets are monotonic | Loader validation |
+| Final offset equals `edge_count` | Loader validation |
+| Targets are less than `node_count` | Builders and loader validation |
+| `type_ids.len() == targets.len()` | Builders and section sizes |
+| `weights` empty or length `edge_count` | Builders and loader validation |
+
+## Loaded Artifact Memory Split
+
+| Structure | After `load_graph_file()` |
+|---|---|
+| `NodeStore.is_active` | mmap-backed |
+| `NodeStore.table_oids` | mmap-backed |
+| `NodeStore.primary_key_offsets` and bytes | mmap-backed |
+| Forward `EdgeStore.edge_offsets` | mmap-backed |
+| Forward `EdgeStore.targets` | mmap-backed |
+| Forward `EdgeStore.type_ids` | mmap-backed |
+| Forward `EdgeStore.weights` | mmap-backed when present |
+| `ResolutionIndex` | mmap-backed section |
+| `FilterIndex` | bincode payload deserialized into backend heap |
+| `edge_type_registry` | bincode payload deserialized into backend heap |
+| `reverse_edge_store` | built as owned heap from forward edges |
+| Sync overlays | backend-local heap |
+
+## FilterIndex Storage
+
+`FilterIndex` stores registered traversal filter columns by internal `node_idx`.
+It chooses dense or sparse storage based on build-time populated count.
+
+```text
+FilterIndex
+  columns[]
+  storage[]
+    Dense values + present bitmap
+    SparseBool true/false/present bitmaps
+    SparseLookup value -> bitmap
+    SparseOrdered sorted (node_idx, value)
+  text dictionaries[]
+```
+
+Sparse threshold:
+
+```text
+populated_count * 100 < node_count * 15
+```
+
+That is, under 15 percent populated uses sparse storage.
+
+## ResolutionIndex
+
+The resolution index maps:
+
+```text
+(table_oid, primary_key) -> node_idx
+```
+
+Build mode accumulates compact entries. Finalization serializes a sorted array.
+Mmap mode performs binary search directly over the persisted bytes.
+
+## Memory Estimate
+
+`Engine::estimated_memory_used_mb()` estimates:
+
+```text
+nodes * (active bit + table_oid + average primary key)
++ forward CSR arrays
++ reverse CSR arrays
++ resolution index
++ FilterIndex heap
++ edge overlay buffer
+```
+
+`graph.estimate()` and build preflight use a separate conservative estimate
+from PostgreSQL row estimates before allocating the engine.
+
+When the engine is loaded from a `.pggraph` file, this estimate is a logical size
+estimate, not a per-backend private RSS formula. Mmap-backed forward arrays and
+resolution bytes are shared physically by the OS page cache across backends;
+reverse CSR, filter index, registry, and overlay structures remain per-backend
+heap.
+
+## Mmap Materialization For Sync
+
+Mmap-backed stores are immutable. When sync needs to mutate nodes, the engine
+materializes the mmap node store into owned arrays:
+
+<PipelineDiagram>
+  <PipelineStep title="mmap NodeStore" />
+  <PipelineStep arrowLabel="first node mutation" title="owned NodeStore copy" />
+</PipelineDiagram>
+
+Edge mutations do not rewrite CSR. They live in `edge_buffer` overlays until a
+maintenance rebuild.
+
+## Unsafe Boundary
+
+Raw mmap pointer metadata is only constructed by validated constructors:
+
+| Type | Validation |
+|---|---|
+| `MmapNodeArrays::new` | pointer presence, active byte count, `u32`/`u64` alignment |
+| `MmapEdgeArrays::new` | pointer presence, optional weights pointer, `u32` alignment |
+| `validate_section_layout` | section ordering, bounds, sizes, alignment, CRC, CSR content, PK offsets |
+
+Every unsafe raw slice or pointer dereference has a local `// SAFETY:` comment
+explaining the proof at the call site.

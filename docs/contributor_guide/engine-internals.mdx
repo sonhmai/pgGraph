@@ -1,0 +1,118 @@
+# Engine Internals
+
+`Engine` owns the backend-local active graph and all indexes used by traversal,
+search composition, sync overlays, status reporting, and persistence.
+
+## Engine Fields
+
+<StructDiagram title="Engine" fields={[
+  { name: 'node_store', type: 'NodeStore', desc: 'node metadata, active bits, table OIDs, primary keys' },
+  { name: 'edge_store', type: 'EdgeStore', desc: 'forward CSR adjacency' },
+  { name: 'reverse_edge_store', type: 'EdgeStore', desc: 'inbound CSR built from forward edges' },
+  { name: 'filter_index', type: 'FilterIndex', desc: 'typed filter columns keyed by node index' },
+  { name: 'edge_type_registry', type: 'Vec<String>', desc: 'edge label table; index 0 is reserved for untyped root edges' },
+  { name: 'resolution_store', type: 'ResolutionStore', desc: 'builder, finalized bytes, or mmap-backed lookup backend' },
+  { name: 'resolution_delta', type: 'ResolutionIndexBuilder', desc: 'post-build inserts that cannot mutate finalized/mmap index' },
+  { name: '_mmap', type: 'Option<Mmap>', desc: 'owns mmap lifetime for mmap-backed stores' },
+  { name: 'edge_buffer', type: 'Vec<EdgeMutation>', desc: 'post-build edge insert/delete overlay' },
+  { name: 'tenant_membership', type: 'HashMap<String, RoaringBitmap>', desc: 'tenant to allowed node set' }
+]} />
+
+## Resolution Backends
+
+`ResolutionStore` has three modes:
+
+| Mode | When used | Lookup behavior |
+|---|---|---|
+| `Builder` | During node ingestion | Compact build entries |
+| `Finalized` | After `finalize_resolution()` | Binary search over sorted bytes |
+| `MmapBacked` | After loading a persisted artifact | Binary search over the mmap resolution section |
+
+`resolution_delta` is checked before the main backend. This keeps post-build
+sync inserts resolvable without rewriting the immutable finalized or mmap
+section.
+
+<ProcessTree title="resolve(table_oid, pk)">
+  <ProcessStep title="resolution_delta" />
+  <ProcessStep title="Builder | Finalized | MmapBacked" />
+  <ProcessStep title="node_store.is_active(node_idx)" />
+</ProcessTree>
+
+## Edge Type Registry
+
+The registry starts as:
+
+```text
+index 0 = ""
+index 1..254 = user edge labels
+```
+
+`Engine::register_edge_type()` returns existing IDs when labels are reused and
+raises `EdgeTypeLimit` after 254 user labels. The `u8` ID is stored in CSR
+parallel to each target edge.
+
+## Traversal Dispatch
+
+Engine traversal does:
+
+1. Verify the engine is built.
+2. Resolve the seed table+PK to `node_idx`.
+3. Resolve the requested edge label strings to compact `u8` IDs.
+4. Build the edge overlay maps for the chosen direction.
+5. Build `BfsConfig`.
+6. Choose forward or reverse CSR based on direction.
+7. Run BFS or DFS.
+8. Convert node indices back to source coordinates and edge labels.
+
+<PipelineDiagram>
+  <PipelineStep title="request" />
+  <PipelineStep title="resolve seed" />
+  <PipelineStep title="edge type filter" />
+  <PipelineStep title="sync overlay" />
+  <PipelineStep title="BfsConfig" />
+  <PipelineStep title="strategy">
+    - `bfs::execute`
+    - `bfs::execute_dfs`
+  </PipelineStep>
+  <PipelineStep title="to_traversal_results" />
+</PipelineDiagram>
+
+## Sync Overlay Semantics
+
+`edge_buffer` contains ordered mutations:
+
+```rust
+pub struct EdgeMutation {
+    pub source: u32,
+    pub target: u32,
+    pub type_id: u8,
+    pub kind: MutationKind,
+}
+```
+
+Before traversal, the engine reduces the buffer into:
+
+| Overlay | Type | Meaning |
+|---|---|---|
+| inserts | `HashMap<u32, Vec<(u32, u8)>>` | Extra neighbors by source node |
+| deletes | `HashSet<(u32, u32, u8)>` | Base edges hidden from traversal |
+
+Insert after delete cancels the delete; delete after insert cancels the insert.
+
+## Status Computation
+
+`Engine::status()` returns counts, memory estimates, sync status, schema state,
+edge labels, pending sync state, and read-only flags. Some fields are refreshed
+by SQL runtime helpers before calling `Engine::status()`, including disabled
+trigger count, pending sync rows, and schema drift.
+
+## Important Invariants
+
+| Invariant | Why it matters |
+|---|---|
+| `edge_type_registry[0] == ""` | Root/path formatting assumes ID 0 is reserved |
+| `reverse_edge_store` matches `edge_store` | Inbound traversal must avoid scanning all edges |
+| `resolution_delta` is checked first | Synced inserts shadow immutable base indexes |
+| Mmap store pointers never outlive `Engine._mmap` | Raw pointer reads depend on mmap lifetime |
+| `node_store.is_active()` gates resolved nodes | Tombstones must not appear as live results |
+| `edge_buffer.len() <= graph.edge_buffer_size` | Prevents unbounded overlay memory |

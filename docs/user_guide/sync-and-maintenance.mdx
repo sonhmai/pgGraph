@@ -1,0 +1,202 @@
+# Sync And Maintenance
+
+The base graph is immutable CSR once built. Sync captures source table changes
+into durable log tables and applies what can be represented as backend-local
+overlays. Vacuum and maintenance rebuild the base graph to fold changes back
+into the core stores.
+
+## Modes
+
+| Mode | Current behavior |
+|---|---|
+| `manual` | No automatic trigger install. Use `graph.build()` to refresh from source tables. |
+| `trigger` | `graph.enable_sync()` installs triggers that write to `graph._sync_log`; use `graph.apply_sync()` or `graph.maintenance()` to apply/rebuild. |
+| `wal` | Reserved and rejected by current sync code. |
+
+```sql
+ALTER SYSTEM SET graph.sync_mode = 'trigger';
+SELECT pg_reload_conf();
+```
+
+## Enable Trigger Sync
+
+```sql
+SELECT graph.enable_sync();
+```
+
+This creates trigger functions and attaches INSERT, UPDATE, DELETE, and TRUNCATE
+triggers to registered tables. Trigger rows are durable in `graph._sync_log`.
+
+```text
+source table DML
+      |
+      v
+AFTER trigger
+      |
+      v
+graph._sync_log
+      |
+      +--> graph.apply_sync()
+      |
+      +--> graph.maintenance()
+```
+
+## Apply Sync
+
+```sql
+SELECT * FROM graph.apply_sync();
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `inserts_applied` | Insert sync rows applied |
+| `updates_applied` | Update sync rows applied |
+| `deletes_applied` | Delete sync rows applied |
+
+Current apply behavior includes:
+
+| Change | Behavior |
+|---|---|
+| Inserted node row | Materializes mmap node store if needed, appends node, updates resolution delta, filter values, and tenant membership |
+| Updated node row | Handles primary-key changes, property/filter refresh, tenant refresh, and edge mutations where possible |
+| Deleted node row | Tombstones node in owned store |
+| Edge mutations | Stored in edge overlay buffer until rebuild/vacuum |
+| Truncate | Marks rebuild/vacuum need |
+
+<Callout type="warning">
+The base CSR store is immutable. Edge changes use overlay buffers for query
+visibility in the backend that applies sync, but `graph.vacuum()` or
+`graph.maintenance()` is the normal path for merging them into a clean base
+graph.
+</Callout>
+
+## Edge Buffer Limits
+
+`graph.edge_buffer_size` limits pending edge mutations. When the buffer is full,
+the engine enters read-only mode and reports `PG008`.
+
+```sql
+ALTER SYSTEM SET graph.edge_buffer_size = 500000;
+SELECT pg_reload_conf();
+```
+
+Recovery:
+
+```sql
+SELECT * FROM graph.vacuum();
+-- or
+SELECT * FROM graph.maintenance();
+```
+
+## Vacuum
+
+```sql
+SELECT * FROM graph.vacuum();
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `nodes_before` | Node slots before rebuild |
+| `nodes_after` | Node slots after rebuild |
+| `tombstones_removed` | Removed inactive node slots |
+| `edges_rebuilt` | Directed edges in rebuilt CSR |
+| `vacuum_time_ms` | Wall-clock rebuild time |
+
+The current implementation performs a full rebuild from source tables. This is
+correct for immutable CSR and reclaims tombstones and overlay state.
+
+<Callout type="warning">
+Vacuum has a double-memory period because the old and new engines coexist until
+the swap completes. Keep `graph.memory_limit_mb` high enough for both engines.
+</Callout>
+
+## Maintenance
+
+Foreground maintenance:
+
+```sql
+SELECT * FROM graph.maintenance(concurrently := false);
+```
+
+Background maintenance:
+
+```sql
+SELECT * FROM graph.maintenance(concurrently := true);
+SELECT * FROM graph.maintenance_status('<job_id>');
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `job_id` | Durable maintenance job ID, or zero UUID for foreground path |
+| `status` | `queued`, `running`, `completed`, or `failed` |
+| `sync_rows_applied` | Sync rows folded into the rebuild |
+| `nodes_after` | Node count after maintenance |
+| `edges_after` | Edge count after maintenance |
+| `vacuum_time_ms` | Rebuild duration |
+| `error` | Failure text if any |
+
+`graph.maintenance_status(NULL)` returns the latest 50 maintenance jobs.
+
+## Status Columns For Sync
+
+```sql
+SELECT
+  sync_mode,
+  sync_status,
+  edge_buffer_used,
+  needs_vacuum,
+  needs_rebuild,
+  applied_sync_id,
+  pending_sync_rows,
+  disabled_trigger_count,
+  invalid_reason
+FROM graph.status();
+```
+
+| Column | Meaning |
+|---|---|
+| `sync_status` | `idle`, `syncing`, or `read_only` |
+| `edge_buffer_used` | Pending edge overlay mutations |
+| `needs_vacuum` | Overlay/tombstone state should be merged |
+| `needs_rebuild` | Catalog/schema drift requires full rebuild |
+| `applied_sync_id` | Last durable sync log row applied by this backend-local engine |
+| `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
+| `disabled_trigger_count` | Registered graph triggers currently disabled |
+
+## Operational Patterns
+
+Small manual graph:
+
+```sql
+SELECT * FROM graph.build();
+-- periodically:
+SELECT * FROM graph.build();
+```
+
+Trigger-sync graph:
+
+```sql
+ALTER SYSTEM SET graph.sync_mode = 'trigger';
+SELECT pg_reload_conf();
+SELECT graph.enable_sync();
+SELECT * FROM graph.build();
+
+-- after workload:
+SELECT * FROM graph.apply_sync();
+SELECT * FROM graph.maintenance();
+```
+
+High-write graph:
+
+```text
+Use trigger sync for visibility.
+Run graph.apply_sync() on a schedule for lightweight overlay updates.
+Run graph.maintenance() during maintenance windows to rebuild CSR.
+Watch edge_buffer_used, needs_vacuum, pending_sync_rows, and read_only.
+```

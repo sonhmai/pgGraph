@@ -1,0 +1,235 @@
+# Installation
+
+This extension is built from the `graph/` crate with `pgrx` 0.18.0. The crate
+declares PostgreSQL feature flags for PostgreSQL 13 through 18 and defaults to
+`pg17`.
+
+## Requirements
+
+| Requirement | Version or note |
+|---|---|
+| Rust | `1.95`, pinned by `graph/rust-toolchain.toml` |
+| PostgreSQL | 13, 14, 15, 16, 17, or 18 |
+| pgrx | `0.18.0` |
+| Crate feature | One of `pg13`, `pg14`, `pg15`, `pg16`, `pg17`, `pg18` |
+| Extension control | `graph/graph.control` |
+
+<Callout type="info">
+Install with the PostgreSQL major that matches the target server. A `pg17`
+build should not be installed into a PostgreSQL 16 server.
+</Callout>
+
+## Install pgrx
+
+```bash
+cargo install cargo-pgrx --version 0.18.0 --locked
+cargo pgrx init --pg17=/path/to/pg_config
+```
+
+Use the matching flag for another supported major:
+
+```bash
+cargo pgrx init --pg13=/path/to/pg_config
+cargo pgrx init --pg14=/path/to/pg_config
+cargo pgrx init --pg15=/path/to/pg_config
+cargo pgrx init --pg16=/path/to/pg_config
+cargo pgrx init --pg18=/path/to/pg_config
+```
+
+## Build And Install
+
+```bash
+cd graph
+cargo pgrx install --pg-config=/path/to/pg_config
+```
+
+For an explicit PostgreSQL feature:
+
+```bash
+cd graph
+cargo pgrx install --features pg17 --no-default-features --pg-config=/path/to/pg_config
+```
+
+## Create The Extension
+
+```sql
+CREATE EXTENSION graph;
+```
+
+The bootstrap SQL creates:
+
+| Object | Purpose |
+|---|---|
+| `graph.node_ref` | Composite start-node type for one traversal overload |
+| `graph.node_ref(regclass, text)` | Constructor for `graph.node_ref` |
+| `graph.traverse(graph.node_ref[], ...)` | SQL wrapper over the Rust multi-start traversal overload |
+| `graph._registered_tables` | Durable registration catalog for node source tables |
+| `graph._registered_edges` | Durable registration catalog for edge definitions |
+| `graph._registered_filter_columns` | Durable registration catalog for traversal filter columns |
+| `graph._build_jobs` | Durable asynchronous build job state |
+| `graph._maintenance_jobs` | Durable maintenance job state |
+| `graph._sync_log` | Durable trigger sync log |
+| `graph._sync_buffer` | Legacy sync buffer compatibility table |
+
+Internal catalog tables are extension-owned. They are readable by `PUBLIC` but
+not directly writable by non-admin roles.
+
+<Callout type="warning">
+Pre-release catalog schema changes require recreating development and test
+databases. Drop and recreate the extension with `DROP EXTENSION graph CASCADE;`
+followed by `CREATE EXTENSION graph;` instead of relying on runtime migrations.
+</Callout>
+
+## Docker Install Options
+
+pgGraph supports two Docker installation paths:
+
+| Path | Use when |
+|---|---|
+| Build a PostgreSQL image with pgGraph already installed | You want a new container image for Evokoa or local evaluation |
+| Install into an existing running PostgreSQL container | You already have a PostgreSQL container and want to add pgGraph to it |
+
+### Build A PostgreSQL Image With pgGraph
+
+From the repository root, build the root `Dockerfile` with the PostgreSQL major
+that should be installed in the image:
+
+```bash
+docker build --build-arg PG_MAJOR=17 -t pggraph-postgres:17 .
+```
+
+Start the container:
+
+```bash
+docker run \
+  --name pggraph-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  pggraph-postgres:17
+```
+
+Then create the extension in each database that should use pgGraph:
+
+```sql
+CREATE EXTENSION graph;
+```
+
+### Install Into An Existing PostgreSQL Container
+
+Use the helper script from the repository root:
+
+```bash
+scripts/install_into_docker_postgres.sh CONTAINER [PG_MAJOR] [DB_NAME] [DB_USER]
+```
+
+For example, to install pgGraph built for PostgreSQL 17 into a running container
+named `my-postgres` and create the extension in `appdb`:
+
+```bash
+scripts/install_into_docker_postgres.sh my-postgres 17 appdb postgres
+```
+
+The one-shot script builds the matching pgGraph package, copies the extension
+control, SQL, and shared library files into the target container, and runs:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS graph;
+```
+
+The lower-level steps are also available when you want to build once and install
+the same package into one or more containers:
+
+```bash
+scripts/build_docker_pggraph_package.sh 17 target/docker-packages
+scripts/copy_pggraph_package_to_docker_postgres.sh \
+  my-postgres target/docker-packages/graph-pg17 17 appdb postgres
+```
+
+To build packages for all supported PostgreSQL majors:
+
+```bash
+scripts/build_docker_pggraph_package.sh all target/docker-packages
+```
+
+Set `SKIP_CREATE_EXTENSION=1` to copy the files without creating the extension:
+
+```bash
+SKIP_CREATE_EXTENSION=1 scripts/install_into_docker_postgres.sh my-postgres 17
+```
+
+<Callout type="warning">
+The PostgreSQL major must match the target container. A PostgreSQL 17 pgGraph
+build should not be copied into a PostgreSQL 16 container. The target container
+also needs compatible operating-system and CPU architecture assumptions for the
+compiled extension.
+</Callout>
+
+## shared_preload_libraries
+
+Most functionality works without `shared_preload_libraries`, but setting it lets
+PostgreSQL call `_PG_init()` at server startup. `_PG_init()` registers the GUCs
+and asks the operating system to pre-warm an existing `.pggraph` file.
+
+```conf
+shared_preload_libraries = 'graph'
+```
+
+Then restart PostgreSQL.
+
+<Callout type="info">
+Pre-warming does not load the engine in every backend. Query backends still load
+the graph lazily on first use when `graph.auto_load = true`.
+</Callout>
+
+## Verify Installation
+
+```sql
+SELECT graph.test_enabled();
+SELECT * FROM graph.status();
+```
+
+Expected initial state before build:
+
+| Column | Typical value |
+|---|---|
+| `node_count` | `0` |
+| `edge_count` | `0` |
+| `sync_mode` | `manual` unless configured |
+| `schema_status` | `current` |
+
+## Development Test Commands
+
+```bash
+cd graph
+cargo fmt --check
+cargo test --features pg17
+cargo pgrx test pg17
+```
+
+SQLSTATE and ACL boundary tests intentionally run outside `cargo pgrx test`
+because they need a normal client/server error boundary:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh
+```
+
+## Docker And Packaging Checks
+
+The heavy test suite includes packaging, install smoke, function metadata audit,
+backup/restore, Docker smoke, and PostgreSQL major matrix scripts:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh
+./tests/heavy/docker_smoke.sh
+```
+
+For the full release gate:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```

@@ -1,0 +1,926 @@
+# SQL API Reference
+
+This page documents the SQL surface implemented by the current `graph` crate.
+All functions live in the `graph` schema.
+
+## Function Index
+
+| Category | Functions |
+|---|---|
+| Availability | `test_enabled`, `status`, `reset` |
+| Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
+| Discovery | `auto_discover`, `auto_discover_tables` |
+| Build jobs | `build`, `build_status` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `vacuum`, `maintenance`, `maintenance_status` |
+| Search | `search`, `search_nodes` |
+| Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
+| Filters | `equals`, `eq`, `not_equals`, `neq`, `greater_than`, `gt`, `at_least`, `gte`, `less_than`, `lt`, `at_most`, `lte`, `between`, `on_node`, `all` |
+| Workflow | `find`, `expand`, `find_related`, `path`, `connection`, `neighborhood` |
+| Paths | `shortest_path`, `weighted_shortest_path` |
+| Aggregation | `path_count_estimate`, `aggregate` |
+| Components | `connected_components`, `component_stats`, `components`, `largest_component`, `component`, `isolated_nodes` |
+
+## Availability
+
+### `graph.test_enabled()`
+
+```sql
+graph.test_enabled() RETURNS boolean
+```
+
+Returns the current `graph.enabled` value.
+
+### `graph.status()`
+
+```sql
+graph.status()
+RETURNS TABLE (
+  node_count int,
+  edge_count int,
+  memory_used_mb double precision,
+  memory_limit_mb int,
+  sync_mode text,
+  sync_status text,
+  last_build timestamptz,
+  last_vacuum timestamptz,
+  edge_types text[],
+  edge_buffer_used int,
+  has_unidirectional_edges boolean,
+  schema_status text,
+  sync_lag bigint,
+  pending_edge_deltas int,
+  needs_vacuum boolean,
+  needs_rebuild boolean,
+  applied_sync_id bigint,
+  pending_sync_rows bigint,
+  invalid_reason text,
+  disabled_trigger_count int,
+  read_only boolean
+)
+```
+
+Reports backend-local engine state and current catalog/sync validity.
+
+### `graph.reset()`
+
+```sql
+graph.reset() RETURNS void
+```
+
+Admin-only. Clears the backend-local engine and removes persisted graph files.
+
+## Registration
+
+### `graph.add_table()`
+
+```sql
+graph.add_table(
+  table_name regclass,
+  id_column text,
+  columns text[] DEFAULT NULL,
+  tenant_column text DEFAULT NULL
+) RETURNS void
+```
+
+```sql
+graph.add_table(
+  table_name regclass,
+  id_columns text[],
+  columns text[] DEFAULT NULL,
+  tenant_column text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Registers a source table as graph nodes. The identifier columns must
+match a primary key or unique `NOT NULL` index.
+
+### `graph.add_edge()`
+
+```sql
+graph.add_edge(
+  from_table regclass,
+  from_column text,
+  to_table regclass,
+  to_column text,
+  label text,
+  bidirectional boolean DEFAULT true,
+  weight_column text DEFAULT NULL,
+  label_column text DEFAULT NULL
+) RETURNS void
+```
+
+Admin-only. Registers a relationship. `weight_column` must be numeric.
+`label_column`, when supplied, provides per-row dynamic edge labels.
+
+### `graph.add_filter_column()`
+
+```sql
+graph.add_filter_column(
+  table_name regclass,
+  column_name text,
+  column_type text DEFAULT 'numeric'
+) RETURNS void
+```
+
+Admin-only. Supported types are `numeric`, `text`, `boolean`, `date`,
+`timestamptz`, and `uuid`.
+
+### `graph.registered_tables()`
+
+```sql
+graph.registered_tables()
+RETURNS TABLE (
+  table_name text,
+  id_columns text[],
+  columns text[],
+  tenant_column text
+)
+```
+
+### `graph.registered_edges()`
+
+```sql
+graph.registered_edges()
+RETURNS TABLE (
+  from_table text,
+  from_column text,
+  to_table text,
+  to_column text,
+  label text,
+  bidirectional boolean,
+  weight_column text,
+  label_column text
+)
+```
+
+### `graph.remove_table()`
+
+```sql
+graph.remove_table(table_name regclass) RETURNS void
+```
+
+Admin-only. Removes table registration, associated filter columns, and edges
+where the table is either endpoint. Rebuild after calling.
+
+### `graph.remove_edge()`
+
+```sql
+graph.remove_edge(label text) RETURNS void
+```
+
+Admin-only. Removes edge registrations with the given label. Rebuild after
+calling.
+
+### `graph.estimate()`
+
+```sql
+graph.estimate()
+RETURNS TABLE (
+  estimated_nodes bigint,
+  estimated_edges bigint,
+  estimated_memory_mb double precision,
+  memory_limit_mb int,
+  fits_in_memory boolean
+)
+```
+
+Estimates graph size from `pg_class.reltuples`.
+
+## Discovery
+
+### `graph.auto_discover()`
+
+```sql
+graph.auto_discover(schema_name text DEFAULT 'public')
+RETURNS TABLE (
+  item_type text,
+  item_name text,
+  details text
+)
+```
+
+Admin-only. Discovers tables and FK edges in a schema, registers them, then
+calls `graph.build()`.
+
+### `graph.auto_discover_tables()`
+
+```sql
+graph.auto_discover_tables(
+  tables regclass[],
+  tenant_column text DEFAULT NULL
+)
+RETURNS TABLE (
+  item_type text,
+  item_name text,
+  details text
+)
+```
+
+Admin-only. Discovers selected tables and FK edges only among those tables, then
+calls `graph.build()`.
+
+## Build Jobs
+
+### `graph.build()`
+
+```sql
+graph.build()
+RETURNS TABLE (
+  nodes_loaded bigint,
+  edges_loaded bigint,
+  build_time_ms double precision,
+  memory_used_mb double precision,
+  sync_mode text
+)
+```
+
+Admin-only. Builds the graph synchronously.
+
+```sql
+graph.build(concurrently boolean)
+RETURNS TABLE (
+  build_id text,
+  status text,
+  nodes_loaded bigint,
+  edges_loaded bigint,
+  build_time_ms double precision,
+  memory_used_mb double precision,
+  sync_mode text
+)
+```
+
+Admin-only. `false` runs the compatibility synchronous path. `true` creates a
+build job and attempts to launch a dynamic background worker.
+
+### `graph.build_status()`
+
+```sql
+graph.build_status(build_id text)
+RETURNS TABLE (
+  build_id text,
+  status text,
+  nodes_loaded bigint,
+  edges_loaded bigint,
+  build_time_ms double precision,
+  memory_used_mb double precision,
+  started_at timestamp with time zone,
+  finished_at timestamp with time zone,
+  error text
+)
+```
+
+Reads durable build job state, or returns `completed`/`not_found` for the
+special synchronous zero UUID path.
+
+## Sync And Maintenance
+
+### `graph.enable_sync()`
+
+```sql
+graph.enable_sync() RETURNS void
+```
+
+Admin-only. Creates durable sync tables if needed and installs graph triggers on
+registered tables.
+
+### `graph.apply_sync()`
+
+```sql
+graph.apply_sync()
+RETURNS TABLE (
+  inserts_applied bigint,
+  updates_applied bigint,
+  deletes_applied bigint
+)
+```
+
+Admin-only. Applies pending sync rows to the backend-local engine.
+
+### `graph.vacuum()`
+
+```sql
+graph.vacuum()
+RETURNS TABLE (
+  nodes_before bigint,
+  nodes_after bigint,
+  tombstones_removed bigint,
+  edges_rebuilt bigint,
+  vacuum_time_ms double precision
+)
+```
+
+Admin-only. Rebuilds from source tables and swaps in the rebuilt backend-local
+engine; persistence writes the rebuilt base graph when requested by the caller.
+
+### `graph.maintenance()`
+
+```sql
+graph.maintenance(concurrently boolean DEFAULT false)
+RETURNS TABLE (
+  job_id text,
+  status text,
+  sync_rows_applied bigint,
+  nodes_after bigint,
+  edges_after bigint,
+  vacuum_time_ms double precision,
+  error text
+)
+```
+
+Admin-only. Foreground path applies maintenance rebuild immediately. Background
+path creates a durable maintenance job and launches a dynamic worker.
+
+### `graph.maintenance_status()`
+
+```sql
+graph.maintenance_status(job_id text DEFAULT NULL)
+RETURNS TABLE (
+  job_id text,
+  status text,
+  sync_rows_applied bigint,
+  nodes_after bigint,
+  edges_after bigint,
+  vacuum_time_ms double precision,
+  started_at timestamp with time zone,
+  finished_at timestamp with time zone,
+  error text
+)
+```
+
+With `NULL`, returns the latest 50 jobs. With a job ID, returns that job or a
+single `not_found` row.
+
+## Search
+
+### `graph.search()`
+
+```sql
+graph.search(
+  property_key text,
+  property_value text,
+  table_filter regclass DEFAULT NULL,
+  mode text DEFAULT 'contains',
+  case_sensitive boolean DEFAULT false,
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0,
+  tenant text DEFAULT NULL,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  node_table oid,
+  node_id text,
+  match_type text,
+  score real,
+  verified boolean,
+  node jsonb,
+  node_table_name text
+)
+```
+
+Searches registered source-table columns.
+
+### `graph.search_nodes()`
+
+```sql
+graph.search_nodes(
+  property_key text,
+  property_value text,
+  table_filter regclass DEFAULT NULL,
+  mode text DEFAULT 'contains',
+  case_sensitive boolean DEFAULT false,
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0,
+  tenant text DEFAULT NULL
+)
+RETURNS TABLE (
+  node_table oid,
+  node_id text,
+  match_type text,
+  score real,
+  verified boolean,
+  node_table_name text
+)
+```
+
+Coordinate-only search.
+
+## Traversal
+
+### `graph.node_ref`
+
+```sql
+CREATE TYPE graph.node_ref AS (
+  node_table regclass,
+  node_id text
+);
+
+graph.node_ref(node_table regclass, node_id text) RETURNS graph.node_ref
+```
+
+### `graph.node_ref_string()`
+
+```sql
+graph.node_ref_string(table_name regclass, node_id text) RETURNS text
+```
+
+Returns canonical JSON text for strict traversal specs.
+
+### `graph.traverse()` single-start
+
+```sql
+graph.traverse(
+  seed_table regclass,
+  seed_id text,
+  max_depth int DEFAULT current_setting('graph.default_max_depth')::int,
+  edge_types text[] DEFAULT NULL,
+  direction text DEFAULT 'any',
+  node_tables oid[] DEFAULT NULL,
+  filter jsonb DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  strategy text DEFAULT 'bfs',
+  uniqueness text DEFAULT 'node_global',
+  include_start boolean DEFAULT true,
+  hydrate boolean DEFAULT true,
+  max_rows int DEFAULT 1000,
+  row_offset int DEFAULT 0,
+  max_nodes int DEFAULT current_setting('graph.max_nodes')::int,
+  max_frontier int DEFAULT current_setting('graph.max_frontier')::int
+)
+RETURNS TABLE (
+  root_table oid,
+  root_id text,
+  node_table oid,
+  node_id text,
+  depth int,
+  path jsonb,
+  edge_path jsonb,
+  node jsonb,
+  root_table_name text,
+  node_table_name text
+)
+```
+
+### `graph.traverse()` multi-start arrays
+
+```sql
+graph.traverse(
+  start_tables regclass[],
+  start_ids text[],
+  ...
+)
+```
+
+`start_tables[i]` pairs with `start_ids[i]`.
+
+### `graph.traverse()` node-ref array
+
+```sql
+graph.traverse(
+  starts graph.node_ref[],
+  max_depth int DEFAULT current_setting('graph.default_max_depth')::int,
+  ...
+)
+```
+
+SQL wrapper over the parallel-array overload.
+
+### `graph.traverse_search()`
+
+```sql
+graph.traverse_search(
+  property_key text,
+  property_value text,
+  table_filter regclass DEFAULT NULL,
+  search_mode text DEFAULT current_setting('graph.default_search_mode'),
+  case_sensitive boolean DEFAULT current_setting('graph.default_case_sensitive')::boolean,
+  search_max_rows int DEFAULT 100,
+  search_row_offset int DEFAULT 0,
+  max_depth int DEFAULT current_setting('graph.default_max_depth')::int,
+  edge_types text[] DEFAULT NULL,
+  direction text DEFAULT 'any',
+  node_tables oid[] DEFAULT NULL,
+  filter jsonb DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  strategy text DEFAULT 'bfs',
+  uniqueness text DEFAULT 'node_per_root',
+  include_start boolean DEFAULT true,
+  hydrate boolean DEFAULT current_setting('graph.default_hydrate')::boolean,
+  max_rows int DEFAULT 1000,
+  row_offset int DEFAULT 0
+)
+RETURNS TABLE (
+  root_table oid,
+  root_id text,
+  node_table oid,
+  node_id text,
+  depth int,
+  path jsonb,
+  edge_path jsonb,
+  node jsonb,
+  root_table_name text,
+  node_table_name text
+)
+```
+
+Searches start nodes, then traverses from verified matches.
+
+### `graph.format_path()`
+
+```sql
+graph.format_path(
+  path jsonb,
+  edge_path jsonb,
+  separator text DEFAULT ' | '
+) RETURNS text
+```
+
+Formats a path and edge path into readable hop text.
+
+## Filter Constructors
+
+```sql
+graph.equals(column_name text, value jsonb) RETURNS jsonb
+graph.equals(column_name text, value text) RETURNS jsonb
+graph.equals(column_name text, value bigint) RETURNS jsonb
+graph.eq(...) RETURNS jsonb
+
+graph.not_equals(column_name text, value jsonb) RETURNS jsonb
+graph.neq(column_name text, value jsonb) RETURNS jsonb
+graph.neq(column_name text, value text) RETURNS jsonb
+graph.neq(column_name text, value bigint) RETURNS jsonb
+
+graph.greater_than(column_name text, value jsonb) RETURNS jsonb
+graph.greater_than(column_name text, value bigint) RETURNS jsonb
+graph.gt(column_name text, value jsonb) RETURNS jsonb
+graph.gt(column_name text, value bigint) RETURNS jsonb
+
+graph.at_least(column_name text, value jsonb) RETURNS jsonb
+graph.gte(column_name text, value jsonb) RETURNS jsonb
+graph.gte(column_name text, value bigint) RETURNS jsonb
+
+graph.less_than(column_name text, value jsonb) RETURNS jsonb
+graph.lt(column_name text, value jsonb) RETURNS jsonb
+graph.lt(column_name text, value bigint) RETURNS jsonb
+
+graph.at_most(column_name text, value jsonb) RETURNS jsonb
+graph.lte(column_name text, value jsonb) RETURNS jsonb
+graph.lte(column_name text, value bigint) RETURNS jsonb
+
+graph.between(column_name text, lower jsonb, upper jsonb) RETURNS jsonb
+graph.on_node(filter jsonb) RETURNS jsonb
+graph.all(filters jsonb[]) RETURNS jsonb
+```
+
+## Workflow API
+
+### `graph.find()`
+
+```sql
+graph.find(
+  property_key text,
+  property_value text,
+  table_name regclass DEFAULT NULL,
+  mode text DEFAULT 'contains',
+  case_sensitive boolean DEFAULT false,
+  max_rows int DEFAULT 20,
+  row_offset int DEFAULT 0,
+  tenant text DEFAULT NULL
+)
+RETURNS TABLE (
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  match_type text,
+  score real,
+  verified boolean,
+  rank int,
+  node jsonb
+)
+```
+
+### `graph.expand()`
+
+```sql
+graph.expand(
+  seed_table regclass,
+  seed_id text,
+  max_depth int DEFAULT current_setting('graph.default_max_depth')::int,
+  edge_types text[] DEFAULT NULL,
+  direction text DEFAULT 'any',
+  target_table regclass DEFAULT NULL,
+  target_tables regclass[] DEFAULT NULL,
+  where_node jsonb DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  max_rows int DEFAULT 50,
+  row_offset int DEFAULT 0,
+  include_start boolean DEFAULT false
+)
+RETURNS TABLE (
+  root_table oid,
+  root_id text,
+  root_table_name text,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  depth int,
+  rank int,
+  path jsonb,
+  edge_path jsonb,
+  readable_path text,
+  node jsonb,
+  truncated boolean
+)
+```
+
+### `graph.find_related()`
+
+```sql
+graph.find_related(
+  property_key text,
+  property_value text,
+  source_table regclass DEFAULT NULL,
+  search_mode text DEFAULT current_setting('graph.default_search_mode'),
+  case_sensitive boolean DEFAULT current_setting('graph.default_case_sensitive')::boolean,
+  search_max_rows int DEFAULT 1,
+  search_row_offset int DEFAULT 0,
+  max_depth int DEFAULT current_setting('graph.default_max_depth')::int,
+  edge_types text[] DEFAULT NULL,
+  direction text DEFAULT 'any',
+  target_table regclass DEFAULT NULL,
+  target_tables regclass[] DEFAULT NULL,
+  where_node jsonb DEFAULT NULL,
+  tenant text DEFAULT NULL,
+  max_rows int DEFAULT 20,
+  row_offset int DEFAULT 0,
+  include_counts boolean DEFAULT false,
+  candidate_limit int DEFAULT 10000,
+  include_start boolean DEFAULT false
+)
+RETURNS TABLE (
+  root_table oid,
+  root_id text,
+  root_table_name text,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  depth int,
+  score real,
+  rank int,
+  path jsonb,
+  edge_path jsonb,
+  readable_path text,
+  node jsonb,
+  candidate_count bigint,
+  filtered_count bigint,
+  truncated boolean
+)
+```
+
+### `graph.path()`
+
+```sql
+graph.path(
+  source_table regclass,
+  source_id text,
+  target_table regclass,
+  target_id text,
+  max_depth int DEFAULT 20
+)
+RETURNS TABLE (
+  step int,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  edge_label text,
+  readable_path text,
+  node jsonb
+)
+```
+
+### `graph.connection()`
+
+```sql
+graph.connection(
+  source_key text,
+  source_value text,
+  target_key text,
+  target_value text,
+  source_table regclass DEFAULT NULL,
+  target_table regclass DEFAULT NULL,
+  source_k int DEFAULT 3,
+  target_k int DEFAULT 3,
+  search_mode text DEFAULT 'contains',
+  max_depth int DEFAULT 6
+)
+RETURNS TABLE (
+  source_table_name text,
+  source_id text,
+  target_table_name text,
+  target_id text,
+  hop_count int,
+  step int,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  edge_label text,
+  readable_path text,
+  node jsonb
+)
+```
+
+### `graph.neighborhood()`
+
+```sql
+graph.neighborhood(
+  property_key text,
+  property_value text,
+  source_table regclass DEFAULT NULL,
+  search_mode text DEFAULT 'contains',
+  search_max_rows int DEFAULT 1,
+  max_depth int DEFAULT 4,
+  edge_types text[] DEFAULT NULL,
+  direction text DEFAULT 'any',
+  tenant text DEFAULT NULL,
+  sample_k int DEFAULT 5,
+  node_limit int DEFAULT 10000
+)
+RETURNS TABLE (
+  depth int,
+  node_table oid,
+  node_table_name text,
+  node_count bigint,
+  sample_nodes jsonb,
+  truncated boolean
+)
+```
+
+## Paths
+
+### `graph.shortest_path()`
+
+```sql
+graph.shortest_path(
+  source_table regclass,
+  source_id text,
+  target_table regclass,
+  target_id text,
+  max_depth int DEFAULT 20,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  step int,
+  node_table oid,
+  node_id text,
+  edge_label text,
+  node jsonb,
+  node_table_name text
+)
+```
+
+Returns no rows when no path is found.
+
+### `graph.weighted_shortest_path()`
+
+```sql
+graph.weighted_shortest_path(
+  source_table regclass,
+  source_id text,
+  target_table regclass,
+  target_id text
+)
+RETURNS TABLE (
+  path_nodes text[],
+  total_cost int
+)
+```
+
+Uses registered edge weights and returns no rows when no weighted path exists or
+the graph has no weight data.
+
+## Aggregation
+
+### `graph.path_count_estimate()`
+
+```sql
+graph.path_count_estimate(traversal jsonb)
+RETURNS TABLE (
+  estimated_paths bigint,
+  exact boolean,
+  capped boolean
+)
+```
+
+### `graph.aggregate()`
+
+```sql
+graph.aggregate(
+  traversal jsonb,
+  aggregations jsonb,
+  scope text DEFAULT 'returned_nodes',
+  path_limit int DEFAULT current_setting('graph.max_exact_path_count')::int
+) RETURNS jsonb
+```
+
+Supported `scope` values: `returned_nodes`, `chosen_parent_path`,
+`all_possible_paths`.
+
+## Components
+
+### `graph.connected_components()`
+
+```sql
+graph.connected_components()
+RETURNS TABLE (
+  node_table oid,
+  node_id text,
+  component_id bigint,
+  component_size int
+)
+```
+
+Admin-only. Returns one row per active node.
+
+### `graph.component_stats()`
+
+```sql
+graph.component_stats()
+RETURNS TABLE (
+  num_components int,
+  largest_component int,
+  num_isolated_nodes int,
+  total_active_nodes int
+)
+```
+
+Admin-only.
+
+### `graph.components()`
+
+```sql
+graph.components(
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0
+)
+RETURNS TABLE (
+  component_id bigint,
+  component_size bigint,
+  rank int
+)
+```
+
+Admin-only. Ordered by descending component size.
+
+### `graph.largest_component()`
+
+```sql
+graph.largest_component(
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  component_id bigint,
+  node_table oid,
+  node_id text,
+  node jsonb
+)
+```
+
+Admin-only.
+
+### `graph.component()`
+
+```sql
+graph.component(
+  component_id bigint,
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  component_id bigint,
+  node_table oid,
+  node_id text,
+  node jsonb
+)
+```
+
+Admin-only.
+
+### `graph.isolated_nodes()`
+
+```sql
+graph.isolated_nodes(
+  max_rows int DEFAULT 100,
+  row_offset int DEFAULT 0,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (
+  component_id bigint,
+  node_table oid,
+  node_id text,
+  node jsonb
+)
+```
+
+Admin-only.

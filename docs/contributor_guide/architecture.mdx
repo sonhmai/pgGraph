@@ -1,0 +1,248 @@
+# Architecture
+
+This page is the contributor-level map of the `graph` crate. It explains the
+crate graph, data flow, ownership model, lifetimes, and the design choices that
+shape the implementation.
+
+For SQL behavior, start with the [User Guide](/user_guide). This page assumes
+you are changing Rust code or reviewing how the extension works inside a
+PostgreSQL backend.
+
+## System Shape
+
+<ArchDiagram>
+  <ArchGroup label="PostgreSQL Backend Process">
+    <ArchRow>
+      <ArchCard
+        title="SQL Interface"
+        subtitle="pgrx functions in the graph schema"
+        tags={['graph.traverse()', 'graph.search()', 'graph.build()', 'graph.auto_discover()']}
+      />
+      <ArchCard
+        title="Background Workers"
+        bullets={[
+          'asynchronous build worker',
+          'asynchronous maintenance worker',
+          'database/user metadata passed through worker extra',
+        ]}
+      />
+    </ArchRow>
+
+    <ArchArrow />
+
+    <ArchGroup label="Graph Engine (Rust)" variant="engine">
+      <ArchCard
+        title="SQL Facade"
+        subtitle="argument parsing, ACL/admin checks, SQLSTATE reporting, hydration"
+        wide
+      />
+      <ArchRow>
+        <ArchCard title="NodeStore" subtitle="SoA node metadata and active bits" />
+        <ArchCard title="EdgeStore" subtitle="forward CSR adjacency" />
+        <ArchCard title="Reverse EdgeStore" subtitle="owned inbound CSR" />
+      </ArchRow>
+      <ArchRow>
+        <ArchCard title="ResolutionIndex" subtitle="table+primary key to node_idx" />
+        <ArchCard title="FilterIndex" subtitle="typed sparse/dense traversal filters" />
+        <ArchCard title="SQL-backed Search" subtitle="source-table predicates through SPI" />
+      </ArchRow>
+      <ArchCard
+        title="Safety Layer"
+        variant="safety"
+        wide
+        bullets={[
+          'bounded traversal: depth, visited nodes, and frontier limits',
+          'memory guard before build allocations',
+          'pgrx/PostgreSQL error boundary maps GraphError to SQLSTATE',
+          'validated mmap pointer metadata before raw store reads',
+        ]}
+      />
+    </ArchGroup>
+
+    <ArchArrow />
+
+    <ArchCard
+      title="Persistence Layer"
+      subtitle=".pggraph files under $PGDATA/<graph.data_dir>; atomic temp-write, fsync, rename, mmap load"
+      variant="persistence"
+      wide
+    />
+    <ArchCard
+      title="Configuration Catalog"
+      subtitle="graph._registered_tables, graph._registered_edges, graph._registered_filter_columns"
+      variant="config"
+      wide
+    />
+    <ArchCard
+      title="Source Tables"
+      subtitle="ordinary PostgreSQL tables remain authoritative"
+      variant="source"
+      wide
+    />
+  </ArchGroup>
+</ArchDiagram>
+
+## Runtime Ownership
+
+Each PostgreSQL backend owns its own `Engine` in thread-local storage:
+
+```rust
+thread_local! {
+    static ENGINE: RefCell<Engine> = RefCell::new(Engine::new());
+}
+```
+
+That means there is no shared Rust heap between connections. Sharing happens
+only through PostgreSQL storage, the filesystem, and OS page-cache backed mmap
+pages.
+
+| Object | Owner | Lifetime |
+|---|---|---|
+| `Engine` | One PostgreSQL backend process | Backend lifetime or until `graph.reset()` |
+| `NodeStore` owned mode | `Engine` heap | Mutable build/sync lifetime |
+| `NodeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
+| Forward `EdgeStore` mmap mode | Raw pointers into `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
+| `reverse_edge_store` | `Engine` heap | Rebuilt per backend from forward CSR |
+| `FilterIndex` after load | `Engine` heap | Deserialized per backend from bincode |
+| `edge_type_registry` after load | `Engine` heap | Deserialized per backend from bincode |
+| `ResolutionIndex` mmap mode | Byte slice inside `Engine._mmap` | Valid while `_mmap` remains owned by the engine |
+| `edge_buffer` and `resolution_delta` | `Engine` heap | Backend-local sync overlay state |
+
+## Data Flow: Build
+
+<PipelineDiagram>
+  <PipelineStep title="graph catalog" />
+  <PipelineStep arrowLabel="read registered tables, edges, filters" title="SPI cursor batches over source tables">
+    - NodeStore rows
+    - ResolutionIndexBuilder entries
+    - FilterIndex values
+    - tenant membership bitmaps
+  </PipelineStep>
+  <PipelineStep title="temporary edge rows sorted by source/target/type" />
+  <PipelineStep title="SortedEdgeStoreBuilder">
+    - forward CSR EdgeStore
+    - reverse CSR EdgeStore
+  </PipelineStep>
+  <PipelineStep title="active Engine" />
+  <PipelineStep arrowLabel="graph.persist_on_build" title="atomic .pggraph artifact" />
+</PipelineDiagram>
+
+The build path is allowed to allocate and sort. Query paths are not.
+
+## Data Flow: Load
+
+`load_graph_file()` validates the file before constructing any mmap-backed
+store:
+
+<PipelineDiagram>
+  <PipelineStep title="open .pggraph" />
+  <PipelineStep title="mmap read-only" />
+  <PipelineStep title="validate header, version, CRC, sections, CSR, PK offsets, bincode bounds">
+    - mmap-backed NodeStore arrays
+    - mmap-backed forward EdgeStore arrays
+    - mmap-backed ResolutionIndex section
+    - heap FilterIndex from bincode
+    - heap edge_type_registry from bincode
+    - heap reverse_edge_store from forward CSR
+  </PipelineStep>
+  <PipelineStep title="Engine owns _mmap and all derived stores" />
+</PipelineDiagram>
+
+The forward graph arrays and resolution section are mmap-backed. The reverse
+CSR and bincode sections are backend-local heap allocations today.
+
+## Data Flow: Query
+
+<PipelineDiagram>
+  <PipelineStep title="SQL call">
+    - check graph.enabled
+    - auto-load persisted graph if needed
+    - validate call options
+    - ACL/admin check where required
+  </PipelineStep>
+  <PipelineStep title="engine call">
+    - resolve seed table+PK to node_idx
+    - select forward or reverse CSR
+    - run bounded traversal/path/search algorithm
+    - apply filters, tenants, overlays, pagination
+  </PipelineStep>
+  <PipelineStep title="graph coordinates" />
+  <PipelineStep arrowLabel="optional SPI hydration from source tables" title="SQL rows" />
+</PipelineDiagram>
+
+Graph algorithms operate on compact node indexes. SQL-facing functions translate
+between PostgreSQL coordinates and those internal indexes.
+
+## Sync And Maintenance Flow
+
+Trigger sync is deliberately explicit. Query functions do not hide sync
+catch-up work.
+
+<TreeDiagram>
+  <TreeNode title="source table change">
+    <TreeNode title="graph sync trigger">
+      <TreeNode title="graph._sync_log">
+        <TreeBranch>
+          <TreeNode title="graph.apply_sync()">
+            <TreeNode title="backend-local overlays and node materialization" />
+          </TreeNode>
+          <TreeNode title="graph.maintenance()">
+            <TreeNode title="fresh build from source tables">
+              <TreeBranch>
+                <TreeNode title="new active Engine" />
+                <TreeNode title="new .pggraph artifact" />
+              </TreeBranch>
+            </TreeNode>
+          </TreeNode>
+        </TreeBranch>
+      </TreeNode>
+    </TreeNode>
+  </TreeNode>
+</TreeDiagram>
+
+Node inserts and tombstones can update backend-local state. Edge mutations use
+overlay buffers until maintenance or vacuum rebuilds the base CSR.
+
+## Design Decisions
+
+| Decision | Why it exists |
+|---|---|
+| SQL is the public API | Keeps application integration inside PostgreSQL and avoids a new query language. |
+| Source tables stay authoritative | pgGraph is an acceleration layer, not a second source of truth. |
+| Backend-local `Engine` | Matches PostgreSQL process isolation and avoids shared mutable Rust state. |
+| CSR for topology | Compact adjacency slices make traversal cache-friendly and predictable. |
+| Reverse CSR is materialized | Inbound traversal stays O(degree) instead of scanning all forward edges. |
+| mmap for persisted forward arrays | Later backends can start quickly and share physical pages through the OS page cache. |
+| Bincode metadata is heap-loaded | Filter and registry structures are variable-size Rust data that are easier to validate and use as owned values. |
+| Explicit maintenance | Expensive rebuild work is visible and controllable from SQL. |
+| Circuit breakers everywhere | The extension runs in PostgreSQL backends and must bound memory and traversal work. |
+
+## Safety Boundaries
+
+Unsafe code exists for performance and PostgreSQL integration, not as a general
+escape hatch. The core unsafe boundary is mmap-backed store construction:
+
+| Boundary | Required invariant |
+|---|---|
+| `MmapNodeArrays` | Active bytes, OID array, PK offsets, and PK byte ranges are present, aligned, and bounded by the mmap. |
+| `MmapEdgeArrays` | CSR offsets, targets, type IDs, and optional weights are present, aligned, and bounded by the mmap. |
+| `Engine._mmap` | The mmap outlives every NodeStore, forward EdgeStore, and ResolutionIndex lookup that borrows from it. |
+| `raise_graph_error()` | PostgreSQL error FFI is called with stable strings and is treated as non-returning at the SQL boundary. |
+
+Detailed rules live in [Safety And Security](./safety-security). Keep rustdoc
+`# Safety` sections and local `// SAFETY:` comments current when touching any
+unsafe area.
+
+## Where To Make Changes
+
+| Change | Start here |
+|---|---|
+| SQL function shape or return columns | `src/sql_facade/*`, then `docs/user_guide/api-reference.mdx` |
+| Registration validation | `src/catalog/validate.rs` |
+| Build ingestion | `src/builder.rs` |
+| Traversal behavior | `src/bfs.rs`, `src/engine.rs`, `src/sql_facade/traversal.rs` |
+| Shortest path behavior | `src/path_finder.rs`, `src/engine.rs` |
+| Persistence format | `src/persistence.rs`, `docs/contributor_guide/persistence-format.mdx` |
+| Mmap-backed stores | `src/node_store.rs`, `src/edge_store.rs`, `src/persistence.rs` |
+| Sync behavior | `src/sync.rs`, `src/sql_sync.rs`, `src/sql_facade/admin.rs` |
+| SQLSTATE or error semantics | `src/safety.rs`, `docs/user_guide/troubleshooting.mdx` |

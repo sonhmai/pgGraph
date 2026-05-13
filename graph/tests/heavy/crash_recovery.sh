@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DBNAME="${DBNAME:-postgres}"
+PGDATA="${PGDATA:?PGDATA must point at the test Postgres data directory}"
+POSTGRES_CTL="${POSTGRES_CTL:-pg_ctl}"
+POSTGRES_OPTS="${POSTGRES_OPTS:-}"
+
+start_postgres() {
+  if [[ -n "$POSTGRES_OPTS" ]]; then
+    "$POSTGRES_CTL" -D "$PGDATA" -o "$POSTGRES_OPTS" start
+  else
+    "$POSTGRES_CTL" -D "$PGDATA" start
+  fi
+}
+
+wait_for_postgres() {
+  for _ in $(seq 1 60); do
+    pg_isready -d "$DBNAME" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "Postgres did not become ready for $DBNAME" >&2
+  return 1
+}
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS graph;
+SELECT graph.reset();
+DROP TABLE IF EXISTS public.graph_crash_edges CASCADE;
+DROP TABLE IF EXISTS public.graph_crash_nodes CASCADE;
+CREATE TABLE public.graph_crash_nodes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+CREATE TABLE public.graph_crash_edges (
+    id BIGSERIAL PRIMARY KEY,
+    from_id TEXT NOT NULL REFERENCES public.graph_crash_nodes(id),
+    to_id TEXT NOT NULL REFERENCES public.graph_crash_nodes(id)
+);
+INSERT INTO public.graph_crash_nodes (id, name)
+SELECT i::text, 'node-' || i::text
+FROM generate_series(1, 50000) AS i;
+INSERT INTO public.graph_crash_edges (from_id, to_id)
+SELECT i::text, (i + 1)::text
+FROM generate_series(1, 49999) AS i;
+SELECT graph.add_table('public.graph_crash_nodes'::regclass, 'id', ARRAY['name']);
+SELECT graph.add_edge('public.graph_crash_edges'::regclass, 'from_id', 'public.graph_crash_nodes'::regclass, 'id', 'crash', false);
+SET graph.persist_on_build = on;
+SELECT * FROM graph.build();
+SELECT graph.enable_sync();
+INSERT INTO public.graph_crash_nodes VALUES ('50001', 'node-50001');
+INSERT INTO public.graph_crash_edges (from_id, to_id) VALUES ('50000', '50001');
+SQL
+
+postgres_pid="$(head -n 1 "$PGDATA/postmaster.pid")"
+kill -9 "$postgres_pid"
+sleep 2
+start_postgres
+wait_for_postgres
+
+psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS graph;
+SET graph.auto_load = on;
+DO $$
+DECLARE
+    nodes INTEGER;
+    edges INTEGER;
+    traversed BIGINT;
+    applied BIGINT;
+BEGIN
+    SELECT count(*) INTO traversed FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 3);
+    IF traversed = 0 THEN
+        RAISE EXCEPTION 'post-restart traversal returned no rows';
+    END IF;
+
+    SELECT node_count, edge_count INTO nodes, edges FROM graph.status();
+    IF nodes < 50000 OR edges < 49999 THEN
+        RAISE EXCEPTION 'auto-load after restart returned incomplete graph: nodes %, edges %', nodes, edges;
+    END IF;
+
+    SELECT inserts_applied + updates_applied + deletes_applied INTO applied FROM graph.apply_sync();
+    IF applied <= 0 THEN
+        RAISE EXCEPTION 'committed trigger rows were not recoverable after restart';
+    END IF;
+
+    PERFORM * FROM graph.maintenance();
+END
+$$;
+SQL
+
+graph_file="$PGDATA/graph/main.pggraph"
+if [[ -f "$graph_file" ]]; then
+  printf '\377' | dd of="$graph_file" bs=1 seek=140 count=1 conv=notrunc status=none
+  "$POSTGRES_CTL" -D "$PGDATA" -m immediate stop
+  start_postgres
+  wait_for_postgres
+  psql -X -v ON_ERROR_STOP=1 "$DBNAME" <<'SQL'
+SET graph.auto_load = on;
+DO $$
+BEGIN
+    PERFORM * FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 1);
+    RAISE EXCEPTION 'corrupted persisted graph was loaded successfully';
+EXCEPTION
+    WHEN OTHERS THEN
+        IF SQLERRM = 'corrupted persisted graph was loaded successfully' THEN
+            RAISE;
+        END IF;
+END
+$$;
+SQL
+fi
+
+echo "Crash recovery validation passed for $DBNAME"

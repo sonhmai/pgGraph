@@ -1,0 +1,231 @@
+# Troubleshooting
+
+Use this page to map symptoms to status checks and recovery actions.
+
+## Graph Not Built
+
+Symptom:
+
+```text
+SQLSTATE PG003
+Graph not built. Call graph.build() first.
+```
+
+Check:
+
+```sql
+SELECT node_count, edge_count, schema_status, invalid_reason
+FROM graph.status();
+```
+
+Fix:
+
+```sql
+SELECT * FROM graph.build();
+```
+
+## Node Not Found
+
+Symptom:
+
+```text
+SQLSTATE PG010
+Node not found
+```
+
+Check:
+
+```sql
+SELECT *
+FROM graph.search('id', 'expected_id', table_filter := 'public.my_table'::regclass, mode := 'exact');
+
+SELECT * FROM graph.registered_tables();
+```
+
+Likely causes:
+
+| Cause | Fix |
+|---|---|
+| Wrong table or ID string | Use exact source primary-key text |
+| Composite ID mismatch | Use JSON array text encoding from `graph.node_ref_string()` patterns |
+| Source row added after build | `graph.apply_sync()` or `graph.build()` |
+| Source row deleted/tombstoned | Rebuild or query another active node |
+
+## Search Returns No Rows
+
+Check that the column is registered in `graph.add_table(..., columns := ...)`:
+
+```sql
+SELECT *
+FROM graph.registered_tables()
+WHERE table_name = 'public.users';
+```
+
+Then test exact mode and table filter:
+
+```sql
+SELECT *
+FROM graph.search(
+  'name',
+  'Alice',
+  table_filter := 'public.users'::regclass,
+  mode := 'exact',
+  hydrate := true
+);
+```
+
+Search uses source-table SQL, so source table indexes matter. Add normal
+PostgreSQL indexes for high-volume searched columns.
+
+## Traversal Returns Too Few Rows
+
+Check:
+
+```sql
+SELECT *
+FROM graph.status();
+
+SELECT *
+FROM graph.traverse(
+  'public.users'::regclass,
+  'u1',
+  max_depth := 1,
+  edge_types := NULL,
+  direction := 'any',
+  hydrate := false,
+  max_nodes := 100000,
+  max_frontier := 100000
+);
+```
+
+Likely causes:
+
+| Cause | Fix |
+|---|---|
+| `max_depth` too low | Increase `max_depth` |
+| `edge_types` filter excludes edges | Remove filter or inspect `edge_types` in `graph.status()` |
+| `direction` wrong for unidirectional edges | Use `out`, `in`, or register bidirectional edges |
+| `max_nodes` or `max_frontier` trips | Raise circuit breakers for trusted query |
+| Tenant scope excludes nodes | Pass correct `tenant` or session tenant |
+| Filter column not registered/rebuilt | Register filter column and rebuild |
+
+## Schema Invalid Or Needs Rebuild
+
+Symptoms:
+
+```sql
+SELECT schema_status, needs_rebuild, invalid_reason
+FROM graph.status();
+```
+
+Fix after catalog or source schema changes:
+
+```sql
+SELECT * FROM graph.registered_tables();
+SELECT * FROM graph.registered_edges();
+SELECT * FROM graph.build();
+```
+
+If a registered column no longer exists, remove or update the registration.
+
+## Build Fails With Memory Error
+
+Symptom: `PG001`.
+
+Check:
+
+```sql
+SELECT * FROM graph.estimate();
+SHOW graph.memory_limit_mb;
+SHOW graph.oom_action;
+```
+
+Fix:
+
+```sql
+ALTER SYSTEM SET graph.memory_limit_mb = 8192;
+SELECT pg_reload_conf();
+```
+
+Or reduce registered graph scope.
+
+## Build Or Vacuum Locked
+
+Symptom: `PG006`.
+
+Check:
+
+```sql
+SELECT pid, state, query
+FROM pg_stat_activity
+WHERE query ILIKE '%graph.build%' OR query ILIKE '%graph.vacuum%' OR query ILIKE '%graph.maintenance%';
+```
+
+Wait for the current operation or investigate the owning session.
+
+## Corrupt Or Incompatible Artifact
+
+Symptoms: `PG009` or `PG011`.
+
+Fix:
+
+```sql
+SELECT * FROM graph.build();
+```
+
+If needed:
+
+```sql
+SELECT graph.reset();
+SELECT * FROM graph.build();
+```
+
+## Edge Buffer Full
+
+Symptom: `PG008`, `read_only = true`, or high `edge_buffer_used`.
+
+Check:
+
+```sql
+SELECT edge_buffer_used, needs_vacuum, read_only
+FROM graph.status();
+```
+
+Fix:
+
+```sql
+SELECT * FROM graph.maintenance();
+```
+
+or:
+
+```sql
+SELECT * FROM graph.vacuum();
+```
+
+## ACL Denied
+
+Symptom: `PG002`.
+
+Fix for read queries:
+
+```sql
+GRANT SELECT ON public.source_table TO app_role;
+```
+
+Fix for admin operations:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA graph TO graph_admin;
+```
+
+## Heavy Validation Commands
+
+Run focused external checks when debugging release-class issues:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_concurrency CLIENTS=3 ROUNDS=3 ./tests/heavy/concurrency_stress.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
+```

@@ -1,0 +1,125 @@
+import { withBasePath } from '../app/lib/base-path'
+import { CurrentScopeSection } from '../app/components/CurrentScopeSection'
+import { RocketLaunch, DownloadSimple, Database, MapTrifold, TreeStructure, TerminalWindow, Code } from '@phosphor-icons/react/dist/ssr'
+
+<img
+  className="pggraph-home-banner"
+  src={withBasePath('/images/pggraph-banner.png')}
+  alt="pgGraph banner"
+/>
+
+# pgGraph
+Graph database superpowers for your existing Postgres data.
+
+<ProjectBadges>
+  <Badge 
+    label="Built by" 
+    value="Evokoa" 
+    color="orange" 
+    href="https://evokoa.com" 
+    icon={<img src="/images/evokoa-ek-logo.svg" alt="Evokoa logo" className="badge-evokoa-logo" />} 
+  />
+  <Badge label="License" value="Apache-2.0" color="blue" href="https://github.com/Evokoa/pggraph/blob/main/LICENSE" />
+  <Badge label="version" value="0.1.0" color="green" href="https://github.com/Evokoa/pggraph/blob/main/graph/Cargo.toml" />
+  <Badge label="PostgreSQL" value="13-18" color="blue" href="https://www.postgresql.org/" />
+</ProjectBadges>
+
+pgGraph lets you run complex graph queries, like finding shortest paths, mapping relationships, 
+and discovering networks, directly on your existing PostgreSQL tables using standard SQL. 
+You don't need to migrate your data to a separate graph database, and your app keeps writing 
+data the exact same way it always has. Postgres remains your single source of truth.
+
+<ConceptBlocks />
+
+## Quick Links
+<Cards>
+  <Cards.Card title="Quickstart" href="/quickstart" icon={<RocketLaunch />} />
+  <Cards.Card title="Playground" href="/user_guide/playground" icon={<TerminalWindow />} />
+  <Cards.Card title="Installation" href="/user_guide/installation" icon={<DownloadSimple />} />
+  <Cards.Card title="Query Guide" href="/user_guide/querying" icon={<Database />} />
+  <Cards.Card title="API Reference" href="/user_guide/api-reference" icon={<Code />} />
+  <Cards.Card title="Architecture Deep Dive" href="/contributor_guide/architecture" icon={<TreeStructure />} />
+</Cards>
+
+
+<Callout type="warning">
+  pgGraph is currently alpha software for experimentation, demos, benchmarks, and early
+  feedback. The core graph features are usable, but memory hardening for very
+  large graphs and expensive algorithms is still in progress.
+  Run it in Docker or a dedicated development database for now, not on a production or
+  shared PostgreSQL cluster.
+</Callout>
+
+## Evokoa
+pgGraph is built by [Evokoa](https://evokoa.com). 
+We are building the missing infrastructure for widespread AI adoption.
+We are committed to keeping pgGraph 100% free and open-source, forever.
+
+Star our repo to help us reach more developers, and follow our journey below:
+<SocialLinks 
+  website="https://evokoa.com"
+  github="http://github.com/evokoa/pgGraph"
+  discord="https://discord.gg/HyUvAzmHej"
+  twitter="https://x.com/evokoa_ai"
+  productHunt="https://www.producthunt.com/@evokoa"
+/>
+
+## How it Works
+pgGraph builds a compact, derived graph index over selected relational tables to 
+drastically accelerate query times. Because Postgres stays the system of record, 
+all standard tables and constraints still apply to application writes.
+
+<HowItWorksSection />
+
+## Current benchmarks
+<BenchmarkChart />
+
+
+## Current Scope
+
+<CurrentScopeSection />
+
+## Documentation
+<Tabs items={['Quick links', 'User guide', 'Contributor guide']}>
+  <Tabs.Tab>
+    - [Overview](/)
+    - [Architecture](/contributor_guide/architecture)
+    - [Quickstart](/quickstart)
+    - [Roadmap](/roadmap)
+  </Tabs.Tab>
+  <Tabs.Tab>
+    - [User Guide Index](/user_guide/index)
+    - [Installation](/user_guide/installation)
+    - [Configuration](/user_guide/configuration)
+    - [Schema Registration](/user_guide/schema-registration)
+    - [Build & Persistence](/user_guide/build-and-persistence)
+    - [SQL Querying](/user_guide/querying)
+    - [Filters & Aggregation](/user_guide/filters-and-aggregation)
+    - [Sync & Maintenance](/user_guide/sync-and-maintenance)
+    - [Administration & Security](/user_guide/administration-and-security)
+    - [Limitations & Fit](/user_guide/limitations-and-fit)
+    - [SQL API Reference](/user_guide/api-reference)
+    - [Playground](/user_guide/playground)
+    - [Troubleshooting](/user_guide/troubleshooting)
+  </Tabs.Tab>
+  <Tabs.Tab>
+    - [Contributor Guide Index](/contributor_guide/index)
+    - [Architecture](/contributor_guide/architecture)
+    - [Engine Internals](/contributor_guide/engine-internals)
+    - [Memory Model](/contributor_guide/memory-model)
+    - [Persistence Format](/contributor_guide/persistence-format)
+    - [Build Pipeline](/contributor_guide/build-pipeline)
+    - [Traversal & Search Paths](/contributor_guide/traversal-search-paths)
+    - [Sync Internals](/contributor_guide/sync-internals)
+    - [Safety & Security](/contributor_guide/safety-security)
+    - [Benchmarking](/contributor_guide/benchmarking)
+    - [Testing & Release](/contributor_guide/testing-release)
+    - [SQL Tests](/contributor_guide/sql-tests)
+    - [Repository Map](/contributor_guide/repository-map)
+    - [Scripts](/contributor_guide/scripts)
+  </Tabs.Tab>
+</Tabs>
+
+## License
+
+Apache-2.0. See [LICENSE](https://github.com/Evokoa/pggraph/blob/main/LICENSE).

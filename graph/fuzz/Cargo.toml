@@ -1,0 +1,61 @@
+[package]
+name = "graph-fuzz"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.95"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+
+[dependencies.graph]
+path = ".."
+# Fuzzing uses pg17 by default for local harness compatibility. The main crate
+# exposes pg13 through pg18 features for the supported Postgres matrix.
+features = ["pg17", "fuzzing"]
+
+[[bin]]
+name = "parse_condition"
+path = "fuzz_targets/parse_condition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_graph_file"
+path = "fuzz_targets/load_graph_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured_filter"
+path = "fuzz_targets/structured_filter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_ref_string"
+path = "fuzz_targets/node_ref_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_properties"
+path = "fuzz_targets/sync_properties.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "traverse_options"
+path = "fuzz_targets/traverse_options.rs"
+test = false
+doc = false
+bench = false

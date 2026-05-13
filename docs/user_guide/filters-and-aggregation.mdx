@@ -1,0 +1,197 @@
+# Filters And Aggregation
+
+Traversal filters are JSONB values produced by helper functions or by equivalent
+JSON. Aggregation uses strict JSON traversal specs and aggregation specs.
+
+## Register Filter Columns First
+
+```sql
+SELECT graph.add_filter_column('public.users'::regclass, 'age', 'numeric');
+SELECT graph.add_filter_column('public.users'::regclass, 'active', 'boolean');
+SELECT graph.add_filter_column('public.users'::regclass, 'state', 'text');
+SELECT * FROM graph.build();
+```
+
+Filter columns are loaded into `FilterIndex` at build time. If you add or change
+filter-column registration, rebuild before using it in traversal.
+
+## Filter Helper Functions
+
+| Function | Meaning |
+|---|---|
+| `graph.equals(column, value)` / `graph.eq(column, value)` | equality |
+| `graph.not_equals(column, value)` / `graph.neq(column, value)` | inequality |
+| `graph.greater_than(column, value)` / `graph.gt(column, value)` | greater than |
+| `graph.at_least(column, value)` / `graph.gte(column, value)` | greater than or equal |
+| `graph.less_than(column, value)` / `graph.lt(column, value)` | less than |
+| `graph.at_most(column, value)` / `graph.lte(column, value)` | less than or equal |
+| `graph.between(column, lower, upper)` | inclusive range |
+| `graph.all(filters)` | logical AND merge |
+| `graph.on_node(filter)` | wrap helper output under the traversal node scope |
+
+Examples:
+
+```sql
+SELECT *
+FROM graph.traverse(
+  'public.users'::regclass,
+  'u1',
+  max_depth := 2,
+  filter := graph.all(ARRAY[
+    graph.gte('age', 40),
+    graph.neq('state', '"inactive"'::jsonb)
+  ]),
+  hydrate := true
+);
+```
+
+```sql
+SELECT *
+FROM graph.find_related(
+  'name',
+  'Alice',
+  where_node := graph.gt('age', 40),
+  target_table := 'public.users'::regclass
+);
+```
+
+<Callout type="info">
+The helper overloads accept convenient scalar text and integer values for common
+cases, but JSONB values are the general representation.
+</Callout>
+
+## Filter Semantics
+
+Filters are ANDed. A node must satisfy every predicate to be included.
+
+Missing or NULL values:
+
+| Operator family | NULL behavior |
+|---|---|
+| Equality and comparison | Does not match |
+| `eq` with JSON `null` | Matches absent value |
+| `neq` with JSON `null` | Matches present value |
+
+The public helper set currently focuses on equality, inequality, comparisons,
+and ranges. For NULL checks, pass JSON `null` explicitly:
+
+```sql
+SELECT *
+FROM graph.traverse(
+  'public.users'::regclass,
+  'u1',
+  filter := graph.eq('deleted_at', 'null'::jsonb)
+);
+```
+
+## Path Formatting Helpers
+
+`graph.node_ref_string()` returns a canonical JSON array string used by strict
+aggregation traversal specs:
+
+```sql
+SELECT graph.node_ref_string('public.users'::regclass, 'u1');
+```
+
+`graph.format_path()` converts a traversal `path` and `edge_path` pair to text:
+
+```sql
+SELECT graph.format_path(
+  '[{"table":"users","id":"u1"},{"table":"users","id":"u2"}]'::jsonb,
+  '["friend"]'::jsonb
+);
+```
+
+Result:
+
+```text
+users:u1 --friend--> users:u2
+```
+
+## Path Count Estimate
+
+`graph.path_count_estimate()` evaluates a strict traversal spec and returns:
+
+| Column | Meaning |
+|---|---|
+| `estimated_paths` | Count up to `graph.max_exact_path_count` |
+| `exact` | Whether the count completed exactly |
+| `capped` | Whether counting stopped at the configured cap |
+
+Example:
+
+```sql
+WITH req AS (
+  SELECT jsonb_build_object(
+    'starts',
+    jsonb_build_array(graph.node_ref_string('public.users'::regclass, 'u1')),
+    'direction', 'out',
+    'min_depth', 0,
+    'max_depth', 2,
+    'edge_types', jsonb_build_array('friend'),
+    'node_tables', jsonb_build_array('public.users')
+  ) AS traversal
+)
+SELECT *
+FROM graph.path_count_estimate((SELECT traversal FROM req));
+```
+
+## Aggregation
+
+`graph.aggregate(traversal, aggregations, scope, path_limit)` runs server-side
+aggregates over traversal results.
+
+```sql
+WITH req AS (
+  SELECT jsonb_build_object(
+    'starts',
+    jsonb_build_array(graph.node_ref_string('public.users'::regclass, 'u1')),
+    'direction', 'out',
+    'min_depth', 0,
+    'max_depth', 1,
+    'edge_types', jsonb_build_array('friend'),
+    'node_tables', jsonb_build_array('public.users')
+  ) AS traversal
+)
+SELECT graph.aggregate(
+  traversal,
+  '{
+    "sum":[{"table":"public.users","column":"age","as":"total_age"}],
+    "avg":[{"table":"public.users","column":"age","as":"avg_age"}],
+    "count":[{"table":"public.users","column":"id","as":"user_count"}]
+  }'::jsonb
+)
+FROM req;
+```
+
+Supported aggregation groups:
+
+| Group | Meaning |
+|---|---|
+| `sum` | Sum numeric column values |
+| `avg` | Average numeric column values |
+| `count` | Count non-null column values |
+
+Each spec object contains:
+
+| Key | Meaning |
+|---|---|
+| `table` | Source table regclass text |
+| `column` | Source column to read |
+| `as` | Output JSON key |
+
+## Aggregation Scope
+
+| Scope | Behavior |
+|---|---|
+| `returned_nodes` | Aggregate over the returned traversal node set |
+| `chosen_parent_path` | Aggregate over the selected parent path to each result |
+| `all_possible_paths` | Enumerate all possible paths under the traversal spec until `path_limit` |
+
+Use `graph.path_count_estimate()` before `all_possible_paths` on broad graphs.
+
+<Callout type="warning">
+`all_possible_paths` can grow exponentially. The code enforces
+`graph.max_exact_path_count` and the explicit `path_limit` to avoid unbounded
+path enumeration.
+</Callout>

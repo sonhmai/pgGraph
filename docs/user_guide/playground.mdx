@@ -1,0 +1,98 @@
+# Playground
+
+The pgGraph sandbox playground is a one-command Streamlit inspector for trying
+pgGraph against PostgreSQL without manually preparing a database.
+
+It starts the repository Docker image, prepares the Panama Papers dataset,
+loads pgGraph, warms the PostgreSQL connection, and opens a dark-mode SQL
+workspace where you can run pgGraph functions directly.
+
+## Start It
+
+From the repository root:
+
+```bash
+sandbox/start_playground.sh
+```
+
+The script creates a Python virtualenv under `sandbox/playground/.venv` when
+needed and installs the playground dependencies there. It also starts or reuses
+the `pggraph-sandbox` PostgreSQL container.
+
+The first run may take time because it downloads and prepares the Panama Papers
+dataset:
+
+- compressed archive: 73 MB;
+- extracted source data: 626 MB.
+
+## Requirements
+
+You need:
+
+- Docker or Docker Desktop;
+- Python 3.10 or newer;
+- network access for the first dataset download.
+
+If Docker is missing or the daemon is not running, the script prints direct
+installation links for macOS, Windows, and Linux.
+
+## What The Playground Loads
+
+The playground currently loads Panama Papers / ICIJ Offshore Leaks data. It is
+intended as a quick inspector and SQL demo environment, not a full benchmark
+runner.
+
+For LDBC and benchmark reports, use:
+
+```bash
+sandbox/run_benchmarks.sh ldbc
+```
+
+## Using The SQL Workspace
+
+The playground opens with a question-oriented SQL editor. The default examples
+show:
+
+- `graph.status()`;
+- registered tables and edges;
+- search over Panama entities;
+- traversal from a high-degree node;
+- connected component functions.
+
+You can edit the SQL and run any query against the Docker-backed PostgreSQL 17
+database with pgGraph installed.
+
+Useful starting points:
+
+```sql
+SELECT * FROM graph.status();
+SELECT * FROM graph.registered_tables();
+SELECT * FROM graph.registered_edges();
+```
+
+```sql
+SELECT *
+FROM graph.search('name', 'Mossack', mode := 'contains', max_results := 25);
+```
+
+```sql
+SELECT *
+FROM graph.component_stats();
+```
+
+The app warms the graph before reading status so node and edge counts should
+reflect the loaded dataset. If the graph is still building, the app waits for
+the build to complete or reports the build error.
+
+## Cleanup
+
+To remove generated playground and benchmark artifacts:
+
+```bash
+sandbox/cleanup.sh --dry-run
+sandbox/cleanup.sh
+```
+
+Cleanup removes downloaded datasets, normalized CSVs, generated benchmark
+reports, local virtualenvs, and the sandbox Docker container. Add
+`--remove-image` to also remove the built PostgreSQL image.

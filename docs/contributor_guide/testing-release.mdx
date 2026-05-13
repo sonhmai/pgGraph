@@ -1,0 +1,348 @@
+# Testing And Release
+
+The project has several validation layers. Use the narrowest test that covers
+your change while preserving the release gates for cross-boundary behavior.
+
+## Fast Local Checks
+
+```bash
+cd graph
+cargo fmt --check
+cargo test --features pg17
+```
+
+Run pgrx integration tests:
+
+```bash
+cd graph
+cargo pgrx test pg17
+```
+
+Build docs:
+
+```bash
+cd graph
+cargo doc --features pg17 --no-deps
+```
+
+Check docs against local references, the SQL-facing Rust API, registered GUCs,
+and the Rust source map:
+
+```bash
+scripts/check_docs_drift.sh
+```
+
+The aggregate script runs `scripts/check_doc_references.py`,
+`scripts/check_sql_api_drift.py`, and `scripts/check_rust_doc_map_drift.py`.
+Use `python3 scripts/check_sql_api_drift.py --list-implemented` or
+`python3 scripts/check_rust_doc_map_drift.py --list` when you need to inspect
+the implementation-side inventory.
+
+## Rust Unit Tests
+
+Module-local Rust tests cover:
+
+| Module | Examples |
+|---|---|
+| `node_store.rs` | active bits, tombstones, mmap invariants |
+| `edge_store.rs` | CSR construction, dedupe, reverse store, weights |
+| `bfs.rs` | depth limits, edge filters, overlay traversal, paths |
+| `filter_index.rs` | dense/sparse storage and typed filter checks |
+| `persistence.rs` | roundtrip and corrupt artifact rejection |
+| `types.rs` | parser helpers and filter operation boundaries |
+| `config.rs` | GUC parser fallbacks |
+| `safety.rs` | SQLSTATE mapping |
+
+## pgrx SQL Tests
+
+`src/pg_tests/` covers installed extension behavior inside PostgreSQL:
+
+| File | Scope |
+|---|---|
+| `discovery.rs` | schema and table-set discovery |
+| `traversal_api.rs` | traversal helpers, labels, weights, directions, strategies |
+| `traversal_paths.rs` | paths, aggregation, strict specs |
+| `filters.rs` | typed filter behavior |
+| `registration_search.rs` | registration and source search |
+| `sync_config_build.rs` | sync mode, GUC, OOM, build scanner, and schema drift behavior |
+| `components_jobs.rs` | component functions and job APIs |
+| `maintenance_admin.rs` | sync apply, vacuum, maintenance |
+| `workflow_search_api.rs` | `find`, `expand`, `find_related` |
+| `workflow_relationship_api.rs` | `path`, `connection`, `neighborhood` |
+| `workflow_validation.rs` | argument validation and unsupported modes |
+| `synthetic_release.rs` | synthetic release-gate SQL fixture through pgrx |
+
+See [SQL Tests](./sql-tests) for the full SQL test inventory and the boundary
+each layer is meant to cover.
+
+### Provision pgrx Test PostgreSQL
+
+The pgrx SQL tests need a PostgreSQL installation for the target major version
+and a pgrx test cluster. They do not need preloaded application tables or
+external datasets. Test fixtures in `src/pg_tests/common.rs` create and drop
+their own source tables, call `graph.reset()`, register graph metadata, and
+build the graph inside the test database.
+
+Install PostgreSQL and ensure the matching `pg_config` is available. Examples:
+
+```bash
+# macOS/Homebrew PostgreSQL 17
+export PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config
+
+# Debian/Ubuntu PostgreSQL 17
+export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+```
+
+Install and initialize pgrx once for that PostgreSQL version:
+
+```bash
+cargo install cargo-pgrx --version 0.18.0 --locked
+cargo pgrx init --pg17 "$PG_CONFIG"
+```
+
+Run the SQL tests from the crate directory:
+
+```bash
+cd graph
+cargo pgrx test pg17
+```
+
+Run a focused pgrx test by name when iterating:
+
+```bash
+cd graph
+cargo pgrx test pg17 synthetic_fixture_exercises_release_gate_sql_shape
+```
+
+If pgrx reports an extension or SQL-definition mismatch after code changes,
+reinstall the extension against the same PostgreSQL version and rerun:
+
+```bash
+cd graph
+cargo pgrx install --pg-config "$PG_CONFIG" --features pg17 --no-default-features
+cargo pgrx test pg17
+```
+
+## Heavy Tests
+
+Some behavior must be tested outside `cargo pgrx test` because pgrx SQL tests
+run inside generated SQL functions and do not reflect normal client/server
+error boundaries.
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_boundary ./tests/heavy/run_sqlstate_acl_boundary.sh
+```
+
+Heavy suites:
+
+| Script | Purpose |
+|---|---|
+| `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
+| `run_pgbench_sync.sh` | Concurrent DML and trigger sync stress |
+| `crash_recovery.sh` | Persisted graph recovery and corruption rejection after postmaster kill |
+| `run_memory_sanitizers.sh` | pgrx suite plus optional ASan/Valgrind |
+| `package_validate.sh` | Packaging checks |
+| `fresh_install_smoke.sh` | Install and quick use smoke |
+| `function_metadata_audit.sh` | SQL signature and metadata audit |
+| `backup_restore_validate.sh` | Dump/restore state validation |
+| `docker_smoke.sh` | Container smoke test |
+| `pg_upgrade_validate.sh` | Upgrade validation |
+| `background_job_lock_regression.sh` | Background job lock/failure behavior |
+| `build_lock_regression.sh` | Build/vacuum lock conflict behavior |
+| `concurrency_stress.sh` | Mixed build/sync/vacuum/traversal stress |
+| `synthetic_release_smoke.sh` | Deterministic synthetic release-gate graph |
+| `run_synthetic_release_evidence.sh` | Synthetic release smoke with metadata and artifact report |
+| `measure_build_rss.sh` | Peak RSS measurement |
+| `measure_mmap_pss.sh` | Linux PSS measurement for mmap sharing |
+
+See [SQL Tests](./sql-tests) for the full heavy-script inventory.
+
+### SQLSTATE And ACL Boundary
+
+`run_sqlstate_acl_boundary.sh` validates errors from client-side `psql` output
+instead of wrapping calls in nested PL/pgSQL exception handlers. That is closer
+to real application behavior and avoids confusing pgrx panic/error plumbing
+with PL/pgSQL's nested exception machinery.
+
+It covers representative public errors:
+
+| SQLSTATE | Boundary |
+|---|---|
+| `PG003` | Traversal before the graph has been built. |
+| `PG010` | Missing seed node. |
+| `PG005` | Invalid Unicode-heavy filter input. |
+| `55000` | Graph queries disabled by configuration. |
+| `PG002` | Restricted-role access to global analytics. |
+
+### Concurrent Sync Stress
+
+`run_pgbench_sync.sh` creates a disposable schema, enables trigger-buffered
+sync, runs concurrent insert/update/delete traffic through `pgbench`, applies
+the sync buffer, and checks post-sync query behavior.
+
+Useful knobs:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_pgbench CLIENTS=16 JOBS=4 TIME=120 \
+  RATE=100 MAX_APPLY_MS=5000 MAX_QUERY_MS=250 MIN_ROWS_APPLIED=0 \
+  ./tests/heavy/run_pgbench_sync.sh
+```
+
+`RATE` keeps the workload bounded so the release gate measures sync behavior
+instead of turning `graph.apply_sync()` into an accidental soak test.
+
+### Crash Recovery
+
+`crash_recovery.sh` must run only against a disposable PostgreSQL instance. It
+reads `PGDATA/postmaster.pid`, sends `kill -9` to that postmaster, restarts the
+instance with `pg_ctl`, verifies graph auto-load, corrupts the persisted graph
+file, and verifies the loader rejects the corruption cleanly.
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_crash PGDATA=/path/to/disposable/pgdata \
+  ./tests/heavy/crash_recovery.sh
+```
+
+When the instance needs custom server options, pass the same restart options
+with `POSTGRES_OPTS`, for example `POSTGRES_OPTS="-p 55433 -k /tmp"`.
+
+### Memory And FFI Boundary
+
+`run_memory_sanitizers.sh` runs the pgrx SQL suite and a long-lived pgbench sync
+smoke by default. ASan and Valgrind are opt-in because they need compatible
+toolchains and PostgreSQL builds.
+
+```bash
+cd graph
+DBNAME=pggraph_pgbench ./tests/heavy/run_memory_sanitizers.sh
+RUN_ASAN=1 ./tests/heavy/run_memory_sanitizers.sh
+RUN_VALGRIND=1 PGDATA=/path/to/pgdata POSTGRES_BIN=/path/to/postgres \
+  ./tests/heavy/run_memory_sanitizers.sh
+```
+
+### Packaging, Docker, Upgrade, And Workers
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh
+PG_VERSION_FEATURE=pg17 SOURCE_DB=pggraph_backup_src RESTORE_DB=pggraph_backup_dst ./tests/heavy/backup_restore_validate.sh
+./tests/heavy/docker_smoke.sh
+OLD_BINDIR=/path/to/old/bin NEW_BINDIR=/path/to/new/bin \
+  OLD_DATADIR=/tmp/pg-old NEW_DATADIR=/tmp/pg-new \
+  ./tests/heavy/pg_upgrade_validate.sh
+```
+
+Worker and memory sizing checks:
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_background_lock ./tests/heavy/background_job_lock_regression.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_build_lock ./tests/heavy/build_lock_regression.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_concurrency ./tests/heavy/concurrency_stress.sh
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_rss NODE_COUNT=200000 MAX_RSS_MB=0 ./tests/heavy/measure_build_rss.sh
+DBNAME=graph_test BACKENDS=50 ./tests/heavy/measure_mmap_pss.sh
+```
+
+`measure_mmap_pss.sh` is Linux-only. It keeps graph-query backends alive and
+reads `/proc/<pid>/smaps_rollup` so release evidence can use proportional set
+size for mmap sharing instead of summed RSS.
+
+### Synthetic Release Dataset
+
+`synthetic_release_smoke.sh` creates a deterministic synthetic relational graph
+for release gates. This is not a benchmark claim; it is a reproducible test
+fixture that validates build, persistence, auto-load, traversal, search,
+filters, shortest paths, weighted paths, and component summaries without
+requiring a real dataset.
+
+```bash
+cd graph
+DBNAME=pggraph_synthetic NODE_COUNT=50000 HUB_FANOUT=1000 \
+  MAX_BUILD_MS=60000 MAX_QUERY_MS=1000 \
+  ./tests/heavy/synthetic_release_smoke.sh
+```
+
+The release gate runs it by default. Tune with:
+
+```bash
+RUN_SYNTHETIC=1 SYNTHETIC_NODE_COUNT=50000 SYNTHETIC_HUB_FANOUT=1000 \
+  SYNTHETIC_MAX_BUILD_MS=60000 SYNTHETIC_MAX_QUERY_MS=1000 \
+  ./tests/heavy/run_release_gate.sh
+```
+
+Set `RUN_SYNTHETIC=0` only when the local environment cannot run disposable
+PostgreSQL databases.
+
+To capture metadata and inspect the persisted `.pggraph` artifact:
+
+```bash
+cd graph
+NODE_COUNT=50000 HUB_FANOUT=1000 ./tests/heavy/run_synthetic_release_evidence.sh
+```
+
+The evidence wrapper writes JSON under `target/release-evidence/` and
+uses `scripts/inspect_pggraph_artifact.py` when the artifact is present.
+
+## Release Gate
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+Use Docker for PostgreSQL major matrix validation when local headers are not
+available:
+
+```bash
+cd graph
+./tests/heavy/run_pg_matrix_docker.sh
+```
+
+Set `RUN_FULL_MATRIX=1` on `run_release_gate.sh` to run every configured
+PostgreSQL major through `run_pg_matrix.sh`. Set `RUN_RSS=1` to include a
+large-build peak RSS measurement; use `MAX_RSS_MB` when there is a recorded
+release threshold.
+
+## Fuzzing
+
+Fuzz targets cover:
+
+| Target | Boundary |
+|---|---|
+| `load_graph_file` | Artifact loader |
+| `node_ref_string` | Node-ref parser |
+| `parse_condition` | Filter condition parser |
+| `traverse_options` | Traversal option parser |
+| `sync_properties` | Sync JSON property parser |
+| `structured_filter` | Structured filter shape validation |
+
+Compile smoke:
+
+```bash
+cd graph/fuzz
+cargo fuzz build
+```
+
+## Benchmarking
+
+See [Benchmarking](./benchmarking) for Criterion benchmark usage, synthetic
+release-gate timing, and SQL-facing benchmark requirements.
+
+## Documentation Checks
+
+Rust public API docs are part of the contract. Before calling documentation
+complete:
+
+```bash
+cd graph
+cargo doc --features pg17 --no-deps
+cargo test --doc --features pg17
+```
+
+If doctests require PostgreSQL, mark them `no_run` or keep examples in MDX user
+docs instead of rustdoc.

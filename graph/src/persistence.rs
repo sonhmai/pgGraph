@@ -1,0 +1,1431 @@
+//! # Persistence — .pggraph file format, mmap, atomic writes
+//!
+//! The `.pggraph` file is the on-disk representation of the graph engine.
+//! It is written atomically (write to `<path>.tmp` then rename) and
+//! read via `mmap` for zero-copy access to the base graph arrays.
+//!
+//! ## File Format
+//!
+//! ```text
+//! [Header]              — 128 bytes
+//!   magic: "PGGH"       — 4 bytes
+//!   version: u32         — 4 bytes
+//!   flags: u32           — 4 bytes
+//!   node_count: u32      — 4 bytes
+//!   edge_count: u32      — 4 bytes
+//!   section_offsets[11]  — 11 × u64 = 88 bytes
+//!   crc32: u32           — 4 bytes
+//!
+//! [Section 0: NodeStore.is_active]            — ceil(node_count / 8) bytes
+//! [Section 1: NodeStore.table_oids]           — node_count × 4 bytes
+//! [Section 2: EdgeStore.edge_offsets]         — (node_count + 1) × 4 bytes
+//! [Section 3: EdgeStore.targets]              — edge_count × 4 bytes
+//! [Section 4: EdgeStore.type_ids]             — edge_count × 1 byte
+//! [Section 5: EdgeStore.weights]              — edge_count × 4 bytes (optional)
+//! [Section 6: ResolutionIndex]                — 4 + entry_count × 16 bytes
+//! [Section 7: NodeStore.primary_key_offsets]  — (node_count + 1) × 8 bytes
+//! [Section 8: NodeStore.primary_key_bytes]    — variable length UTF-8
+//! [Section 9: FilterIndex (Bincode)]          — variable length
+//! [Section 10: edge_type_registry (Bincode)]  — variable length
+//! ```
+//!
+//! ## Memory Model
+//!
+//! When loaded via `load_graph_file()`:
+//! - **NodeStore** (`is_active`, `table_oids`, primary-key offsets/bytes):
+//!   mmap-backed and shared through the OS page cache
+//! - **Forward EdgeStore** (`edge_offsets`, `targets`, `type_ids`, optional
+//!   `weights`): mmap-backed and shared through the OS page cache
+//! - **ResolutionIndex**: mmap'd, zero-copy, binary search
+//! - **FilterIndex** and **edge type registry**: bincode sections deserialized
+//!   into backend-local heap
+//! - **Reverse EdgeStore**: derived into an owned CSR per backend
+//!
+//! See: `docs/contributor_guide/memory-model.mdx`
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use memmap2::Mmap;
+
+use crate::edge_store::{EdgeStore, MmapEdgeArrays};
+use crate::engine::{Engine, ResolutionStore};
+use crate::filter_index::FilterIndex;
+use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
+use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
+use crate::safety::{GraphError, GraphResult};
+
+/// Magic bytes for .pggraph files.
+const MAGIC: &[u8; 4] = b"PGGH";
+/// Current file format version.
+const VERSION: u32 = 1;
+/// Header size in bytes.
+const HEADER_SIZE: usize = 128;
+/// Number of sections.
+const NUM_SECTIONS: usize = 11;
+const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
+
+fn align_data(data: &mut Vec<u8>, alignment: usize) {
+    let padding = (alignment - (data.len() % alignment)) % alignment;
+    data.resize(data.len() + padding, 0);
+}
+
+fn checked_section_size(count: u32, width: usize, label: &str) -> GraphResult<usize> {
+    (count as usize)
+        .checked_mul(width)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("{} section size overflow", label),
+        })
+}
+
+fn validate_section_min_len(
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    section: usize,
+    min_len: usize,
+    label: &str,
+) -> GraphResult<()> {
+    let actual = ranges[section].1 - ranges[section].0;
+    if actual < min_len {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "{} section too small: need at least {} bytes, found {}",
+                label, min_len, actual
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_section_alignment(
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    section: usize,
+    alignment: usize,
+    label: &str,
+) -> GraphResult<()> {
+    if !ranges[section].0.is_multiple_of(alignment) {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "{} section offset {} is not {}-byte aligned",
+                label, ranges[section].0, alignment
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_length_prefixed_section(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    section: usize,
+    label: &str,
+) -> GraphResult<()> {
+    if ranges[section].1 - ranges[section].0 < 4 {
+        return Err(GraphError::CorruptFile {
+            reason: format!("{} section too small for length prefix", label),
+        });
+    }
+    let start = ranges[section].0;
+    let size = u32::from_le_bytes([
+        mmap[start],
+        mmap[start + 1],
+        mmap[start + 2],
+        mmap[start + 3],
+    ]) as usize;
+    let end = start
+        .checked_add(4)
+        .and_then(|payload_start| payload_start.checked_add(size))
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("{} size overflow", label),
+        })?;
+    if end > ranges[section].1 {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "{} payload exceeds section: need end {}, section ends {}",
+                label, end, ranges[section].1
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn read_u32_at(mmap: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        mmap[offset],
+        mmap[offset + 1],
+        mmap[offset + 2],
+        mmap[offset + 3],
+    ])
+}
+
+fn read_u64_at(mmap: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        mmap[offset],
+        mmap[offset + 1],
+        mmap[offset + 2],
+        mmap[offset + 3],
+        mmap[offset + 4],
+        mmap[offset + 5],
+        mmap[offset + 6],
+        mmap[offset + 7],
+    ])
+}
+
+fn validate_persisted_contents(
+    mmap: &[u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    node_count: u32,
+    edge_count: u32,
+) -> GraphResult<()> {
+    let edge_offsets_start = ranges[2].0;
+    let mut previous = read_u32_at(mmap, edge_offsets_start);
+    if previous != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: format!("edge_offsets[0] must be 0, found {}", previous),
+        });
+    }
+    for idx in 1..=node_count as usize {
+        let current = read_u32_at(mmap, edge_offsets_start + idx * 4);
+        if current < previous {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "edge_offsets are not monotonic at index {}: {} < {}",
+                    idx, current, previous
+                ),
+            });
+        }
+        if current > edge_count {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "edge_offsets[{}] exceeds edge_count: {} > {}",
+                    idx, current, edge_count
+                ),
+            });
+        }
+        previous = current;
+    }
+    if previous != edge_count {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "final edge offset must equal edge_count: {} != {}",
+                previous, edge_count
+            ),
+        });
+    }
+
+    let targets_start = ranges[3].0;
+    for idx in 0..edge_count as usize {
+        let target = read_u32_at(mmap, targets_start + idx * 4);
+        if target >= node_count {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "target at index {} exceeds node_count: {} >= {}",
+                    idx, target, node_count
+                ),
+            });
+        }
+    }
+
+    let pk_offsets_start = ranges[7].0;
+    let pk_bytes_len = ranges[8].1 - ranges[8].0;
+    let mut previous_pk = read_u64_at(mmap, pk_offsets_start);
+    if previous_pk != 0 {
+        return Err(GraphError::CorruptFile {
+            reason: format!("primary_key_offsets[0] must be 0, found {}", previous_pk),
+        });
+    }
+    for idx in 1..=node_count as usize {
+        let current = read_u64_at(mmap, pk_offsets_start + idx * 8);
+        if current < previous_pk {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "primary_key_offsets are not monotonic at index {}: {} < {}",
+                    idx, current, previous_pk
+                ),
+            });
+        }
+        if current as usize > pk_bytes_len {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "primary_key_offsets[{}] exceeds primary key bytes: {} > {}",
+                    idx, current, pk_bytes_len
+                ),
+            });
+        }
+        previous_pk = current;
+    }
+
+    Ok(())
+}
+
+fn validate_section_layout(
+    mmap: &[u8],
+    section_offsets: &[u64; NUM_SECTIONS],
+    node_count: u32,
+    edge_count: u32,
+) -> GraphResult<[(usize, usize); NUM_SECTIONS]> {
+    let mut starts = [0usize; NUM_SECTIONS];
+    let mut prev_offset = HEADER_SIZE;
+    for (i, &offset) in section_offsets.iter().enumerate() {
+        let offset = usize::try_from(offset).map_err(|_| GraphError::CorruptFile {
+            reason: format!("section offset {} does not fit in usize", i),
+        })?;
+        if offset < prev_offset || offset > mmap.len() {
+            return Err(GraphError::CorruptFile {
+                reason: format!(
+                    "invalid section offset at index {}: {} (prev: {}, mmap_len: {})",
+                    i,
+                    offset,
+                    prev_offset,
+                    mmap.len()
+                ),
+            });
+        }
+        starts[i] = offset;
+        prev_offset = offset;
+    }
+
+    let ranges = std::array::from_fn(|i| {
+        let end = if i + 1 < NUM_SECTIONS {
+            starts[i + 1]
+        } else {
+            mmap.len()
+        };
+        (starts[i], end)
+    });
+
+    let active_byte_count = (node_count as usize).div_ceil(8);
+    let node_plus_one = node_count
+        .checked_add(1)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: "node_count overflow in edge offset section".to_string(),
+        })?;
+    let node_u32_bytes = checked_section_size(node_count, 4, "table_oids")?;
+    let edge_offsets_bytes = checked_section_size(node_plus_one, 4, "edge_offsets")?;
+    let edge_targets_bytes = checked_section_size(edge_count, 4, "targets")?;
+    let edge_type_bytes = checked_section_size(edge_count, 1, "type_ids")?;
+    let edge_weight_bytes = checked_section_size(edge_count, 4, "weights")?;
+    let pk_offsets_bytes = checked_section_size(node_plus_one, 8, "primary_key_offsets")?;
+
+    validate_section_alignment(&ranges, 1, 4, "table_oids")?;
+    validate_section_alignment(&ranges, 2, 4, "edge_offsets")?;
+    validate_section_alignment(&ranges, 3, 4, "targets")?;
+    validate_section_alignment(&ranges, 5, 4, "weights")?;
+    validate_section_alignment(&ranges, 7, 8, "primary_key_offsets")?;
+
+    validate_section_min_len(&ranges, 0, active_byte_count, "is_active")?;
+    validate_section_min_len(&ranges, 1, node_u32_bytes, "table_oids")?;
+    validate_section_min_len(&ranges, 2, edge_offsets_bytes, "edge_offsets")?;
+    validate_section_min_len(&ranges, 3, edge_targets_bytes, "targets")?;
+    validate_section_min_len(&ranges, 4, edge_type_bytes, "type_ids")?;
+    validate_section_min_len(&ranges, 7, pk_offsets_bytes, "primary_key_offsets")?;
+
+    let weights_len = ranges[5].1 - ranges[5].0;
+    if weights_len != 0 && weights_len != edge_weight_bytes {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "weights section must be empty or exactly {} bytes, found {}",
+                edge_weight_bytes, weights_len
+            ),
+        });
+    }
+
+    let resolution = &mmap[ranges[6].0..ranges[6].1];
+    let resolution_index =
+        ResolutionIndex::from_bytes(resolution).ok_or_else(|| GraphError::CorruptFile {
+            reason: "invalid resolution index section".to_string(),
+        })?;
+    let resolution_min_len = 4 + resolution_index.len() as usize * RESOLUTION_ENTRY_SIZE;
+    validate_section_min_len(&ranges, 6, resolution_min_len, "resolution_index")?;
+
+    validate_length_prefixed_section(mmap, &ranges, 9, "filter index")?;
+    validate_length_prefixed_section(mmap, &ranges, 10, "edge type registry")?;
+
+    validate_persisted_contents(mmap, &ranges, node_count, edge_count)?;
+
+    Ok(ranges)
+}
+
+/// Write the engine state to a .pggraph file.
+///
+/// Uses atomic rename: writes to `<path>.tmp`, then renames to `path`.
+pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
+    let tmp_path = append_path_suffix(path, ".tmp");
+
+    // Ensure parent directory exists (handles first-run where $PGDATA/graph/ doesn't exist)
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            GraphError::Internal(format!(
+                "Cannot create directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
+    let mut data = vec![0u8; HEADER_SIZE];
+
+    // Track section offsets
+    let mut section_offsets = [0u64; NUM_SECTIONS];
+
+    // Section 0: is_active (packed bits as raw bytes)
+    section_offsets[0] = data.len() as u64;
+    let is_active_bytes = engine.node_store.is_active_bytes();
+    data.extend_from_slice(&is_active_bytes);
+
+    // Section 1: table_oids (u32 array)
+    align_data(&mut data, 4);
+    section_offsets[1] = data.len() as u64;
+    for &oid in engine.node_store.table_oids_slice() {
+        data.extend_from_slice(&oid.to_le_bytes());
+    }
+
+    // Section 2: edge_offsets (u32 array)
+    align_data(&mut data, 4);
+    section_offsets[2] = data.len() as u64;
+    for &offset in engine.edge_store.offsets_slice() {
+        data.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    // Section 3: targets (u32 array)
+    align_data(&mut data, 4);
+    section_offsets[3] = data.len() as u64;
+    for &target in engine.edge_store.targets_slice() {
+        data.extend_from_slice(&target.to_le_bytes());
+    }
+
+    // Section 4: type_ids (u8 array)
+    section_offsets[4] = data.len() as u64;
+    data.extend_from_slice(engine.edge_store.type_ids_slice());
+
+    // Section 5: weights (u32 array, optional)
+    align_data(&mut data, 4);
+    section_offsets[5] = data.len() as u64;
+    for &weight in engine.edge_store.weights_slice() {
+        data.extend_from_slice(&weight.to_le_bytes());
+    }
+
+    // Section 6: ResolutionIndex (sorted array)
+    section_offsets[6] = data.len() as u64;
+    let ri_bytes = engine.resolution_to_bytes();
+    data.extend_from_slice(&ri_bytes);
+
+    // Section 7: primary key offsets (u64 array) and section 8: UTF-8 bytes
+    align_data(&mut data, 8);
+    section_offsets[7] = data.len() as u64;
+    let mut pk_bytes = Vec::new();
+    let mut pk_offsets = Vec::with_capacity(engine.node_store.node_count() as usize + 1);
+    pk_offsets.push(0u64);
+    for node_idx in 0..engine.node_store.node_count() {
+        let pk = engine.node_store.primary_key(node_idx);
+        pk_bytes.extend_from_slice(pk.as_bytes());
+        pk_offsets.push(pk_bytes.len() as u64);
+    }
+    while pk_offsets.len() < engine.node_store.node_count() as usize + 1 {
+        pk_offsets.push(*pk_offsets.last().unwrap_or(&0));
+    }
+    for offset in pk_offsets {
+        data.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    section_offsets[8] = data.len() as u64;
+    data.extend_from_slice(&pk_bytes);
+
+    // Section 9: FilterIndex (Bincode)
+    section_offsets[9] = data.len() as u64;
+    let filter_bytes = bincode::serialize(&engine.filter_index)
+        .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
+    data.extend_from_slice(&(filter_bytes.len() as u32).to_le_bytes());
+    data.extend_from_slice(&filter_bytes);
+
+    // Section 10: edge_type_registry (Bincode)
+    section_offsets[10] = data.len() as u64;
+    let edge_type_bytes = bincode::serialize(&engine.edge_type_registry).map_err(|e| {
+        GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
+    })?;
+    data.extend_from_slice(&(edge_type_bytes.len() as u32).to_le_bytes());
+    data.extend_from_slice(&edge_type_bytes);
+
+    // Compute CRC32 of everything after the header
+    let crc = crc32fast::hash(&data[HEADER_SIZE..]);
+
+    // Write header
+    let node_count = engine.node_store.node_count();
+    let edge_count = engine.edge_store.edge_count();
+
+    data[0..4].copy_from_slice(MAGIC);
+    data[4..8].copy_from_slice(&VERSION.to_le_bytes());
+    data[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
+    data[12..16].copy_from_slice(&node_count.to_le_bytes());
+    data[16..20].copy_from_slice(&edge_count.to_le_bytes());
+
+    // Section offsets
+    for (i, &offset) in section_offsets.iter().enumerate() {
+        let start = 20 + i * 8;
+        data[start..start + 8].copy_from_slice(&offset.to_le_bytes());
+    }
+
+    // CRC32
+    data[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
+
+    // Write to temp file
+    let mut file = fs::File::create(&tmp_path).map_err(|e| {
+        GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
+    })?;
+    file.write_all(&data)
+        .map_err(|e| GraphError::Internal(format!("Write failed: {}", e)))?;
+    file.sync_all()
+        .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
+
+    // Atomic rename
+    fs::rename(&tmp_path, path)
+        .map_err(|e| GraphError::Internal(format!("Rename failed: {}", e)))?;
+    write_sync_checkpoint(path, engine.applied_sync_id)?;
+
+    Ok(())
+}
+
+pub fn sync_checkpoint_path(path: &Path) -> PathBuf {
+    append_path_suffix(path, ".sync")
+}
+
+pub fn write_sync_checkpoint(path: &Path, applied_sync_id: i64) -> GraphResult<()> {
+    let checkpoint_path = sync_checkpoint_path(path);
+    let tmp_path = append_path_suffix(&checkpoint_path, ".tmp");
+    let mut file = fs::File::create(&tmp_path).map_err(|e| {
+        GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
+    })?;
+    writeln!(file, "{}", applied_sync_id)
+        .map_err(|e| GraphError::Internal(format!("Write failed: {}", e)))?;
+    file.sync_all()
+        .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
+    fs::rename(&tmp_path, checkpoint_path)
+        .map_err(|e| GraphError::Internal(format!("Rename failed: {}", e)))?;
+    Ok(())
+}
+
+pub fn read_sync_checkpoint(path: &Path) -> GraphResult<Option<i64>> {
+    let checkpoint_path = sync_checkpoint_path(path);
+    if !checkpoint_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&checkpoint_path).map_err(|e| {
+        GraphError::Internal(format!(
+            "Cannot read sync checkpoint {}: {}",
+            checkpoint_path.display(),
+            e
+        ))
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|e| GraphError::CorruptFile {
+            reason: format!("invalid sync checkpoint '{}': {}", trimmed, e),
+        })
+}
+
+/// Load a graph from a .pggraph file.
+///
+/// The loader validates the header, section layout, CRC, CSR invariants, and
+/// primary-key offset table before constructing an [`Engine`].
+///
+/// After load:
+/// - NodeStore active bits, table OIDs, primary-key offsets, and primary-key
+///   bytes are mmap-backed.
+/// - The forward EdgeStore CSR arrays are mmap-backed.
+/// - ResolutionIndex lookups read the mmap-backed resolution section.
+/// - FilterIndex and the edge type registry are bincode-deserialized into
+///   backend-local heap.
+/// - The reverse EdgeStore CSR is rebuilt into backend-local heap for inbound
+///   traversal.
+///
+/// Multiple backends can share mmap-backed pages via the OS page cache.
+/// Derived and bincode-backed structures remain per-backend heap allocations.
+pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
+    let file = fs::File::open(path)
+        .map_err(|e| GraphError::Internal(format!("Cannot open {}: {}", path.display(), e)))?;
+
+    // SAFETY: The file remains open until the read-only mapping is created,
+    // and Engine owns the mapping for the lifetime of all mmap-backed stores.
+    let mmap = unsafe { Mmap::map(&file) }
+        .map_err(|e| GraphError::Internal(format!("mmap failed: {}", e)))?;
+
+    if mmap.len() < HEADER_SIZE {
+        return Err(GraphError::CorruptFile {
+            reason: "file too small for header".to_string(),
+        });
+    }
+
+    // Validate header
+    if &mmap[0..4] != MAGIC {
+        return Err(GraphError::CorruptFile {
+            reason: "invalid magic bytes".to_string(),
+        });
+    }
+    let version = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]);
+    if version != VERSION {
+        return Err(GraphError::IncompatibleVersion(
+            "Graph file format is outdated. Please run SELECT graph.build() to regenerate it."
+                .to_string(),
+        ));
+    }
+
+    let node_count = u32::from_le_bytes([mmap[12], mmap[13], mmap[14], mmap[15]]);
+    let edge_count = u32::from_le_bytes([mmap[16], mmap[17], mmap[18], mmap[19]]);
+
+    // Read section offsets
+    let mut section_offsets = [0u64; NUM_SECTIONS];
+    for (i, offset) in section_offsets.iter_mut().enumerate().take(NUM_SECTIONS) {
+        let start = 20 + i * 8;
+        *offset = u64::from_le_bytes([
+            mmap[start],
+            mmap[start + 1],
+            mmap[start + 2],
+            mmap[start + 3],
+            mmap[start + 4],
+            mmap[start + 5],
+            mmap[start + 6],
+            mmap[start + 7],
+        ]);
+    }
+
+    // Validate CRC32
+    let stored_crc = u32::from_le_bytes([
+        mmap[CRC_OFFSET],
+        mmap[CRC_OFFSET + 1],
+        mmap[CRC_OFFSET + 2],
+        mmap[CRC_OFFSET + 3],
+    ]);
+    let computed_crc = crc32fast::hash(&mmap[HEADER_SIZE..]);
+    if stored_crc != computed_crc {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "CRC32 mismatch: stored={:#x}, computed={:#x}",
+                stored_crc, computed_crc
+            ),
+        });
+    }
+
+    let section_ranges = validate_section_layout(&mmap, &section_offsets, node_count, edge_count)?;
+
+    // ── Construct mmap-backed NodeStore ──
+    // SAFETY: The mmap handle outlives all pointer dereferences.
+    // The .pggraph file layout guarantees correct alignment for u32/u64 arrays.
+    let active_ptr = mmap[section_ranges[0].0..].as_ptr();
+    let oid_ptr = mmap[section_ranges[1].0..].as_ptr() as *const u32;
+    let pk_offsets_ptr = mmap[section_ranges[7].0..].as_ptr() as *const u64;
+    let pk_bytes_ptr = mmap[section_ranges[8].0..].as_ptr();
+    let active_byte_count = (node_count as usize).div_ceil(8);
+    let pk_bytes_len = section_ranges[8].1 - section_ranges[8].0;
+
+    // SAFETY: validate_section_layout has already checked section bounds and
+    // cross-section invariants. MmapNodeArrays validates alignment and active
+    // byte count before NodeStore receives pointer metadata.
+    let node_arrays = unsafe {
+        MmapNodeArrays::new(MmapNodeArrayParts {
+            active_ptr,
+            oid_ptr,
+            pk_offsets_ptr,
+            pk_bytes_ptr,
+            node_count,
+            active_byte_count,
+            pk_bytes_len,
+        })
+    }
+    .ok_or_else(|| GraphError::CorruptFile {
+        reason: "invalid mmap node section metadata".to_string(),
+    })?;
+    // SAFETY: node_arrays points into mmap, and engine._mmap owns the mapping
+    // for at least as long as this NodeStore is reachable.
+    let node_store = unsafe { NodeStore::from_mmap(node_arrays) };
+
+    // ── Construct mmap-backed EdgeStore ──
+    let offsets_ptr = mmap[section_ranges[2].0..].as_ptr() as *const u32;
+    let targets_ptr = mmap[section_ranges[3].0..].as_ptr() as *const u32;
+    let type_ids_ptr = mmap[section_ranges[4].0..].as_ptr();
+    let weights_ptr = mmap[section_ranges[5].0..].as_ptr() as *const u32;
+    let has_weights = section_ranges[5].1 > section_ranges[5].0;
+
+    // SAFETY: validate_section_layout has checked CSR bounds and monotonicity.
+    // MmapEdgeArrays validates pointer presence and alignment.
+    let edge_arrays = unsafe {
+        MmapEdgeArrays::new(
+            offsets_ptr,
+            targets_ptr,
+            type_ids_ptr,
+            weights_ptr,
+            node_count,
+            edge_count,
+            has_weights,
+        )
+    }
+    .ok_or_else(|| GraphError::CorruptFile {
+        reason: "invalid mmap edge section metadata".to_string(),
+    })?;
+    // SAFETY: edge_arrays points into mmap, and engine._mmap owns the mapping
+    // for at least as long as this EdgeStore is reachable.
+    let edge_store = unsafe { EdgeStore::from_mmap(edge_arrays) };
+
+    // ── ResolutionIndex: mmap'd, zero-copy (handled by Engine) ──
+    let ri_start = section_ranges[6].0;
+    let ri_end = section_ranges[6].1;
+    let ri_len = ri_end - ri_start;
+
+    // FilterIndex and edge_type_registry are variable-size bincode sections.
+    // They are deserialized into backend-local heap rather than kept as
+    // mmap-backed stores.
+    let filter_start = section_ranges[9].0;
+    let filter_size = u32::from_le_bytes([
+        mmap[filter_start],
+        mmap[filter_start + 1],
+        mmap[filter_start + 2],
+        mmap[filter_start + 3],
+    ]) as usize;
+    let filter_data = &mmap[filter_start + 4..filter_start + 4 + filter_size];
+    let filter_index: FilterIndex = bincode::deserialize(filter_data)
+        .map_err(|e| GraphError::Internal(format!("FilterIndex deserialization failed: {}", e)))?;
+
+    let registry_start = section_ranges[10].0;
+    let registry_size = u32::from_le_bytes([
+        mmap[registry_start],
+        mmap[registry_start + 1],
+        mmap[registry_start + 2],
+        mmap[registry_start + 3],
+    ]) as usize;
+    let registry_data = &mmap[registry_start + 4..registry_start + 4 + registry_size];
+    let edge_type_registry: Vec<String> = bincode::deserialize(registry_data).map_err(|e| {
+        GraphError::Internal(format!("edge_type_registry deserialization failed: {}", e))
+    })?;
+    if edge_type_registry
+        .first()
+        .is_none_or(|label| !label.is_empty())
+    {
+        return Err(GraphError::CorruptFile {
+            reason: "edge type registry must reserve empty label at index 0".to_string(),
+        });
+    }
+
+    let mut engine = Engine::new();
+    engine.node_store = node_store;
+    engine.edge_store = edge_store;
+    // Reverse CSR is derived from the forward graph into owned heap so inbound
+    // traversal remains O(degree) without scanning all forward edges.
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.filter_index = filter_index;
+    engine.edge_type_registry = edge_type_registry;
+    engine.built = true;
+    if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
+        engine.applied_sync_id = applied_sync_id;
+    }
+    engine.resolution_store = ResolutionStore::MmapBacked;
+    engine._mmap = Some(mmap);
+    engine.mmap_resolution_offset = ri_start;
+    engine.mmap_resolution_len = ri_len;
+
+    Ok(engine)
+}
+
+/// Get the default .pggraph file path under $PGDATA/{data_dir}/.
+///
+/// Uses the `graph.data_dir` GUC (default: "graph").
+pub fn graph_file_path() -> PathBuf {
+    let pgdata = std::env::var("PGDATA").unwrap_or_else(|_| "/tmp".to_string());
+    let subdir = crate::config::data_dir();
+    let dir = PathBuf::from(&pgdata).join(&subdir);
+    fs::create_dir_all(&dir).ok();
+    dir.join("main.pggraph")
+}
+
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Covers `.pggraph` file persistence and loader hardening so corrupted
+    //! section metadata cannot reach mmap-backed stores unchecked.
+
+    use super::*;
+    use crate::edge_store::RawEdge;
+    use crate::types::FilterOp;
+
+    #[test]
+    fn artifact_sidecar_paths_append_to_pggraph_filename() {
+        let path = PathBuf::from("/tmp/graph/main.pggraph");
+
+        assert_eq!(
+            append_path_suffix(&path, ".tmp"),
+            PathBuf::from("/tmp/graph/main.pggraph.tmp")
+        );
+        assert_eq!(
+            sync_checkpoint_path(&path),
+            PathBuf::from("/tmp/graph/main.pggraph.sync")
+        );
+        assert_eq!(
+            append_path_suffix(&sync_checkpoint_path(&path), ".tmp"),
+            PathBuf::from("/tmp/graph/main.pggraph.sync.tmp")
+        );
+    }
+
+    #[test]
+    fn persisted_mmap_load_preserves_primary_keys_and_weights() {
+        let mut engine = Engine::new();
+        let a = engine.node_store.add_node(10, "A-1".to_string());
+        let b = engine.node_store.add_node(10, "B-2".to_string());
+        engine.resolution_insert(10, "A-1", a);
+        engine.resolution_insert(10, "B-2", b);
+        let edge_type = engine.register_edge_type("officer_of").unwrap();
+        engine.edge_store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: a,
+                target: b,
+                type_id: edge_type,
+                weight: Some(7),
+            }],
+            true,
+        );
+        engine.built = true;
+
+        let path = std::env::temp_dir().join(format!(
+            "graph-persistence-test-{}.pggraph",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        write_graph_file(&loaded, &path).unwrap();
+        let reloaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.node_store.primary_key(a), "A-1");
+        assert_eq!(loaded.node_store.primary_key(b), "B-2");
+        assert_eq!(loaded.resolve(10, "A-1"), Some(a));
+        assert_eq!(loaded.resolve(10, "B-2"), Some(b));
+        assert_eq!(loaded.edge_type_registry, vec!["", "officer_of"]);
+        assert!(loaded.edge_store.has_weights());
+        assert_eq!(loaded.edge_store.neighbors_weighted(a).2, &[7]);
+        assert_eq!(reloaded.node_store.primary_key(a), "A-1");
+        assert_eq!(reloaded.node_store.primary_key(b), "B-2");
+        assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
+        assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
+    }
+
+    #[test]
+    fn persisted_graph_roundtrips_filter_index_section() {
+        let mut engine = Engine::new();
+        let a = engine.node_store.add_node(10, "A-1".to_string());
+        let b = engine.node_store.add_node(10, "B-2".to_string());
+        engine.resolution_insert(10, "A-1", a);
+        engine.resolution_insert(10, "B-2", b);
+        engine.edge_store = EdgeStore::from_edges(2, vec![], false);
+        let status = engine
+            .filter_index
+            .register_typed_column_with_populated_count(
+                10,
+                "status".to_string(),
+                crate::filter_index::FilterColumnType::Text,
+                100,
+                2,
+            );
+        let open = engine.filter_index.intern_text_value(status, "open");
+        engine.filter_index.set_encoded_value(
+            status,
+            a,
+            Some(crate::filter_index::EncodedFilterValue::Text(open)),
+        );
+        engine.built = true;
+
+        let path = temp_graph_path("filter-index-roundtrip");
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let loaded_status = loaded.filter_index.find_column("status").unwrap();
+        assert!(loaded
+            .filter_index
+            .check_filter(a, &FilterOp::EqToken(loaded_status, open)));
+        assert!(!loaded
+            .filter_index
+            .check_filter(b, &FilterOp::NeqToken(loaded_status, open)));
+        assert!(loaded
+            .filter_index
+            .check_filter(b, &FilterOp::IsNull(loaded_status)));
+    }
+
+    #[test]
+    fn graph_file_uses_launch_section_layout() {
+        let mut engine = Engine::new();
+        engine.built = true;
+
+        let path = temp_graph_path("launch-section-layout");
+        write_graph_file(&engine, &path).unwrap();
+        let active_offset = read_section_offset(&path, 0);
+        let table_oids_offset = read_section_offset(&path, 1);
+        let filter_offset = read_section_offset(&path, 9);
+        let registry_offset = read_section_offset(&path, 10);
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(NUM_SECTIONS, 11);
+        assert_eq!(active_offset, HEADER_SIZE as u64);
+        assert_eq!(table_oids_offset, HEADER_SIZE as u64);
+        assert!(filter_offset >= HEADER_SIZE as u64);
+        assert!(registry_offset > filter_offset);
+        assert!(file_len > registry_offset);
+    }
+
+    #[test]
+    fn graph_file_section_sizes_match_launch_artifact_contract() {
+        let mut engine = Engine::new();
+        let node_idx = engine.node_store.add_node(10, "A-1".to_string());
+        engine.resolution_insert(10, "A-1", node_idx);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        let status = engine
+            .filter_index
+            .register_typed_column_with_populated_count(
+                10,
+                "status".to_string(),
+                crate::filter_index::FilterColumnType::Text,
+                1,
+                1,
+            );
+        let open = engine.filter_index.intern_text_value(status, "open");
+        engine.filter_index.set_encoded_value(
+            status,
+            node_idx,
+            Some(crate::filter_index::EncodedFilterValue::Text(open)),
+        );
+        engine.built = true;
+
+        let path = temp_graph_path("launch-artifact-section-sizes");
+        write_graph_file(&engine, &path).unwrap();
+        let header_version = read_u32_from_file(&path, 4);
+        let filter_offset = read_section_offset(&path, 9);
+        let registry_offset = read_section_offset(&path, 10);
+        let filter_payload_len = read_u32_from_file(&path, filter_offset) as u64;
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert_eq!(header_version, VERSION);
+        assert_eq!(NUM_SECTIONS, 11);
+        assert!(filter_offset >= HEADER_SIZE as u64);
+        assert!(registry_offset > filter_offset);
+        assert_eq!(registry_offset - filter_offset, 4 + filter_payload_len);
+        assert!(filter_payload_len > 0);
+        assert!(file_len > registry_offset);
+    }
+
+    #[test]
+    fn corrupt_magic_bytes_returns_error() {
+        let path = std::env::temp_dir().join(format!(
+            "graph-corrupt-magic-{}.pggraph",
+            std::process::id()
+        ));
+        // Write garbage that starts with wrong magic
+        std::fs::write(&path, b"NOPE_THIS_IS_NOT_A_GRAPH_FILE_AND_HAS_ENOUGH_BYTES_FOR_HEADER_VALIDATION_128_BYTES_PADDED_OUT_WITH_JUNK_0000000000000000000000000000000000000").unwrap();
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_err());
+        match result {
+            Err(GraphError::CorruptFile { reason }) => {
+                assert!(
+                    reason.contains("magic"),
+                    "expected magic error, got: {}",
+                    reason
+                );
+            }
+            Err(other) => panic!("expected CorruptFile, got {:?}", other),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn truncated_file_returns_error() {
+        let path =
+            std::env::temp_dir().join(format!("graph-truncated-{}.pggraph", std::process::id()));
+        // Write file smaller than HEADER_SIZE (128 bytes)
+        std::fs::write(&path, b"PGGH_tiny").unwrap();
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_err());
+        match result {
+            Err(GraphError::CorruptFile { reason }) => {
+                assert!(
+                    reason.contains("too small"),
+                    "expected size error, got: {}",
+                    reason
+                );
+            }
+            Err(other) => panic!("expected CorruptFile, got {:?}", other),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn nonexistent_file_returns_error() {
+        let path = std::env::temp_dir().join("graph-does-not-exist.pggraph");
+        let _ = std::fs::remove_file(&path); // Ensure it doesn't exist
+
+        let result = load_graph_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_graph_roundtrips() {
+        let engine = Engine::new();
+
+        let path = std::env::temp_dir().join(format!("graph-empty-{}.pggraph", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.node_store.node_count(), 0);
+        assert_eq!(loaded.edge_store.edge_count(), 0);
+    }
+
+    #[test]
+    fn unweighted_graph_roundtrips_without_weights() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(10, "X".to_string());
+        engine.node_store.add_node(10, "Y".to_string());
+        engine.resolution_insert(10, "X", 0);
+        engine.resolution_insert(10, "Y", 1);
+
+        // No weights
+        engine.edge_store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            }],
+            false,
+        );
+        engine.built = true;
+
+        let path =
+            std::env::temp_dir().join(format!("graph-unweighted-{}.pggraph", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.node_store.node_count(), 2);
+        assert_eq!(loaded.edge_store.edge_count(), 1);
+        assert!(!loaded.edge_store.has_weights());
+        assert_eq!(loaded.node_store.primary_key(0), "X");
+        assert_eq!(loaded.node_store.primary_key(1), "Y");
+    }
+
+    #[test]
+    fn large_graph_roundtrip_preserves_all_nodes() {
+        let mut engine = Engine::new();
+        let n = 1000;
+        for i in 0..n {
+            engine.node_store.add_node(1, format!("node-{}", i));
+            engine.resolution_insert(1, &format!("node-{}", i), i);
+        }
+        engine.built = true;
+        engine.edge_store = EdgeStore::from_edges(n, vec![], false);
+
+        let path = std::env::temp_dir().join(format!("graph-large-{}.pggraph", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.node_store.node_count(), n);
+        assert_eq!(loaded.node_store.primary_key(0), "node-0");
+        assert_eq!(loaded.node_store.primary_key(999), "node-999");
+        assert_eq!(loaded.resolve(1, "node-500"), Some(500));
+    }
+
+    #[test]
+    fn corrupted_crc_is_detected() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(1, "A".to_string());
+        engine.resolution_insert(1, "A", 0);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        engine.built = true;
+
+        let path = std::env::temp_dir().join(format!("graph-crc-{}.pggraph", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        write_graph_file(&engine, &path).unwrap();
+
+        // Corrupt the file by flipping a byte near the end (CRC region)
+        let mut data = std::fs::read(&path).unwrap();
+        let last_idx = data.len() - 1;
+        data[last_idx] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "corrupted CRC should be rejected");
+    }
+
+    #[test]
+    fn tombstoned_nodes_persist_through_roundtrip() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(1, "alive".to_string());
+        engine.node_store.add_node(1, "dead".to_string());
+        engine.resolution_insert(1, "alive", 0);
+        engine.resolution_insert(1, "dead", 1);
+        engine.node_store.deactivate(1); // tombstone "dead"
+        engine.edge_store = EdgeStore::from_edges(2, vec![], false);
+        engine.built = true;
+
+        let path = std::env::temp_dir().join(format!("graph-tomb-{}.pggraph", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.node_store.node_count(), 2);
+        assert!(loaded.node_store.is_active(0));
+        assert!(!loaded.node_store.is_active(1));
+    }
+
+    #[test]
+    fn empty_graph_roundtrips_cleanly() {
+        let mut engine = Engine::new();
+        engine.edge_store = EdgeStore::from_edges(0, vec![], false);
+        engine.built = true;
+
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-empty-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.pggraph");
+        let _ = std::fs::remove_file(&path);
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(loaded.node_store.node_count(), 0);
+        assert_eq!(loaded.edge_store.edge_count(), 0);
+    }
+
+    #[test]
+    fn load_graph_file_rejects_out_of_bounds_section_offsets() {
+        let mut engine = Engine::new();
+        engine.built = true;
+
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-corrupt-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_corrupt.pggraph");
+        write_graph_file(&engine, &path).unwrap();
+
+        // Corrupt the section offsets: Make the first offset extremely large
+        use std::io::{Seek, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(20)).unwrap();
+        let bad_offset: u64 = u64::MAX;
+        file.write_all(&bad_offset.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+
+        // Must NOT panic. Must return CorruptFile error.
+        let result = load_graph_file(&path);
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_graph_file_rejects_version_before_section_parsing() {
+        let mut engine = Engine::new();
+        engine.built = true;
+
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-version-mismatch-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_version_mismatch.pggraph");
+        write_graph_file(&engine, &path).unwrap();
+
+        use std::io::{Seek, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(4)).unwrap();
+        file.write_all(&2u32.to_le_bytes()).unwrap();
+        file.seek(std::io::SeekFrom::Start(20)).unwrap();
+        file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let result = load_graph_file(&path);
+        match result {
+            Err(GraphError::IncompatibleVersion(message)) => assert_eq!(
+                message,
+                "Graph file format is outdated. Please run SELECT graph.build() to regenerate it."
+            ),
+            Err(other) => panic!("expected IncompatibleVersion, got {:?}", other),
+            Ok(_) => panic!("expected version mismatch to fail"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn read_section_offset(path: &Path, section: usize) -> u64 {
+        use std::io::{Read, Seek};
+
+        let mut file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start((20 + section * 8) as u64))
+            .unwrap();
+        let mut bytes = [0u8; 8];
+        file.read_exact(&mut bytes).unwrap();
+        u64::from_le_bytes(bytes)
+    }
+
+    fn read_u32_from_file(path: &Path, offset: u64) -> u32 {
+        use std::io::{Read, Seek};
+
+        let mut file = std::fs::OpenOptions::new().read(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        let mut bytes = [0u8; 4];
+        file.read_exact(&mut bytes).unwrap();
+        u32::from_le_bytes(bytes)
+    }
+
+    fn write_section_offset(path: &Path, section: usize, offset: u64) {
+        use std::io::{Seek, Write};
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start((20 + section * 8) as u64))
+            .unwrap();
+        file.write_all(&offset.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn write_u32_at(path: &Path, offset: u64, value: u32) {
+        use std::io::{Seek, Write};
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        file.write_all(&value.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn write_u64_at(path: &Path, offset: u64, value: u64) {
+        use std::io::{Seek, Write};
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        file.write_all(&value.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn rewrite_crc(path: &Path) {
+        use std::io::{Read, Seek, Write};
+
+        let mut data = Vec::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        let crc = crc32fast::hash(&data[HEADER_SIZE..]);
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(CRC_OFFSET as u64))
+            .unwrap();
+        file.write_all(&crc.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    fn graph_with_relationship() -> Engine {
+        let mut engine = Engine::new();
+        let a = engine.node_store.add_node(10, "A".to_string());
+        let b = engine.node_store.add_node(10, "B".to_string());
+        engine.resolution_insert(10, "A", a);
+        engine.resolution_insert(10, "B", b);
+        engine.edge_store = EdgeStore::from_edges(
+            2,
+            vec![RawEdge {
+                source: a,
+                target: b,
+                type_id: 1,
+                weight: Some(7),
+            }],
+            true,
+        );
+        engine.built = true;
+        engine
+    }
+
+    fn temp_graph_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("test.pggraph")
+    }
+
+    #[test]
+    fn load_graph_file_rejects_in_bounds_undersized_fixed_section() {
+        let mut engine = Engine::new();
+        engine.node_store.add_node(10, "A".to_string());
+        engine.resolution_insert(10, "A", 0);
+        engine.edge_store = EdgeStore::from_edges(1, vec![], false);
+        engine.built = true;
+
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-short-fixed-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_short_fixed.pggraph");
+        write_graph_file(&engine, &path).unwrap();
+
+        let first_section_offset = read_section_offset(&path, 0);
+        write_section_offset(&path, 1, first_section_offset);
+
+        let result = load_graph_file(&path);
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_graph_file_rejects_in_bounds_empty_filter_section() {
+        let mut engine = Engine::new();
+        engine.built = true;
+
+        let dir = std::env::temp_dir().join(format!(
+            "graph-test-short-filter-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_short_filter.pggraph");
+        write_graph_file(&engine, &path).unwrap();
+
+        let filter_offset = read_section_offset(&path, 9);
+        write_section_offset(&path, 10, filter_offset);
+
+        let result = load_graph_file(&path);
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_nonmonotonic_edge_offsets() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-edge-offsets");
+        write_graph_file(&engine, &path).unwrap();
+
+        let edge_offsets = read_section_offset(&path, 2);
+        write_u32_at(&path, edge_offsets + 4, 2);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_bad_final_edge_offset() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-final-edge-offset");
+        write_graph_file(&engine, &path).unwrap();
+
+        let edge_offsets = read_section_offset(&path, 2);
+        write_u32_at(&path, edge_offsets + 8, 0);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_target_out_of_range() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-target");
+        write_graph_file(&engine, &path).unwrap();
+
+        let targets = read_section_offset(&path, 3);
+        write_u32_at(&path, targets, 2);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_partial_weights_section() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-weights");
+        write_graph_file(&engine, &path).unwrap();
+
+        let weights = read_section_offset(&path, 5);
+        write_section_offset(&path, 6, weights + 1);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_nonmonotonic_pk_offsets() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-pk-offsets");
+        write_graph_file(&engine, &path).unwrap();
+
+        let pk_offsets = read_section_offset(&path, 7);
+        write_u64_at(&path, pk_offsets + 16, 0);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+
+    #[test]
+    fn load_graph_file_rejects_crc_valid_pk_offset_out_of_bounds() {
+        let engine = graph_with_relationship();
+        let path = temp_graph_path("bad-pk-offset-bounds");
+        write_graph_file(&engine, &path).unwrap();
+
+        let pk_offsets = read_section_offset(&path, 7);
+        write_u64_at(&path, pk_offsets + 16, 999);
+        rewrite_crc(&path);
+
+        let result = load_graph_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
+    }
+}

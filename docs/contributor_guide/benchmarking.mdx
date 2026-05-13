@@ -1,0 +1,192 @@
+# Benchmarking
+
+pgGraph has two benchmark layers:
+
+- internal Rust benchmarks for engine-level changes;
+- SQL-facing sandbox benchmarks for realistic PostgreSQL query timing.
+
+This page focuses on the SQL-facing benchmark harness. These benchmarks are a
+work in progress and are not intended as a comparison against other graph
+databases, PostgreSQL extensions, or graph tools yet. The reported numbers do,
+however, represent accurate expected pgGraph query times for the measured
+dataset, workload, machine, Docker settings, PostgreSQL version, pgGraph commit,
+and cache methodology captured in the report.
+
+<Callout type="warning">
+Do not cite the sandbox numbers as a universal performance claim. Treat them as
+reproducible local evidence for the exact command, dataset, hardware, and report
+JSON produced by the harness.
+</Callout>
+
+## Running The Sandbox Benchmark
+
+From the repository root:
+
+```bash
+sandbox/run_benchmarks.sh panama
+sandbox/run_benchmarks.sh ldbc
+sandbox/run_benchmarks.sh all
+```
+
+Use `--yes` for non-interactive dataset download approval:
+
+```bash
+sandbox/run_benchmarks.sh all --yes
+```
+
+The script prints the known download sizes before fetching data:
+
+| Dataset | Source | Compressed | Uncompressed |
+|---|---|---:|---:|
+| Panama Papers / ICIJ Offshore Leaks | `https://offshoreleaks-data.icij.org/offshoreleaks/csv/full-oldb.LATEST.zip` | 73 MB | 626 MB |
+| LDBC SNB Interactive SF1 CsvBasic LongDateFormatter | `https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvBasic-LongDateFormatter.tar.zst` | 230 MB | unknown |
+
+Generated archives, extracted files, normalized CSVs, virtualenvs, and benchmark
+reports are ignored by git.
+
+Clean generated artifacts with:
+
+```bash
+sandbox/cleanup.sh --dry-run
+sandbox/cleanup.sh
+```
+
+## What Is Measured
+
+The SQL-facing benchmark exercises pgGraph through PostgreSQL using the same SQL
+functions an application would call. It builds or reuses the repository
+PostgreSQL 17 Docker image, downloads real public datasets, normalizes the data
+into SQL tables with primary keys and foreign keys, registers those tables with
+pgGraph, builds the graph, and runs fixed query workloads.
+
+The report separates:
+
+- dataset download and normalization;
+- SQL table load time;
+- pgGraph registration;
+- `graph.build()` time;
+- cold query timing;
+- hot query timing;
+- machine, Docker, PostgreSQL, git, and dataset metadata.
+
+Each run writes:
+
+```text
+sandbox/benchmark/results/<run_id>/report.json
+```
+
+Each benchmark result includes:
+
+- dataset and query name;
+- plain-language question being answered;
+- SQL text and SQL hash;
+- phase, iteration, and success state;
+- PostgreSQL server execution time from `EXPLAIN (ANALYZE, FORMAT JSON)`;
+- host wall time through a Python `psycopg` connection;
+- row count;
+- result checksum.
+
+## Cache Methodology
+
+Cold and hot runs are deliberately separate.
+
+Cold query timing restarts the Docker container before each cold query. This
+clears the PostgreSQL process, PostgreSQL shared buffers, and backend-local
+pgGraph state. It does not explicitly drop the host OS page cache or Docker VM
+page cache.
+
+Hot query timing runs one unrecorded warmup pass, then measures repeated SQL in
+the same persistent PostgreSQL backend. This matters because pgGraph has
+backend-local graph state after load.
+
+Cold query timing does not include `graph.build()`. Build time is reported
+separately as `prepared.build_seconds`. If you want the full first-use cost,
+read both build time and the cold query timings.
+
+## Current Datasets
+
+### Panama Papers
+
+The Panama loader uses the real public ICIJ Offshore Leaks CSV export. It loads
+all `nodes-*.csv` files and `relationships.csv`, creates normalized
+`panama.nodes` and `panama.edges` tables, enforces endpoint foreign keys, and
+registers the graph with dynamic edge labels from the source relationship type.
+
+The normalized table intentionally keeps a compact set of fields needed for
+graph search and traversal: label, name, countries, country codes, source ID,
+and validity metadata. It is suitable for graph benchmarking, but it is not a
+complete relational mirror of every ICIJ source attribute.
+
+The current workload asks:
+
+- Is the Panama graph loaded in this backend, and how large is it?
+- Which Panama entities mention Mossack in a registered searchable field?
+- What is the two-hop neighborhood around a high-degree Panama node?
+- Can pgGraph find the direct path between a high-degree seed and one adjacent target?
+- How many connected components does the Panama graph have?
+- Which nodes are in the first page of the largest connected component?
+
+### LDBC
+
+The LDBC loader uses the official public SNB Interactive SF1 CSV archive. It
+models the broader SNB schema, including people, forums, posts, comments,
+places, organisations, tags, tag classes, and the main relationships between
+them.
+
+The loader prefixes IDs by entity type before loading into PostgreSQL. This
+avoids collisions between source IDs from different LDBC tables and makes every
+relationship endpoint explicit through foreign keys.
+
+The current workload asks:
+
+- Is the full modeled LDBC graph loaded in this backend, and how large is it?
+- Which people have John in their first name?
+- Who is directly connected to a high-degree person through the social graph?
+- What people, posts, comments, forums, tags, places, and organisations are near a high-degree person within two hops?
+- What members, posts, tags, and related nodes are near a busy forum?
+- Can pgGraph find the path between a post and one of its tags?
+- Can pgGraph connect a tag to its tag class?
+- How many connected components does the full modeled LDBC graph have?
+
+## Interpreting Results
+
+The numbers are accurate for the run they came from, but they are not a
+cross-tool benchmark. Before publishing or comparing results, include the
+generated `report.json`, the exact command, the pgGraph commit, the dirty git
+status if any, hardware information, Docker resource limits, and whether the
+machine was otherwise idle.
+
+Known limitations:
+
+- host OS and Docker VM page cache are not explicitly dropped;
+- Docker CPU and memory limits are not pinned by default;
+- p95 from 10 hot iterations is useful signal, but not enough for a polished
+  p99 claim;
+- `server_execution_ms` measures the checksum wrapper query used for
+  verification, not a stripped raw-function-only timing;
+- the LDBC workload is broader than the original subset, but it is not the full
+  official LDBC Interactive query suite.
+
+We plan to test larger datasets and tighten the methodology over time.
+Community feedback is welcome, especially suggestions that make the benchmarks
+more accurate, easier to reproduce, or more useful to users evaluating pgGraph.
+
+To submit benchmark results or methodology feedback, email `team@evokoa`.
+Include your GitHub username, the
+generated `report.json`, the exact command you ran, machine and Docker details,
+and any relevant notes about local load, Docker resource limits, storage, or
+cache state.
+
+## Internal Rust Benchmarks
+
+The Criterion benchmark target lives in `graph/benches/bfs_bench.rs`.
+
+```bash
+cd graph
+cargo bench --bench bfs_bench
+```
+
+These benchmarks call Rust engine types directly. They do not start PostgreSQL
+and do not exercise pgrx, SPI, SQL wrappers, ACL checks, source-row hydration,
+artifact loading, or client connection overhead. Use them when changing engine
+data structures, traversal behavior, filter-index storage, or overlay traversal.

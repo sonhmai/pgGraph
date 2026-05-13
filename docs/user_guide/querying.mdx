@@ -1,0 +1,335 @@
+# Querying
+
+Graph queries are normal SQL calls. The API has primitive functions for exact
+control and workflow wrappers for application-friendly search, expansion, paths,
+connections, and summaries.
+
+## Search
+
+`graph.search()` searches registered source-table columns. It does not search
+the persisted graph artifact; it builds SQL predicates against source rows and
+returns verified graph coordinates.
+
+```sql
+SELECT *
+FROM graph.search(
+  property_key := 'name',
+  property_value := 'alice',
+  table_filter := 'public.users'::regclass,
+  mode := 'contains',
+  case_sensitive := false,
+  max_rows := 100,
+  row_offset := 0,
+  tenant := NULL,
+  hydrate := true
+);
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `node_table` | Source table OID |
+| `node_id` | Source primary key as text |
+| `match_type` | `contains`, `exact`, `prefix`, or `token` |
+| `score` | Current score value, currently `1.0` for verified matches |
+| `verified` | Whether the source row verified against search criteria |
+| `node` | Hydrated source row as JSONB when `hydrate = true` |
+| `node_table_name` | Regclass text name |
+
+`graph.search_nodes()` returns the same coordinate data without `node`.
+
+## Search Modes
+
+| Mode | SQL predicate shape |
+|---|---|
+| `contains` | Match substring with LIKE/ILIKE escaping |
+| `exact` | Match normalized whole value |
+| `prefix` | Match values beginning with the query string |
+| `token` | Match tokenized value boundaries |
+
+All modes validate that `property_key` is registered for the target table set.
+
+## Traversal
+
+```sql
+SELECT *
+FROM graph.traverse(
+  seed_table := 'public.users'::regclass,
+  seed_id := 'u1',
+  max_depth := 2,
+  edge_types := ARRAY['friend'],
+  direction := 'any',
+  node_tables := ARRAY['public.users'::regclass],
+  filter := NULL,
+  tenant := NULL,
+  strategy := 'bfs',
+  uniqueness := 'node_global',
+  include_start := true,
+  hydrate := true,
+  max_rows := 1000,
+  row_offset := 0,
+  max_nodes := current_setting('graph.max_nodes')::int,
+  max_frontier := current_setting('graph.max_frontier')::int
+);
+```
+
+Return columns:
+
+| Column | Meaning |
+|---|---|
+| `root_table`, `root_id` | Start node coordinate |
+| `node_table`, `node_id` | Reached node coordinate |
+| `depth` | Hop count from the start node |
+| `path` | JSONB array of `{table, id}` path coordinates |
+| `edge_path` | JSONB array of edge labels along the path |
+| `node` | Hydrated source row when requested |
+| `root_table_name`, `node_table_name` | Regclass text names |
+
+### Direction
+
+| Direction | Behavior |
+|---|---|
+| `any` | Uses the forward CSR store; bidirectional registrations create both edge directions |
+| `out` | Uses the forward CSR store |
+| `in` | Uses the reverse CSR store |
+
+For unidirectional edges, `direction := 'out'` follows the registered source to
+target direction and `direction := 'in'` follows the reverse store.
+
+### Strategy
+
+| Strategy | Behavior |
+|---|---|
+| `bfs` | Breadth-first traversal; default |
+| `dfs` | Depth-first traversal |
+| `weighted` | Rejected for traversal; use `graph.weighted_shortest_path()` |
+
+### Multi-Start Traversal
+
+Parallel-array overload:
+
+```sql
+SELECT *
+FROM graph.traverse(
+  ARRAY['public.users'::regclass, 'public.users'::regclass],
+  ARRAY['u1'::text, 'u2'::text],
+  max_depth := 1,
+  hydrate := false
+);
+```
+
+Composite overload:
+
+```sql
+SELECT *
+FROM graph.traverse(
+  ARRAY[
+    graph.node_ref('public.users'::regclass, 'u1'),
+    graph.node_ref('public.users'::regclass, 'u2')
+  ]::graph.node_ref[],
+  max_depth := 1,
+  hydrate := false
+);
+```
+
+Multi-start results are globally sorted by root table, root ID, depth, node
+table, and node ID before pagination.
+
+## Workflow API
+
+Workflow functions wrap the primitives with smaller call shapes and stable
+application-friendly output.
+
+### `graph.find()`
+
+```sql
+SELECT *
+FROM graph.find(
+  'name',
+  'Alice',
+  table_name := 'public.users'::regclass,
+  mode := 'exact',
+  max_rows := 20
+);
+```
+
+Adds `rank` and returns hydrated rows by default.
+
+### `graph.expand()`
+
+Expand from a known node:
+
+```sql
+SELECT *
+FROM graph.expand(
+  'public.users'::regclass,
+  'u1',
+  max_depth := 2,
+  target_table := 'public.users'::regclass,
+  where_node := graph.gt('age', 40),
+  include_start := false
+);
+```
+
+Adds `rank`, `readable_path`, and `truncated`.
+
+### `graph.find_related()`
+
+Search for a seed, traverse from each verified match, filter, hydrate, and page:
+
+```sql
+SELECT *
+FROM graph.find_related(
+  property_key := 'name',
+  property_value := 'Alice',
+  source_table := 'public.users'::regclass,
+  max_depth := 2,
+  target_table := 'public.users'::regclass,
+  where_node := graph.gte('age', 40),
+  include_counts := true
+);
+```
+
+Use `candidate_limit` to bound work before final pagination.
+
+### `graph.path()`
+
+Readable shortest path wrapper:
+
+```sql
+SELECT *
+FROM graph.path(
+  'public.users'::regclass,
+  'u1',
+  'public.users'::regclass,
+  'u2',
+  max_depth := 20
+);
+```
+
+### `graph.connection()`
+
+Search both endpoints and return the first reachable path:
+
+```sql
+SELECT *
+FROM graph.connection(
+  source_key := 'name',
+  source_value := 'Alice',
+  target_key := 'name',
+  target_value := 'Bob',
+  source_table := 'public.users'::regclass,
+  target_table := 'public.users'::regclass,
+  source_k := 3,
+  target_k := 3,
+  max_depth := 6
+);
+```
+
+### `graph.neighborhood()`
+
+Summarize reachable nodes by depth and table before hydration:
+
+```sql
+SELECT *
+FROM graph.neighborhood(
+  'name',
+  'Alice',
+  source_table := 'public.users'::regclass,
+  max_depth := 4,
+  sample_k := 5,
+  node_limit := 10000
+);
+```
+
+## Path Functions
+
+Unweighted shortest path:
+
+```sql
+SELECT *
+FROM graph.shortest_path(
+  'public.users'::regclass,
+  'u1',
+  'public.users'::regclass,
+  'u9',
+  max_depth := 20,
+  hydrate := true
+);
+```
+
+Weighted shortest path:
+
+```sql
+SELECT *
+FROM graph.weighted_shortest_path(
+  'public.places'::regclass,
+  'a',
+  'public.places'::regclass,
+  'd'
+);
+```
+
+Weighted path return columns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `path_nodes` | `TEXT[]` | Node primary keys in path order |
+| `total_cost` | `INTEGER` | Sum of registered edge weights, capped to `i32::MAX` for SQL output |
+
+## Components
+
+Connected components are global O(V+E) algorithms and require graph-admin
+privileges.
+
+```sql
+SELECT * FROM graph.component_stats();
+SELECT * FROM graph.components(max_rows := 20);
+SELECT * FROM graph.largest_component(max_rows := 100, hydrate := false);
+SELECT * FROM graph.component(123, max_rows := 100, hydrate := true);
+SELECT * FROM graph.isolated_nodes(max_rows := 100);
+```
+
+<Callout type="warning">
+Component functions touch the whole graph. Run them on a read replica or during
+controlled windows for large production graphs.
+</Callout>
+
+## Hydration
+
+Hydration converts graph coordinates back to source rows as JSONB. It is useful
+for application responses but costs extra SQL work.
+
+Use `hydrate := false` when:
+
+| Situation | Reason |
+|---|---|
+| Counting rows | Avoid unnecessary source-row reads |
+| Joining manually | Coordinates are enough |
+| Large traversals | Keep query memory and SPI work bounded |
+| Internal composition | Later steps decide what to hydrate |
+
+## Tenant Scope
+
+If any registered table has `tenant_column`, tenant-scoped queries use the
+tenant value to filter graph membership. Pass `tenant` explicitly:
+
+```sql
+SELECT *
+FROM graph.traverse(
+  'public.users'::regclass,
+  'u1',
+  tenant := 'acct_123'
+);
+```
+
+Or configure a session GUC fallback:
+
+```sql
+SET graph.tenant_setting = 'app.tenant_id';
+SET app.tenant_id = 'acct_123';
+```
+
+When `graph.enforce_tenant_scope = true`, tenanted graph queries without
+explicit or session tenant fail.

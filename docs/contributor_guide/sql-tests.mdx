@@ -1,0 +1,93 @@
+# SQL Tests
+
+pgGraph has three SQL-facing test layers. Use the pgrx tests for normal SQL API
+behavior, heavy scripts for client/server and operational boundaries, and
+pg_regress only for PostgreSQL packaging smoke coverage.
+
+## pgrx SQL Tests
+
+The pgrx SQL tests live in `graph/src/pg_tests/` and run inside a pgrx-managed
+PostgreSQL test cluster.
+
+```bash
+cd graph
+cargo pgrx test pg17
+```
+
+They do not require preloaded application data or external datasets. Test
+helpers in `common.rs` create source tables, reset graph state, register graph
+metadata, and build fixtures inside the test database.
+
+| File | Coverage |
+|---|---|
+| `common.rs` | Shared fixture setup, catalog reset helpers, SQL error capture helpers, synthetic fixture creation |
+| `discovery.rs` | Schema discovery, selected-table discovery, junction-table detection, composite keys, tenant scoping |
+| `registration_search.rs` | Registration APIs, registered table/edge views, source search modes, index-plan use, bound SQL values, identifier validation |
+| `traversal_api.rs` | Traversal helpers, edge labels, weights, path formatting, DFS/out direction, inbound traversal, weighted-strategy rejection |
+| `traversal_paths.rs` | Default depths, hydration toggles, shortest-path row shape, aggregates, path counts, strict JSON contracts |
+| `filters.rs` | Structured JSONB filters, hydration-time verification, typed filter pushdown, persisted typed filters, invalid raw filters |
+| `sync_config_build.rs` | Trigger/manual sync mode, WAL-mode rejection, GUC contract, memory actions, build headroom, catalog/schema drift, build scan mode |
+| `maintenance_admin.rs` | Trigger sync, edge-buffer overflow, maintenance rebuilds, mmap auto-load sync, tenant scope, status fields, remove APIs |
+| `components_jobs.rs` | Global component APIs, pagination, background job status tables, node-ref starts, resolved table names, planner metadata |
+| `workflow_search_api.rs` | App-friendly `find`, `expand`, and `find_related` wrappers |
+| `workflow_relationship_api.rs` | App-friendly `path`, `connection`, and `neighborhood` wrappers |
+| `workflow_validation.rs` | Workflow argument validation and unsupported option rejection |
+| `synthetic_release.rs` | Small pgrx version of the synthetic release-gate SQL fixture |
+
+Run a focused test by passing the function name:
+
+```bash
+cd graph
+cargo pgrx test pg17 synthetic_fixture_exercises_release_gate_sql_shape
+```
+
+## Heavy SQL Tests
+
+Heavy tests live in `graph/tests/heavy/`. They use real client connections,
+temporary databases, external PostgreSQL commands, Docker, or disposable
+clusters where the pgrx harness is not representative enough.
+
+| Script | Coverage |
+|---|---|
+| `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
+| `sqlstate_acl_boundary.sql` | SQL steps for the SQLSTATE/ACL boundary scenario; use the shell runner for assertions |
+| `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
+| `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |
+| `run_memory_sanitizers.sh` | pgrx SQL suite plus optional ASan, Valgrind, and pgbench sync smoke |
+| `package_validate.sh` | `cargo pgrx package` output, extension SQL/control/library artifacts, and packaged docs |
+| `fresh_install_smoke.sh` | Fresh local install, extension creation, build, traversal, and search |
+| `function_metadata_audit.sh` | SQL function volatility, parallel-safety, security, cost, and row metadata |
+| `backup_restore_validate.sh` | Dump/restore behavior for source tables, graph catalog state, sync state, and persisted artifacts |
+| `docker_smoke.sh` | Container build and extension smoke test |
+| `pg_upgrade_validate.sh` | `pg_upgrade --check` compatibility for a database containing pgGraph |
+| `background_job_lock_regression.sh` | Background build/maintenance lock and failure behavior |
+| `build_lock_regression.sh` | Build/vacuum lock conflicts and persisted artifact behavior |
+| `concurrency_stress.sh` | Mixed build, sync, vacuum, maintenance, and traversal concurrency |
+| `synthetic_release_smoke.sh` | Deterministic synthetic release-gate graph through SQL |
+| `run_synthetic_release_evidence.sh` | Synthetic release smoke plus metadata and `.pggraph` artifact inspection |
+| `measure_build_rss.sh` | Peak backend RSS during build |
+| `measure_mmap_pss.sh` | Linux proportional set size for mmap sharing across backends |
+| `run_pg_matrix.sh` | Local PostgreSQL major-version matrix for Rust and pgrx SQL tests |
+| `run_pg_matrix_docker.sh` | Docker PostgreSQL major-version matrix |
+| `run_release_gate.sh` | Aggregated release gate over static checks, pgrx tests, heavy scripts, and optional matrix/RSS runs |
+
+Most heavy scripts accept `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and a
+disposable database name such as `DBNAME=pggraph_boundary`. Scripts that kill or
+upgrade PostgreSQL require disposable `PGDATA` directories and document their
+required variables in the script header or argument checks.
+
+## pg_regress Smoke
+
+`graph/tests/pg_regress/` contains a minimal PostgreSQL extension setup smoke.
+It is not the primary SQL behavior suite; use pgrx tests and heavy tests for
+behavioral coverage.
+
+## Choosing A SQL Test Layer
+
+| Change | Preferred test layer |
+|---|---|
+| SQL function behavior, row shape, validation, fixtures | pgrx SQL tests |
+| Client-visible SQLSTATE, role switching, ACL/RLS boundaries | Heavy SQL scripts |
+| Sync, crash recovery, backup/restore, package, Docker, upgrade, concurrency | Heavy SQL scripts |
+| PostgreSQL-major compatibility | `run_pg_matrix.sh` or `run_pg_matrix_docker.sh` |
+| Release-gate synthetic fixture | `synthetic_release.rs` for pgrx coverage, `synthetic_release_smoke.sh` for shell/client coverage |
