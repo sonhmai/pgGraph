@@ -5,20 +5,36 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'USAGE'
-Run the pgGraph quickstart against the repository Docker Compose database.
+Run pgGraph quickstart and install/demo workflows.
 
 Usage:
-  scripts/quickstart.sh [demo|setup|psql|clean]
+  scripts/quickstart.sh [quickstart|docker|pgrx|playground|clean]
 
 Platforms:
   macOS/Linux terminal, or Windows via WSL2/Git Bash with Docker Desktop.
   This is not a native PowerShell or Command Prompt script.
 
 Commands:
-  demo   Build/start PostgreSQL, create the people/companies dataset, build pgGraph, and run example queries. Default.
-  setup  Build/start PostgreSQL with pgGraph installed, but do not create demo tables.
-  psql   Build/start PostgreSQL, create/build the demo graph, then open psql.
-  clean  Stop the Compose database and remove its volume.
+  quickstart             Build/start disposable PostgreSQL, create and load the
+                         people/companies demo, build pgGraph, and run example
+                         queries. Default.
+  docker [CONTAINER]     Install pgGraph into an existing running PostgreSQL
+                         Docker container. Example:
+                         scripts/quickstart.sh docker my-postgres 17 appdb postgres
+  pgrx [PG_MAJOR]       Source build and install pgGraph with pgrx into local
+                         PostgreSQL (defaults to pg17). Optionally pass major only;
+                         DB target flags are env-driven (see docs below).
+  playground [DATASET]   Start the Streamlit playground preloaded with a preset
+                         dataset. Supported dataset values: panama, ldbc.
+                         Example:
+                         scripts/quickstart.sh playground panama
+  clean                  Stop the Compose database and remove its volume.
+
+Legacy:
+  demo  Alias for quickstart.
+  setup Keep previous behavior (start PostgreSQL with pgGraph installed, but do not
+        load the sample graph tables).
+  psql  Build/start disposable PostgreSQL, create the demo graph, then open psql.
 USAGE
 }
 
@@ -174,11 +190,109 @@ ORDER BY step;
 SQL
 }
 
+install_into_existing_docker_container() {
+  local container="$1"
+  local pg_major="${2:-17}"
+  local db_name="${3:-postgres}"
+  local db_user="${4:-postgres}"
+
+  if [[ -z "${container}" ]]; then
+    echo "Error: CONTAINER is required for docker mode." >&2
+    echo "Usage: scripts/quickstart.sh docker CONTAINER [PG_MAJOR] [DB_NAME] [DB_USER]" >&2
+    exit 2
+  fi
+
+  "${ROOT_DIR}/scripts/install_into_docker_postgres.sh" \
+    "${container}" \
+    "${pg_major}" \
+    "${db_name}" \
+    "${db_user}"
+}
+
+install_with_local_pgrx() {
+  local pg_major="${1:-17}"
+  local db_name="${PGDATABASE:-postgres}"
+  local db_user="${PGUSER:-postgres}"
+  local db_host="${PGHOST:-localhost}"
+  local db_port="${PGPORT:-5432}"
+  local pg_config="${2:-${LOCAL_PG_CONFIG:-${PG_CONFIG:-}}}"
+  local db_password="${PGPASSWORD:-}"
+  local -a feature_args
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "Error: cargo is required for local pgrx install." >&2
+    exit 1
+  fi
+
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "Error: psql is required for local pgrx install." >&2
+    exit 1
+  fi
+
+  if [[ ! "${pg_major}" =~ ^(13|14|15|16|17|18)$ ]]; then
+    echo "Error: Unsupported PostgreSQL major ${pg_major}. Supported: 13 14 15 16 17 18." >&2
+    exit 2
+  fi
+
+  if [[ -z "${pg_config}" ]]; then
+    if ! command -v pg_config >/dev/null 2>&1; then
+      echo "Error: pg_config not found. Provide LOCAL_PG_CONFIG or PG_CONFIG." >&2
+      exit 1
+    fi
+    pg_config="$(command -v pg_config)"
+  fi
+
+  if [[ ! -x "${pg_config}" ]]; then
+    echo "Error: pg_config is not executable: ${pg_config}" >&2
+    exit 1
+  fi
+
+  if [[ "${db_port}" =~ ^[0-9]+$ ]] && (( db_port < 1 || db_port > 65535 )); then
+    echo "Error: DB port must be between 1 and 65535." >&2
+    exit 2
+  fi
+
+  feature_args=("--features" "pg${pg_major}" "--no-default-features" "--pg-config=${pg_config}")
+
+  echo "Building and installing pgGraph for PostgreSQL ${pg_major} using pgrx..."
+  (cd "${ROOT_DIR}/graph" && cargo pgrx install "${feature_args[@]}")
+
+  if [[ -n "${db_password}" ]]; then
+    PGPASSWORD="${db_password}" \
+      psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" -v ON_ERROR_STOP=1 \
+        -c 'CREATE EXTENSION IF NOT EXISTS graph;'
+    return
+  fi
+
+  psql -h "${db_host}" -p "${db_port}" -U "${db_user}" -d "${db_name}" -v ON_ERROR_STOP=1 \
+    -c 'CREATE EXTENSION IF NOT EXISTS graph;'
+}
+
+start_playground() {
+  local dataset="${1:-panama}"
+
+  case "${dataset}" in
+    panama|ldbc)
+      ;;
+    *)
+      echo "Error: unsupported dataset '${dataset}'. Use panama or ldbc." >&2
+      exit 2
+      ;;
+  esac
+
+  PGGRAPH_PLAYGROUND_DATASET="${dataset}" \
+    "${ROOT_DIR}/sandbox/start_playground.sh"
+}
+
 main() {
-  local command="${1:-demo}"
+  local command="${1:-quickstart}"
+  local container=""
+  local pg_major=""
+  local db_name=""
+  local db_user=""
 
   case "${command}" in
-    demo)
+    quickstart|demo)
       start_postgres
       run_demo_sql
       echo ""
@@ -188,6 +302,19 @@ main() {
       start_postgres
       echo "PostgreSQL is running with pgGraph installed."
       echo "Open psql with: scripts/quickstart.sh psql"
+      ;;
+    docker)
+      container="${2:-}"
+      pg_major="${3:-17}"
+      db_name="${4:-postgres}"
+      db_user="${5:-postgres}"
+      install_into_existing_docker_container "${container}" "${pg_major}" "${db_name}" "${db_user}"
+      ;;
+    pgrx)
+      install_with_local_pgrx "${2:-17}" "${3:-}"
+      ;;
+    playground)
+      start_playground "${2:-panama}"
       ;;
     psql)
       start_postgres

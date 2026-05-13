@@ -13,7 +13,7 @@ This is the quick index for repository scripts. The detailed maintainer guide is
 | `scripts/check_sql_api_drift.py` | Checks SQL API and GUC documentation against implementation. |
 | `scripts/clean_generated_artifacts.sh` | Deletes generated local artifacts: `graph/target/`, `graph/fuzz/target/`, and `.DS_Store` files. |
 | `scripts/inspect_pggraph_artifact.py` | Prints JSON metadata for a `.pggraph` persistence artifact. |
-| `scripts/quickstart.sh` | Starts the Docker Compose quickstart database, optionally loads the people/companies demo, and runs example graph queries. |
+| `scripts/quickstart.sh` | Runs quickstart workflows: full local demo, install into existing Docker Postgres, local pgrx install, and one-click playground preset setup. |
 | `scripts/build_docker_pggraph_package.sh` | Builds Docker-packaged pgGraph artifacts for one PostgreSQL major or all supported majors. |
 | `scripts/copy_pggraph_package_to_docker_postgres.sh` | Copies an existing pgGraph package into a running PostgreSQL Docker container. |
 | `scripts/install_into_docker_postgres.sh` | One-shot wrapper that builds a package and installs it into a running PostgreSQL Docker container. |

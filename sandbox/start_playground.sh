@@ -11,6 +11,7 @@ source "${SANDBOX_DIR}/common/docker.sh"
 PG_PORT="${PGGRAPH_PG_PORT:-55432}"
 CONTAINER_NAME="${PGGRAPH_CONTAINER_NAME:-pggraph-sandbox}"
 IMAGE_NAME="${PGGRAPH_IMAGE_NAME:-pggraph-postgres:17}"
+PLAYGROUND_DATASET="${PGGRAPH_PLAYGROUND_DATASET:-panama}"
 
 require_docker
 ensure_pggraph_image "${ROOT_DIR}" "${IMAGE_NAME}"
@@ -96,7 +97,7 @@ wait_for_playground_ready() {
 APP_PORT="$(choose_app_port)"
 
 "${PLAYGROUND_PYTHON}" "${SANDBOX_DIR}/common/run_benchmarks.py" \
-  --dataset panama \
+  --dataset "${PLAYGROUND_DATASET}" \
   --container "${CONTAINER_NAME}" \
   --host 127.0.0.1 \
   --port "${ACTUAL_PG_PORT}" \

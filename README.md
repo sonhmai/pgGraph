@@ -61,10 +61,10 @@ You need Docker or Docker Desktop installed and running:
 ```bash
 git clone https://github.com/evokoa/pggraph.git
 cd pggraph
-scripts/quickstart.sh        # run the full demo
-scripts/quickstart.sh setup  # start PostgreSQL with pgGraph installed
-scripts/quickstart.sh psql   # create/build the demo graph, then open psql
-scripts/quickstart.sh clean  # remove the disposable database volume
+scripts/quickstart.sh               # run the full quickstart demo
+scripts/quickstart.sh docker my-postgres 17 appdb postgres  # install into existing Postgres Docker container
+scripts/quickstart.sh pgrx           # source build/install with pgrx into local PostgreSQL
+scripts/quickstart.sh playground panama # start Streamlit playground with a preset dataset (panama|ldbc)
 ```
 
 The script works on macOS and Linux from a normal terminal, and on Windows from
