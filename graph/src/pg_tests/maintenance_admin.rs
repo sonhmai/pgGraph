@@ -66,6 +66,7 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
     Spi::run("SET graph.edge_buffer_size = 1000").expect("set edge buffer size failed");
+    Spi::run("SET graph.sync_batch_size = 1001").expect("set sync batch size failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_edge_overflow_pgtest CASCADE")
         .expect("drop edge overflow table failed");
     Spi::run(
