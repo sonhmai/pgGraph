@@ -39,7 +39,6 @@ production use.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| Weighted path output | `graph.weighted_shortest_path()` returns a compact array shape that is hard to evolve once callers build queries around it. | Replace it with a richer path-step row contract before treating the SQL API as stable. |
 | Traversal uniqueness | The public `uniqueness` option is parsed but not fully reflected in result semantics. | Implement the advertised behavior or reject/remove unsupported values before the API is documented as stable. |
 | Search pagination | Source search can materialize broad candidate sets before applying stable page boundaries. | Define and implement a bounded ordering, deduplication, limit, and offset contract. |
 | Traversal pagination | Hydration filters and full candidate sorting can happen before pagination. | Make pagination, ordering, hydration, and filter semantics explicit before users rely on page contents. |

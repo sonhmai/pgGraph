@@ -520,7 +520,7 @@ impl Engine {
         source_id: &str,
         target_table_oid: u32,
         target_id: &str,
-    ) -> GraphResult<Option<(Vec<String>, u64)>> {
+    ) -> GraphResult<Vec<WeightedPathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
@@ -546,6 +546,7 @@ impl Engine {
             target,
             &self.edge_type_registry,
         ))
+        .map(|path| path.unwrap_or_default())
     }
 
     /// Get engine status.
@@ -1168,7 +1169,7 @@ mod tests {
     fn weighted_shortest_path_unweighted_graph_returns_none() {
         let eng = build_test_engine(); // unweighted
         let result = eng.weighted_shortest_path(100, "A", 100, "D").unwrap();
-        assert!(result.is_none());
+        assert!(result.is_empty());
     }
 
     // ─── connected_components() ───

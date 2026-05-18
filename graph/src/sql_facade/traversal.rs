@@ -255,7 +255,19 @@ fn weighted_shortest_path(
     source_id: &str,
     target_table: pgrx::pg_sys::Oid,
     target_id: &str,
-) -> TableIterator<'static, (name!(path_nodes, Vec<String>), name!(total_cost, i32))> {
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(node_table, pgrx::pg_sys::Oid),
+        name!(node_table_name, String),
+        name!(node_id, String),
+        name!(edge_label, Option<String>),
+        name!(edge_weight, Option<i64>),
+        name!(step_cost, i64),
+        name!(total_cost, i64),
+    ),
+> {
     with_panic_boundary("weighted_shortest_path()", || {
         check_enabled();
         acl::check_table_acl(source_table.to_u32()).unwrap_or_else(|err| err.report());
@@ -273,11 +285,30 @@ fn weighted_shortest_path(
                 target_id,
             )
             .unwrap_or_else(|err| err.report())
-            .map(|(path, cost)| vec![(path, cost.min(i32::MAX as u64) as i32)])
-            .unwrap_or_default()
+            .into_iter()
+            .map(|step| {
+                (
+                    step.step,
+                    pgrx::pg_sys::Oid::from_u32(step.node_table.0),
+                    regclass_text(step.node_table.0).unwrap_or_else(|err| err.report()),
+                    step.node_id,
+                    step.edge_label,
+                    step.edge_weight.map(i64::from),
+                    u64_to_bigint(step.step_cost).unwrap_or_else(|err| err.report()),
+                    u64_to_bigint(step.total_cost).unwrap_or_else(|err| err.report()),
+                )
+            })
+            .collect::<Vec<_>>()
         });
         TableIterator::new(rows)
     })
+}
+
+fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
+    i64::try_from(value).map_err(|_| safety::GraphError::Internal(format!(
+        "weighted path cost {} exceeds SQL bigint range",
+        value
+    )))
 }
 
 /// Aggregate over traversal results without hydrating every row client-side.

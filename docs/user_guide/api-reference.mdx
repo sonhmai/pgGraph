@@ -817,13 +817,21 @@ graph.weighted_shortest_path(
   target_id text
 )
 RETURNS TABLE (
-  path_nodes text[],
-  total_cost int
+  step int,
+  node_table oid,
+  node_table_name text,
+  node_id text,
+  edge_label text,
+  edge_weight bigint,
+  step_cost bigint,
+  total_cost bigint
 )
 ```
 
-Uses registered edge weights and returns no rows when no weighted path exists or
-the graph has no weight data.
+Uses registered edge weights and returns one row per path step. Step `0` is the
+source node and has NULL `edge_label` and `edge_weight`. `step_cost` is the
+cumulative cost at that step, and `total_cost` is repeated on every returned row.
+Returns no rows when no weighted path exists or the graph has no weight data.
 
 ## Aggregation
 
