@@ -417,9 +417,12 @@ fn apply_sync_log_entry_with_context(
     };
     let parsed = parse_sync_properties(entry.properties.as_deref());
     let tenant = tenant_from_properties_with_context(table_oid, &parsed, context)?;
+    let edge_mutation_reservation =
+        sync_entry_edge_mutation_reservation(entry, table_oid, context)?;
 
     ENGINE.with(|e| {
         let mut eng = e.borrow_mut();
+        eng.reserve_edge_mutation_capacity(edge_mutation_reservation)?;
         match entry.op.trim() {
             "I" => {
                 let pk = entry
@@ -528,6 +531,60 @@ fn apply_sync_log_entry_with_context(
         }
         Ok::<_, safety::GraphError>(())
     })
+}
+
+fn sync_entry_edge_mutation_reservation(
+    entry: &SyncLogEntry,
+    table_oid: u32,
+    context: &SyncReplayContext,
+) -> safety::GraphResult<usize> {
+    match entry.op.trim() {
+        "I" => potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref()),
+        "U" => Ok(
+            potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref())?
+                + potential_row_edge_mutation_count(context, table_oid, entry.new_row.as_deref())?,
+        ),
+        "D" => potential_row_edge_mutation_count(context, table_oid, entry.old_row.as_deref()),
+        "T" => Ok(0),
+        _ => Ok(0),
+    }
+}
+
+fn potential_row_edge_mutation_count(
+    context: &SyncReplayContext,
+    table_oid: u32,
+    row_json: Option<&str>,
+) -> safety::GraphResult<usize> {
+    let Some(row_json) = row_json else {
+        return Ok(0);
+    };
+    let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
+        safety::GraphError::Internal(format!(
+            "sync row JSON parse failed for edge capacity reservation: {}",
+            e
+        ))
+    })?;
+    let mut count = 0usize;
+    for edge in &context.edges {
+        let from_oid = context.table_oid(&edge.from_table);
+        if from_oid != Some(table_oid) {
+            continue;
+        }
+        let Some(from_table) = context
+            .tables
+            .iter()
+            .find(|table| table.table_name == edge.from_table)
+        else {
+            continue;
+        };
+        if row_pk_value(&row, &from_table.id_column).is_none()
+            || row_text_value(&row, &edge.from_column).is_none()
+        {
+            continue;
+        }
+        count = count.saturating_add(if edge.bidirectional { 2 } else { 1 });
+    }
+    Ok(count)
 }
 
 fn refresh_filter_index_from_sync(

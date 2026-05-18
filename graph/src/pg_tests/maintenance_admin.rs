@@ -152,6 +152,112 @@ fn edge_buffer_overflow_from_sql_sync_enters_read_only_mode() {
 }
 
 #[pg_test]
+fn edge_buffer_overflow_reserves_high_fanout_row_before_mutation() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    Spi::run("SELECT graph.reset()").expect("reset failed");
+    Spi::run("SET graph.auto_load = off").expect("disable auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("disable persist_on_build failed");
+    Spi::run("SET graph.enabled = on").expect("enable graph failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.edge_buffer_size = 1000").expect("set edge buffer size failed");
+    Spi::run("SET graph.sync_batch_size = 2").expect("set sync batch size failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_edge_reserve_pgtest CASCADE")
+        .expect("drop edge reserve table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_edge_reserve_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_edge_reserve_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create edge reserve table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_edge_reserve_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_edge_reserve_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add edge reserve table failed");
+    for edge_idx in 1..=254 {
+        Spi::run(&format!(
+            "SELECT graph.add_edge(
+                    'graph_test_edge_reserve_pgtest'::regclass,
+                    'parent_id',
+                    'graph_test_edge_reserve_pgtest'::regclass,
+                    'id',
+                    'reserve_edge_{edge_idx}',
+                    bidirectional := true
+                )"
+        ))
+        .expect("add high-fanout edge failed");
+    }
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    let node_count_before = Spi::get_one::<i32>("SELECT node_count FROM graph.status()")
+        .expect("status failed")
+        .unwrap_or(0);
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_edge_reserve_pgtest (id, parent_id, name)
+             VALUES
+                ('child-1', 'root', 'Child 1'),
+                ('child-2', 'root', 'Child 2')",
+    )
+    .expect("insert high-fanout children failed");
+    let child_1_sync_id =
+        Spi::get_one::<i64>("SELECT id FROM graph._sync_log WHERE new_pk = 'child-1'")
+            .expect("child-1 sync id query failed")
+            .unwrap_or(0);
+
+    assert!(sql_raises("SELECT * FROM graph.apply_sync()"));
+    let (read_only, edge_buffer_used, node_count_after, applied_sync_id) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT read_only, edge_buffer_used, node_count, applied_sync_id
+                 FROM graph.status()",
+                None,
+                &[],
+            )
+            .expect("status query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(false),
+            row.get::<i32>(2)?.unwrap_or(0),
+            row.get::<i32>(3)?.unwrap_or(0),
+            row.get::<i64>(4)?.unwrap_or(0),
+        ))
+    })
+    .expect("status read failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("set query freshness off failed");
+    let child_1_visible = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_edge_reserve_pgtest'::regclass,
+                'child-1',
+                0,
+                hydrate := false
+             )",
+    )
+    .expect("child-1 traversal failed")
+    .unwrap_or(0);
+
+    assert!(read_only);
+    assert_eq!(edge_buffer_used, 508);
+    assert_eq!(node_count_after, node_count_before + 1);
+    assert_eq!(child_1_visible, 1);
+    assert_eq!(applied_sync_id, child_1_sync_id);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+    Spi::run("SET graph.edge_buffer_size = 100000").expect("restore edge buffer size failed");
+    Spi::run("RESET graph.sync_batch_size").expect("reset sync batch size failed");
+}
+
+#[pg_test]
 fn sync_log_batch_reader_respects_limit_and_high_watermark() {
     reset_and_create_fixtures();
     super::insert_registered_table("public.graph_test_users_pgtest", "id", "name", None)

@@ -13,10 +13,13 @@ JOBS="${JOBS:-2}"
 TIME="${TIME:-30}"
 RATE="${RATE:-100}"
 QUERY_FRESHNESS="${QUERY_FRESHNESS:-default}"
-TMPDIR_ROOT="${TMPDIR:-/tmp}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
-WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-read-latency.XXXXXX")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GRAPH_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="${OUTPUT_DIR:-$GRAPH_DIR/target/read-latency}"
+TMPDIR_ROOT="${TMPDIR:-$GRAPH_DIR/target/tmp}"
+mkdir -p "$OUTPUT_DIR" "$TMPDIR_ROOT"
+WORKDIR="$(mktemp -d "$TMPDIR_ROOT/pggraph-read-latency.XXXXXX")"
 SAMPLES_CSV="$WORKDIR/read-latency-samples.csv"
 SUMMARY_CSV="$WORKDIR/read-latency-summary.csv"
 
@@ -100,6 +103,42 @@ SELECT graph.add_edge(
 SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
 SELECT graph.enable_sync();
+
+CREATE OR REPLACE FUNCTION public.graph_read_latency_edges_sync_capture()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO graph._sync_log
+            (op, table_oid, table_name, pk, old_pk, new_pk, properties, old_row, new_row, xid)
+        VALUES
+            ('I', TG_RELID, 'public.graph_read_latency_edges', NEW.id::text, NULL, NEW.id::text,
+             jsonb_build_object('from_id', NEW.from_id::text, 'to_id', NEW.to_id::text, 'weight', NEW.weight::text),
+             NULL, to_jsonb(NEW), txid_current());
+        RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO graph._sync_log
+            (op, table_oid, table_name, pk, old_pk, new_pk, properties, old_row, new_row, xid)
+        VALUES
+            ('U', TG_RELID, 'public.graph_read_latency_edges', NEW.id::text, OLD.id::text, NEW.id::text,
+             jsonb_build_object('from_id', NEW.from_id::text, 'to_id', NEW.to_id::text, 'weight', NEW.weight::text),
+             to_jsonb(OLD), to_jsonb(NEW), txid_current());
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO graph._sync_log
+            (op, table_oid, table_name, pk, old_pk, new_pk, properties, old_row, new_row, xid)
+        VALUES
+            ('D', TG_RELID, 'public.graph_read_latency_edges', OLD.id::text, OLD.id::text, NULL,
+             NULL, to_jsonb(OLD), NULL, txid_current());
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS graph_read_latency_edges_sync_capture ON public.graph_read_latency_edges;
+CREATE TRIGGER graph_read_latency_edges_sync_capture
+AFTER INSERT OR UPDATE OR DELETE ON public.graph_read_latency_edges
+FOR EACH ROW EXECUTE FUNCTION public.graph_read_latency_edges_sync_capture();
 SQL
 
 pending_rows() {
@@ -115,6 +154,10 @@ SET graph.persist_on_build = on;
 SELECT * FROM graph.build();
 TRUNCATE graph._sync_log RESTART IDENTITY;
 SELECT graph.enable_sync();
+DROP TRIGGER IF EXISTS graph_read_latency_edges_sync_capture ON public.graph_read_latency_edges;
+CREATE TRIGGER graph_read_latency_edges_sync_capture
+AFTER INSERT OR UPDATE OR DELETE ON public.graph_read_latency_edges
+FOR EACH ROW EXECUTE FUNCTION public.graph_read_latency_edges_sync_capture();
 SQL
 }
 
@@ -146,13 +189,8 @@ inserted_nodes AS (
     RETURNING id::bigint
 )
 INSERT INTO public.graph_read_latency_edges (from_id, to_id, weight)
-SELECT (id - 1)::text, id::text, 1
-FROM inserted_nodes
-WHERE EXISTS (
-    SELECT 1
-    FROM public.graph_read_latency_nodes
-    WHERE graph_read_latency_nodes.id = (inserted_nodes.id - 1)::text
-);
+SELECT '1', id::text, 1
+FROM inserted_nodes;
 SQL
 }
 
@@ -266,8 +304,22 @@ measure_suite "large_pending_backlog" "$SAMPLES" "$LARGE_BACKLOG"
 reset_sync_backlog
 
 writer_sql="$WORKDIR/read-latency-writer.sql"
-cp "$SCRIPT_DIR/pgbench_sync.sql" "$writer_sql"
-perl -pi -e 's/graph_pgbench/graph_read_latency/g' "$writer_sql"
+cat >"$writer_sql" <<'SQL'
+BEGIN;
+WITH ids AS (
+    SELECT nextval('public.graph_read_latency_node_seq') AS id
+),
+inserted_node AS (
+    INSERT INTO public.graph_read_latency_nodes (id, name, score)
+    SELECT id::text, 'live-' || id::text, (id % 1000)::int
+    FROM ids
+    RETURNING id::bigint
+)
+INSERT INTO public.graph_read_latency_edges (from_id, to_id, weight)
+SELECT '1', id::text, 1
+FROM inserted_node;
+COMMIT;
+SQL
 
 pgbench "$DBNAME" \
   --client="$CLIENTS" \
@@ -293,9 +345,9 @@ wait "$writer_pid" || {
 
 final_backlog="$(pending_rows)"
 
-cp "$SAMPLES_CSV" "$PWD/read-latency-samples.csv"
-cp "$SUMMARY_CSV" "$PWD/read-latency-summary.csv"
+cp "$SAMPLES_CSV" "$OUTPUT_DIR/read-latency-samples.csv"
+cp "$SUMMARY_CSV" "$OUTPUT_DIR/read-latency-summary.csv"
 
-echo "Read-latency samples: $PWD/read-latency-samples.csv"
-echo "Read-latency summary: $PWD/read-latency-summary.csv"
+echo "Read-latency samples: $OUTPUT_DIR/read-latency-samples.csv"
+echo "Read-latency summary: $OUTPUT_DIR/read-latency-summary.csv"
 echo "Final sync backlog rows: $final_backlog"
