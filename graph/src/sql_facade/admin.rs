@@ -56,6 +56,53 @@ fn with_panic_boundary<T>(_context: &str, f: impl FnOnce() -> T) -> T {
     f()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScheduledMaintenanceInputs {
+    pub(crate) pending_sync_rows: i64,
+    pub(crate) disabled_trigger_count: i32,
+    pub(crate) edge_buffer_used: i32,
+    pub(crate) needs_vacuum: bool,
+    pub(crate) needs_rebuild: bool,
+    pub(crate) read_only: bool,
+}
+
+impl From<&crate::types::EngineStatus> for ScheduledMaintenanceInputs {
+    fn from(status: &crate::types::EngineStatus) -> Self {
+        Self {
+            pending_sync_rows: status.pending_sync_rows,
+            disabled_trigger_count: status.disabled_trigger_count,
+            edge_buffer_used: status.edge_buffer_used,
+            needs_vacuum: status.needs_vacuum,
+            needs_rebuild: status.needs_rebuild,
+            read_only: status.read_only,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScheduledMaintenanceDecision {
+    pub(crate) apply_sync: bool,
+    pub(crate) start_maintenance: bool,
+}
+
+pub(crate) fn scheduled_maintenance_decision(
+    inputs: ScheduledMaintenanceInputs,
+) -> ScheduledMaintenanceDecision {
+    let apply_sync = inputs.pending_sync_rows > 0
+        && inputs.disabled_trigger_count == 0
+        && !inputs.needs_rebuild
+        && !inputs.read_only;
+    let start_maintenance = inputs.read_only
+        || inputs.needs_rebuild
+        || inputs.needs_vacuum
+        || inputs.edge_buffer_used > 0;
+
+    ScheduledMaintenanceDecision {
+        apply_sync,
+        start_maintenance,
+    }
+}
+
 /// Return current engine status.
 ///
 /// See: `docs/user_guide/api-reference.mdx`
@@ -149,12 +196,7 @@ fn sync_health() -> TableIterator<
         let s = refreshed_engine_status().unwrap_or_else(|err| err.report());
         let max_sync_log_id = max_sync_log_id().unwrap_or_else(|err| err.report());
         let edge_buffer_size = config::EDGE_BUFFER_SIZE.get();
-        let apply_sync_recommended = s.pending_sync_rows > 0
-            && s.disabled_trigger_count == 0
-            && !s.needs_rebuild
-            && !s.read_only;
-        let maintenance_recommended =
-            s.read_only || s.needs_rebuild || s.needs_vacuum || s.edge_buffer_used > 0;
+        let decision = scheduled_maintenance_decision((&s).into());
 
         TableIterator::new(vec![(
             s.sync_mode,
@@ -170,8 +212,8 @@ fn sync_health() -> TableIterator<
             s.needs_rebuild,
             s.read_only,
             s.read_only_reason,
-            apply_sync_recommended,
-            maintenance_recommended,
+            decision.apply_sync,
+            decision.start_maintenance,
         )])
     })
 }
@@ -197,22 +239,16 @@ fn run_scheduled_maintenance() -> TableIterator<
         let mut status = refreshed_engine_status().unwrap_or_else(|err| err.report());
         let mut applied_sync = false;
 
-        let apply_sync_recommended = status.pending_sync_rows > 0
-            && status.disabled_trigger_count == 0
-            && !status.needs_rebuild
-            && !status.read_only;
-        if apply_sync_recommended {
+        let mut decision = scheduled_maintenance_decision((&status).into());
+        if decision.apply_sync {
             apply_sync_internal().unwrap_or_else(|err| err.report());
             applied_sync = true;
             status = refreshed_engine_status().unwrap_or_else(|err| err.report());
+            decision = scheduled_maintenance_decision((&status).into());
         }
 
-        let maintenance_recommended = status.read_only
-            || status.needs_rebuild
-            || status.needs_vacuum
-            || status.edge_buffer_used > 0;
         let mut maintenance_job_id = None;
-        if maintenance_recommended {
+        if decision.start_maintenance {
             let job_id = create_maintenance_job().unwrap_or_else(|err| err.report());
             if let Err(err) = launch_maintenance_worker(&job_id) {
                 let _ = update_maintenance_job_failed(&job_id, &err.to_string());

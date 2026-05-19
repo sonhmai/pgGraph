@@ -111,11 +111,12 @@ fn build_status_reads_durable_concurrent_job_rows() {
     .expect("add table failed");
 
     let build_id = super::create_build_job().expect("create build job failed");
-    let (queued_status, queued_phase) = Spi::connect(|client| {
+    let (queued_status, queued_phase, queued_message) = Spi::connect(|client| {
         let result = client
             .select(
                 &format!(
-                    "SELECT status, progress_phase FROM graph.build_status({})",
+                    "SELECT status, progress_phase, progress_message
+                     FROM graph.build_status({})",
                     super::sql_literal(&build_id)
                 ),
                 None,
@@ -126,6 +127,7 @@ fn build_status_reads_durable_concurrent_job_rows() {
         Ok::<_, pgrx::spi::Error>((
             row.get::<String>(1)?.unwrap_or_default(),
             row.get::<String>(2)?.unwrap_or_default(),
+            row.get::<String>(3)?.unwrap_or_default(),
         ))
     })
     .expect("queued build_status failed");
@@ -160,6 +162,7 @@ fn build_status_reads_durable_concurrent_job_rows() {
 
     assert_eq!(queued_status, "queued");
     assert_eq!(queued_phase, "queued");
+    assert_eq!(queued_message, "queued for background build");
     assert!(completed);
 }
 
@@ -167,11 +170,12 @@ fn build_status_reads_durable_concurrent_job_rows() {
 fn maintenance_status_reads_durable_job_rows() {
     reset_and_create_fixtures();
     let job_id = super::create_maintenance_job().expect("create maintenance job failed");
-    let (queued_status, queued_phase) = Spi::connect(|client| {
+    let (queued_status, queued_phase, queued_message) = Spi::connect(|client| {
         let result = client
             .select(
                 &format!(
-                    "SELECT status, progress_phase FROM graph.maintenance_status({})",
+                    "SELECT status, progress_phase, progress_message
+                     FROM graph.maintenance_status({})",
                     super::sql_literal(&job_id)
                 ),
                 None,
@@ -182,6 +186,7 @@ fn maintenance_status_reads_durable_job_rows() {
         Ok::<_, pgrx::spi::Error>((
             row.get::<String>(1)?.unwrap_or_default(),
             row.get::<String>(2)?.unwrap_or_default(),
+            row.get::<String>(3)?.unwrap_or_default(),
         ))
     })
     .expect("queued maintenance_status failed");
@@ -216,6 +221,7 @@ fn maintenance_status_reads_durable_job_rows() {
 
     assert_eq!(queued_status, "queued");
     assert_eq!(queued_phase, "queued");
+    assert_eq!(queued_message, "queued for background maintenance");
     assert!(completed);
 }
 

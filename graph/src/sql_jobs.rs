@@ -12,8 +12,13 @@ use pgrx::prelude::*;
 pub(crate) fn create_build_job() -> safety::GraphResult<String> {
     let sync_mode = current_sync_mode()?.as_str().to_string();
     Spi::get_one_with_args::<String>(
-        "INSERT INTO graph._build_jobs (build_id, status, sync_mode)
-         VALUES (gen_random_uuid()::text, 'queued', $1)
+        "INSERT INTO graph._build_jobs (
+            build_id, status, sync_mode, progress_phase, progress_message
+         )
+         VALUES (
+            gen_random_uuid()::text, 'queued', $1, 'queued',
+            'queued for background build'
+         )
          RETURNING build_id",
         &[sync_mode.into()],
     )
@@ -140,8 +145,13 @@ pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
 
 pub(crate) fn create_maintenance_job() -> safety::GraphResult<String> {
     Spi::get_one::<String>(
-        "INSERT INTO graph._maintenance_jobs (job_id, status)
-         VALUES (gen_random_uuid()::text, 'queued')
+        "INSERT INTO graph._maintenance_jobs (
+            job_id, status, progress_phase, progress_message
+         )
+         VALUES (
+            gen_random_uuid()::text, 'queued', 'queued',
+            'queued for background maintenance'
+         )
          RETURNING job_id",
     )
     .map_err(|err| {

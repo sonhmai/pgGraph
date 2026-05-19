@@ -326,13 +326,7 @@ fn search_sql_predicate(
             let predicates = tokens
                 .iter()
                 .enumerate()
-                .map(|(idx, _)| {
-                    format!(
-                        "{} LIKE ${} ESCAPE '\\'",
-                        comparable_expr,
-                        first_param + idx
-                    )
-                })
+                .map(|(idx, _)| format!("{} ~ ${}", comparable_expr, first_param + idx))
                 .collect::<Vec<_>>();
             if predicates.is_empty() {
                 ("TRUE".to_string(), Vec::new())
@@ -341,7 +335,12 @@ fn search_sql_predicate(
                     predicates.join(" AND "),
                     tokens
                         .into_iter()
-                        .map(|token| format!("%{}%", escape_like_pattern(token)))
+                        .map(|token| {
+                            format!(
+                                "(^|[^[:alnum:]]){}([^[:alnum:]]|$)",
+                                escape_regex_pattern(token)
+                            )
+                        })
                         .collect(),
                 )
             }
@@ -354,6 +353,20 @@ fn escape_like_pattern(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn escape_regex_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 pub(crate) fn search_value_matches(

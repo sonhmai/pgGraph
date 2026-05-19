@@ -1448,6 +1448,91 @@ fn scheduled_maintenance_noops_when_graph_is_healthy() {
 }
 
 #[pg_test]
+fn scheduled_maintenance_applies_sync_and_starts_overlay_maintenance() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("set query freshness failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_scheduled_maintenance_pgtest CASCADE")
+        .expect("drop scheduled maintenance table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_scheduled_maintenance_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL
+                    REFERENCES public.graph_test_scheduled_maintenance_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create scheduled maintenance table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_scheduled_maintenance_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root')",
+    )
+    .expect("insert scheduled maintenance root failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_scheduled_maintenance_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add scheduled maintenance table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_scheduled_maintenance_pgtest'::regclass,
+                from_column := 'parent_id',
+                to_table := 'graph_test_scheduled_maintenance_pgtest'::regclass,
+                to_column := 'id',
+                label := 'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add scheduled maintenance edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_scheduled_maintenance_pgtest (id, parent_id, name)
+             VALUES ('child', 'root', 'Child')",
+    )
+    .expect("insert scheduled maintenance child failed");
+
+    let (applied_sync, maintenance_started, job_id, message) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT applied_sync, maintenance_started, maintenance_job_id, message
+                   FROM graph.run_scheduled_maintenance()",
+                None,
+                &[],
+            )
+            .expect("scheduled maintenance query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<bool>(1)?.unwrap_or(false),
+            row.get::<bool>(2)?.unwrap_or(false),
+            row.get::<String>(3)?,
+            row.get::<String>(4)?.unwrap_or_default(),
+        ))
+    })
+    .expect("scheduled maintenance read failed");
+    let job_id = job_id.expect("scheduled maintenance did not return a job id");
+    let job_exists = Spi::get_one::<bool>(&format!(
+        "SELECT EXISTS (
+                SELECT 1
+                FROM graph.maintenance_status({})
+                WHERE status IN ('queued', 'running', 'completed', 'failed')
+             )",
+        super::sql_literal(&job_id)
+    ))
+    .expect("scheduled maintenance job status failed")
+    .unwrap_or(false);
+
+    assert!(applied_sync);
+    assert!(maintenance_started);
+    assert_eq!(message, "applied sync and started maintenance");
+    assert!(job_exists);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+}
+
+#[pg_test]
 fn sync_health_recommends_apply_then_maintenance_for_edge_overlay() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");

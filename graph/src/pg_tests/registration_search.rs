@@ -125,6 +125,50 @@ fn sql_search_defaults_to_contains_and_supports_exact_mode() {
 }
 
 #[pg_test]
+fn token_search_limit_uses_exact_token_sql_candidates() {
+    reset_and_create_fixtures();
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_token_limit_pgtest CASCADE")
+        .expect("drop token limit table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_token_limit_pgtest (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create token limit table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_token_limit_pgtest (id, name)
+             VALUES ('a-cart', 'cart'), ('b-art', 'art')",
+    )
+    .expect("insert token limit rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_token_limit_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add token limit table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build failed");
+
+    let matched_id = Spi::get_one::<String>(
+        "SELECT node_id
+             FROM graph.search(
+                'name',
+                'art',
+                'graph_test_token_limit_pgtest'::regclass,
+                mode := 'token',
+                max_rows := 1,
+                hydrate := false
+             )",
+    )
+    .expect("token limited search failed")
+    .expect("token limited search returned no row");
+
+    assert_eq!(matched_id, "b-art");
+}
+
+#[pg_test]
 fn search_apis_read_committed_source_rows_without_graph_rebuild() {
     reset_and_create_fixtures();
     Spi::run(
@@ -394,6 +438,32 @@ fn generated_source_search_sql_uses_placeholders_for_user_values() {
         assert!(!query.contains(malicious_name));
         assert!(!query.contains("Mallory"));
         assert!(!query.contains("OR 'x'='x"));
+    }
+
+    let token_queries = crate::sql_search::source_table_search_sql_and_params_for_test(
+        "name",
+        "art') OR true --",
+        None,
+        crate::types::SearchMode::Token,
+        false,
+        None,
+        true,
+    )
+    .expect("token search SQL generation failed");
+
+    assert!(!token_queries.is_empty());
+    for (query, params) in token_queries {
+        assert!(query.contains("~ $1"));
+        assert!(!query.contains("art"));
+        assert!(!query.contains("OR true"));
+        assert_eq!(
+            params,
+            vec![
+                "(^|[^[:alnum:]])art([^[:alnum:]]|$)".to_string(),
+                "(^|[^[:alnum:]])or([^[:alnum:]]|$)".to_string(),
+                "(^|[^[:alnum:]])true([^[:alnum:]]|$)".to_string(),
+            ]
+        );
     }
 }
 

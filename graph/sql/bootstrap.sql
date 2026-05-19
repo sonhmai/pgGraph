@@ -126,8 +126,29 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
 );
 
 ALTER TABLE graph._build_jobs
-    ADD COLUMN IF NOT EXISTS progress_phase TEXT NOT NULL DEFAULT 'queued',
+    ADD COLUMN IF NOT EXISTS progress_phase TEXT,
     ADD COLUMN IF NOT EXISTS progress_message TEXT;
+
+UPDATE graph._build_jobs
+SET progress_phase = CASE status
+    WHEN 'running' THEN 'building'
+    ELSE status
+END
+WHERE progress_phase IS NULL;
+
+UPDATE graph._build_jobs
+SET progress_message = CASE status
+    WHEN 'queued' THEN 'queued for background build'
+    WHEN 'running' THEN 'building graph from registered source tables'
+    WHEN 'completed' THEN 'build completed'
+    WHEN 'failed' THEN COALESCE(error, 'build failed')
+    ELSE progress_message
+END
+WHERE progress_message IS NULL;
+
+ALTER TABLE graph._build_jobs
+    ALTER COLUMN progress_phase SET DEFAULT 'queued',
+    ALTER COLUMN progress_phase SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS _build_jobs_status_idx
     ON graph._build_jobs (status, created_at);
@@ -150,8 +171,29 @@ CREATE TABLE IF NOT EXISTS graph._maintenance_jobs (
 );
 
 ALTER TABLE graph._maintenance_jobs
-    ADD COLUMN IF NOT EXISTS progress_phase TEXT NOT NULL DEFAULT 'queued',
+    ADD COLUMN IF NOT EXISTS progress_phase TEXT,
     ADD COLUMN IF NOT EXISTS progress_message TEXT;
+
+UPDATE graph._maintenance_jobs
+SET progress_phase = CASE status
+    WHEN 'running' THEN 'rebuilding'
+    ELSE status
+END
+WHERE progress_phase IS NULL;
+
+UPDATE graph._maintenance_jobs
+SET progress_message = CASE status
+    WHEN 'queued' THEN 'queued for background maintenance'
+    WHEN 'running' THEN 'rebuilding graph for maintenance'
+    WHEN 'completed' THEN 'maintenance completed'
+    WHEN 'failed' THEN COALESCE(error, 'maintenance failed')
+    ELSE progress_message
+END
+WHERE progress_message IS NULL;
+
+ALTER TABLE graph._maintenance_jobs
+    ALTER COLUMN progress_phase SET DEFAULT 'queued',
+    ALTER COLUMN progress_phase SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS _maintenance_jobs_status_idx
     ON graph._maintenance_jobs (status, created_at);
