@@ -57,7 +57,9 @@ show:
 - registered tables and edges;
 - search over Panama entities;
 - traversal from a high-degree node;
-- connected component functions.
+- connected component functions;
+- admin and operator views such as `graph.sync_health()`,
+  `graph.run_scheduled_maintenance()`, build status, and maintenance status.
 
 You can edit the SQL and run any query against the Docker-backed PostgreSQL 17
 database with pgGraph installed.
@@ -66,6 +68,7 @@ Useful starting points:
 
 ```sql
 SELECT * FROM graph.status();
+SELECT * FROM graph.sync_health();
 SELECT * FROM graph.registered_tables();
 SELECT * FROM graph.registered_edges();
 ```
