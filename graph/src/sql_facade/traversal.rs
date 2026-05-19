@@ -250,6 +250,10 @@ fn shortest_path(
 ///
 /// Returns no rows when no weighted path exists or no weight columns were loaded.
 #[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI exposes each weighted path row column in the return tuple"
+)]
 fn weighted_shortest_path(
     source_table: pgrx::pg_sys::Oid,
     source_id: &str,

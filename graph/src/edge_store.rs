@@ -206,6 +206,7 @@ impl EdgeStore {
     }
 
     /// Build a CSR EdgeStore from unsorted raw edges.
+    #[cfg(test)]
     pub fn from_edges(node_count: u32, edges: Vec<RawEdge>, has_weights: bool) -> Self {
         Self::try_from_edges(node_count, edges, has_weights)
             .expect("trusted edge store input has valid endpoints")
@@ -214,12 +215,16 @@ impl EdgeStore {
     /// Build a CSR EdgeStore from unsorted raw edges, rejecting invalid endpoints.
     pub fn try_from_edges(
         node_count: u32,
-        mut edges: Vec<RawEdge>,
+        edges: Vec<RawEdge>,
         has_weights: bool,
     ) -> GraphResult<Self> {
         for edge in &edges {
             validate_raw_edge(node_count, edge)?;
         }
+        Ok(Self::from_valid_edges(node_count, edges, has_weights))
+    }
+
+    fn from_valid_edges(node_count: u32, mut edges: Vec<RawEdge>, has_weights: bool) -> Self {
         // Sort by source, then target, then type_id
         edges.sort_unstable_by(|a, b| {
             a.source
@@ -259,18 +264,19 @@ impl EdgeStore {
         }
         edge_offsets.push(targets.len() as u32);
 
-        Ok(Self {
+        Self {
             backing: EdgeBacking::Owned {
                 edge_offsets,
                 targets,
                 type_ids,
                 weights,
             },
-        })
+        }
     }
 
     /// Build a CSR EdgeStore from already sorted raw edges without retaining the
     /// raw edge list. Input must be ordered by `(source, target, type_id)`.
+    #[cfg(test)]
     pub fn from_sorted_edges<I>(node_count: u32, edges: I, has_weights: bool) -> Self
     where
         I: IntoIterator<Item = RawEdge>,
@@ -345,7 +351,7 @@ impl EdgeStore {
                 });
             }
         }
-        Self::from_edges(self.node_count(), edges, has_weights)
+        Self::from_valid_edges(self.node_count(), edges, has_weights)
     }
 
     /// Get the neighbor slice for a node. This is the BFS hot-loop access.

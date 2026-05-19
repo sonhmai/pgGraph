@@ -648,7 +648,7 @@ pub(crate) fn json_value_compare(
     }
     let actual = actual.as_str()?;
     let expected = expected.as_str()?;
-    Some(actual.cmp(&expected))
+    Some(actual.cmp(expected))
 }
 
 fn json_number_compare(
