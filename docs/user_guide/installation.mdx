@@ -241,6 +241,7 @@ cd graph
 PG_VERSION_FEATURE=pg17 ./tests/heavy/package_validate.sh
 PG_VERSION_FEATURE=pg17 DBNAME=pggraph_install ./tests/heavy/fresh_install_smoke.sh
 PG_VERSION_FEATURE=pg17 DBNAME=pggraph_metadata ./tests/heavy/function_metadata_audit.sh
+./tests/heavy/playground_release_gate.sh
 ./tests/heavy/docker_smoke.sh
 ```
 

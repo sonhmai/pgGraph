@@ -38,6 +38,17 @@ Use `python3 scripts/check_sql_api_drift.py --list-implemented` or
 `python3 scripts/check_rust_doc_map_drift.py --list` when you need to inspect
 the implementation-side inventory.
 
+Check dependency freshness without updating manifests:
+
+```bash
+python3 scripts/check_dependency_updates.py
+```
+
+The dependency checker enforces the release policy that recommended dependency
+updates must be at least 14 days old. It flags newer releases for review and
+requires explicit confirmation, for example
+`--update cargo:serde --yes`, before it rewrites supported manifests.
+
 ## Rust Unit Tests
 
 Module-local Rust tests cover:
@@ -153,6 +164,7 @@ Heavy suites:
 | `concurrency_stress.sh` | Mixed build/sync/vacuum/traversal stress |
 | `synthetic_release_smoke.sh` | Deterministic synthetic release-gate graph |
 | `run_synthetic_release_evidence.sh` | Synthetic release smoke with metadata and artifact report |
+| `playground_release_gate.sh` | Docker-backed playground query catalog and result stability |
 | `measure_build_rss.sh` | Peak RSS measurement |
 | `measure_mmap_pss.sh` | Linux PSS measurement for mmap sharing |
 
@@ -313,6 +325,25 @@ NODE_COUNT=50000 HUB_FANOUT=1000 ./tests/heavy/run_synthetic_release_evidence.sh
 
 The evidence wrapper writes JSON under `target/release-evidence/` and
 uses `scripts/inspect_pggraph_artifact.py` when the artifact is present.
+
+### Playground Release Gate
+
+`playground_release_gate.sh` validates the Streamlit playground as a heavy
+release gate. It prepares the Docker-backed Panama dataset, imports the same
+shared query catalog used by the playground UI, and checks every sidebar example
+against fixed result summaries. Stable examples compare row counts and result
+hashes; operational examples with volatile job IDs or timings compare row
+counts.
+
+```bash
+cd graph
+./tests/heavy/playground_release_gate.sh
+```
+
+By default the script uses the sandbox Docker container and PostgreSQL port
+`55432`. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when validating an
+already-prepared playground database. Set `PGGRAPH_PLAYGROUND_YES=1` only when
+release automation is allowed to approve the first Panama dataset download.
 
 ## Release Gate
 

@@ -87,6 +87,20 @@ The app warms the graph before reading status so node and edge counts should
 reflect the loaded dataset. If the graph is still building, the app waits for
 the build to complete or reports the build error.
 
+## Release Gate
+
+The playground SQL examples are part of the heavy release gate. The gate imports
+the same query catalog used by the Streamlit sidebar and checks each example
+against fixed result summaries for the Panama dataset:
+
+```bash
+cd graph
+./tests/heavy/playground_release_gate.sh
+```
+
+If a playground query is added, removed, or changed, update the gate
+expectations deliberately after reviewing the new result shape.
+
 ## Cleanup
 
 To remove generated playground and benchmark artifacts:

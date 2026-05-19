@@ -1,0 +1,234 @@
+# Release Notes
+
+Release notes are ordered newest first.
+
+## v0.1.1: Alpha Hardening Critical Paths
+
+This release hardens pgGraph's alpha SQL contract, sync behavior, persistence
+path handling, Docker operations, release gates, playground coverage, and
+supply-chain policy.
+
+<Callout type="warning">
+  This release includes SQL contract changes. Review the breaking changes before
+  upgrading applications that call `graph.weighted_shortest_path()`, inspect
+  status rows, or branch on pgGraph SQLSTATEs.
+</Callout>
+
+### Breaking Changes
+
+- `graph.weighted_shortest_path()` now returns one SQL row per path step instead
+  of the previous compact single-row payload. The row shape is `step`,
+  `node_table`, `node_table_name`, `node_id`, `edge_label`, `edge_weight`,
+  `step_cost`, and `total_cost`. Consumers using the old `path_nodes` /
+  `total_cost` single-row result must update their queries.
+- `graph.status()` now includes `read_only_reason`.
+- `graph.sync_health()` is new and includes scheduler/operator fields,
+  including `read_only_reason`.
+- `graph.build_status()` and `graph.maintenance_status()` now include
+  `progress_phase` and `progress_message`.
+- Sync mutations against an already read-only engine now report `PG012` instead
+  of reusing `PG008`.
+
+<Callout type="info">
+  Docker users should recreate existing pgGraph Docker volumes to pick up the
+  new init SQL and `pg_cron` schedule. Existing initialized PostgreSQL volumes do
+  not rerun files from `/docker-entrypoint-initdb.d/`.
+</Callout>
+
+### New Features
+
+- Added `graph.sync_health()` for scheduler-friendly sync and maintenance
+  diagnostics: `query_freshness`, `sync_batch_size`, sync high-water state,
+  pending rows, edge-buffer usage, rebuild/vacuum needs, read-only state, and
+  maintenance recommendations.
+- Added `graph.run_scheduled_maintenance()` as an admin-only scheduler entry
+  point. It applies pending sync when safe, then starts concurrent maintenance
+  when needed.
+- Added durable build and maintenance progress diagnostics through
+  `progress_phase` and `progress_message`.
+- Added `graph.query_freshness` GUC for topology reads. Supported values are
+  `apply_pending_sync`, `off`, and `error_on_pending`.
+- Added `graph.sync_batch_size` GUC to bound internal sync replay batches.
+- Added a heavy read-latency benchmark for sync backlog scenarios.
+- Added a heavy playground release gate that imports the same query catalog used
+  by the Streamlit sidebar and validates fixed Panama dataset result summaries.
+- Added a dependency update checker that reports Cargo, Python, and Docker
+  update candidates without automatically applying them.
+
+### Behavior Changes
+
+- Topology reads now apply pending trigger sync by default before reading graph
+  topology. This covers traversal, shortest path, weighted shortest path,
+  traverse search, component APIs, aggregation, and path-count estimates.
+- `graph.aggregate()` and `graph.path_count_estimate()` now honor
+  `graph.query_freshness`; they no longer bypass pending-sync policy.
+- `graph.search()` remains a source-table search path and is not treated as a
+  topology read.
+- Sync replay is bounded by `graph.sync_batch_size` and captures high-water
+  marks to avoid unbounded replay.
+- Legacy `_sync_buffer` replay now scans forward through a captured high-water
+  mark. Permanently failing rows remain buffered, but no longer block later
+  valid rows.
+- Query-time sync catch-up fails closed when configured with
+  `error_on_pending`.
+
+### Fixes
+
+- Fixed edge replay capacity handling so high-fanout sync rows reserve
+  edge-overlay capacity before mutating state, avoiding partial edge writes.
+- Fixed edge-store construction to reject out-of-range endpoints instead of
+  silently dropping corrupt edges.
+- Removed production panic paths from edge-store constructors.
+- Fixed JSON hydration comparisons so large integers preserve exactness and JSON
+  strings no longer match numeric values implicitly.
+- Hardened persisted artifact loading against corrupt primary-key bytes before
+  mmap stores are built.
+- Fixed durable graph artifact path resolution for normal PostgreSQL backends
+  where `PGDATA` is not exported, using PostgreSQL's backend `DataDir` pointer
+  without requiring privileged `SHOW data_directory`.
+- Hardened source-search SQL by binding predicates through SPI parameters.
+- Fixed token-search SQL candidate selection so per-table pagination does not
+  hide valid Rust-verified rows.
+- Fixed source-search candidate scan bounds, dedupe stability, and pagination
+  semantics.
+- Improved memory/status accounting with store-specific heap estimates and a
+  conservative logical floor.
+- Preserved `PG008` for edge-buffer capacity breaches and uses `PG012` for later
+  read-only sync mutations.
+- Added missing `SAFETY:` comments on test-only mmap unsafe blocks so clippy
+  release gates pass.
+
+### Docker And Ops
+
+- Docker image now installs `postgresql-17-cron`.
+- Docker startup preloads `pg_cron` and `graph`.
+- Docker init SQL creates `pg_cron`, creates `graph`, and schedules
+  `graph.run_scheduled_maintenance()` every five minutes as
+  `pggraph-maintenance`.
+- Docker base images are pinned by explicit version tag and digest.
+- Non-Docker deployments that want scheduled maintenance should install and
+  configure `pg_cron` or run `graph.run_scheduled_maintenance()` from their own
+  scheduler.
+
+Recreate Docker volumes to pick up new init SQL or pg_cron schedules. PostgreSQL
+only runs files under `/docker-entrypoint-initdb.d/` when it initializes a fresh
+data directory.
+
+### Supply Chain Policy
+
+Release dependencies are pinned and reviewed before they move:
+
+- Rust direct dependencies use exact Cargo requirements plus committed lockfiles.
+- Python sandbox dependencies use exact `==` pins.
+- Docker base images use explicit version tags plus digests.
+- New dependency versions should not be adopted into a release until they are at
+  least 14 days old, unless a security fix requires an explicit exception.
+
+Check dependency freshness without applying updates:
+
+```bash
+python3 scripts/check_dependency_updates.py
+```
+
+Supported Cargo and Python manifests are only rewritten when a maintainer names
+the dependency and confirms:
+
+```bash
+python3 scripts/check_dependency_updates.py --update cargo:serde --yes
+python3 scripts/check_dependency_updates.py --update pypi:streamlit --yes
+```
+
+Docker updates are report-only and require manual changelog, digest, and
+provenance review.
+
+<Callout type="warning">
+  The dependency checker reports update candidates and review items by design.
+  Do not treat checker output as automatic approval to upgrade dependencies.
+</Callout>
+
+### Release Gates
+
+The full `pg17` release gate passed for this hardening branch:
+
+```bash
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+Coverage includes fmt, clippy, docs, unit tests, pgrx SQL tests, cargo-deny,
+fuzz check, package validation, fresh install smoke, metadata audit,
+SQLSTATE/ACL boundary tests, backup/restore, lock regressions, concurrency,
+synthetic release smoke, and pgbench sync stress.
+
+The heavy release gate also includes playground query validation:
+
+```bash
+./tests/heavy/playground_release_gate.sh
+```
+
+The playground gate prepares the Docker-backed Panama dataset, imports the same
+query catalog used by the UI, and validates every sidebar SQL example. Stable
+examples compare row counts and result hashes; operational examples with
+volatile job IDs or timings compare row counts.
+
+Set `PGGRAPH_PLAYGROUND_YES=1` only when release automation is allowed to
+approve the first Panama dataset download. Set `RUN_PLAYGROUND=0` on the full
+release gate only for constrained environments that cannot prepare the
+Docker-backed playground dataset.
+
+### Documentation
+
+- Updated API reference, querying, sync/maintenance, configuration,
+  installation, troubleshooting, build/persistence, known-issues, and roadmap
+  docs.
+- Marked completed alpha hardening items reflected in public docs.
+- Added scheduler and release-testing guidance.
+- Added playground release-gate documentation.
+- Added dependency pinning, age-gate, and update-checker documentation.
+- Expanded Rustdoc for query freshness configuration and CSR edge-store builder
+  APIs.
+
+### Upgrade Notes
+
+- Review any consumer code expecting `graph.weighted_shortest_path()` to return
+  a JSON-only payload; the API now returns path step rows.
+- Rebuild graph artifacts after upgrading when release validation changes the
+  persistence or build path being exercised.
+- Recreate Docker volumes to pick up new init SQL or pg_cron schedules.
+- Treat dependency-checker `UPDATE` and `REVIEW` output as release review work,
+  not as automatic permission to upgrade.
+
+### Commit Coverage
+
+This release note covers the alpha hardening branch commits reviewed over
+`main`, including sync freshness, edge-store safety, persistence fallback,
+Docker scheduling, playground examples, and the follow-up release-gate and
+supply-chain documentation changes.
+
+## v0.1.0: Initial Alpha
+
+The initial alpha release introduced pgGraph as a PostgreSQL extension for
+building and querying a derived graph index over existing relational tables.
+
+<Callout type="info">
+  `v0.1.0` was the version previously published from `main`. New deployments
+  should use `v0.1.1`; this entry is retained so the release-notes page tracks
+  historical releases instead of only the latest merge.
+</Callout>
+
+### Highlights
+
+- Added schema registration APIs for existing PostgreSQL tables and edge
+  relationships.
+- Added graph build and status APIs for creating the derived graph index.
+- Added traversal, search, shortest-path, weighted-shortest-path, component,
+  filter, and aggregation query surfaces.
+- Added persistence support for `.pggraph` artifacts.
+- Added Docker and package installation flows for PostgreSQL-backed evaluation.
+- Added public user and contributor documentation for installation,
+  configuration, querying, persistence, and release testing.
+
+### Upgrade Notes
+
+- `v0.1.1` supersedes this release and includes breaking SQL contract changes.
+  Review the `v0.1.1` breaking changes before moving applications from
+  `v0.1.0`.

@@ -158,11 +158,18 @@ pub enum SyncMode {
     Wal,
 }
 
+/// Query-time policy for topology reads when trigger sync has pending rows.
+///
+/// This is parsed from `graph.query_freshness` at SQL entry points before a
+/// query walks graph topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryFreshness {
+    /// Compatibility mode: read the currently loaded graph without catch-up.
     Off,
+    /// Apply pending trigger sync rows up to a captured high-water mark.
     #[default]
     ApplyPendingSync,
+    /// Return an error instead of reading while pending trigger sync rows exist.
     ErrorOnPending,
 }
 
@@ -243,6 +250,7 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
     parse_sync_mode(raw)
 }
 
+/// Return the raw `graph.query_freshness` setting, defaulting to auto catch-up.
 pub fn query_freshness() -> String {
     QUERY_FRESHNESS
         .get()
@@ -252,6 +260,9 @@ pub fn query_freshness() -> String {
         .to_string()
 }
 
+/// Parse `graph.query_freshness` into a typed query freshness policy.
+///
+/// Returns `None` when the setting contains an unsupported value.
 pub fn parsed_query_freshness() -> Option<QueryFreshness> {
     let binding = QUERY_FRESHNESS.get();
     let raw = binding
@@ -262,6 +273,10 @@ pub fn parsed_query_freshness() -> Option<QueryFreshness> {
     parse_query_freshness(raw)
 }
 
+/// Return the bounded sync replay batch size.
+///
+/// The SQL GUC range starts at 1, but this still clamps defensively in case a
+/// test or future registration path bypasses PostgreSQL's range check.
 pub fn sync_batch_size() -> usize {
     SYNC_BATCH_SIZE.get().max(1) as usize
 }

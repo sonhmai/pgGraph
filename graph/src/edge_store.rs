@@ -193,6 +193,7 @@ pub struct SortedEdgeStoreBuilder {
 }
 
 impl SortedEdgeStoreBuilder {
+    /// Create a streaming CSR builder for edges sorted by source node.
     pub fn new(node_count: u32, has_weights: bool) -> Self {
         Self {
             node_count,
@@ -206,6 +207,15 @@ impl SortedEdgeStoreBuilder {
         }
     }
 
+    /// Add one sorted edge, rejecting endpoints outside the node range.
+    ///
+    /// Consecutive duplicate `(source, target, type_id)` rows are ignored so
+    /// SQL build spools can deduplicate without retaining all edges in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::Internal`] when `edge.source` or `edge.target`
+    /// is greater than or equal to the builder's node count.
     pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
         validate_raw_edge(self.node_count, &edge)?;
         let key = (edge.source, edge.target, edge.type_id);
@@ -225,6 +235,7 @@ impl SortedEdgeStoreBuilder {
         Ok(())
     }
 
+    /// Finalize the streamed CSR arrays into an owned [`EdgeStore`].
     pub fn finish(mut self) -> EdgeStore {
         while self.edge_offsets.len() < self.node_count as usize + 1 {
             self.edge_offsets.push(self.targets.len() as u32);

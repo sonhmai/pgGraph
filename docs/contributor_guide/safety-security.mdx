@@ -130,3 +130,26 @@ adding SQL generation:
 
 Do not put credentials, private hostnames, production paths, or customer data in
 docs, tests, examples, logs, or panic messages.
+
+## Supply Chain Policy
+
+Release dependencies must be pinned and reviewed before they move:
+
+- Rust direct dependencies use exact Cargo requirements plus committed lockfiles.
+- Python sandbox dependencies use exact `==` pins.
+- Docker base images use explicit version tags plus digests; digest or tag
+  updates require manual review.
+- New dependency versions should not be adopted into a release until they are at
+  least 14 days old, unless a security fix requires an explicit exception.
+
+Use the dependency checker before release prep:
+
+```bash
+python3 scripts/check_dependency_updates.py
+```
+
+The checker reports newer releases, flags releases that are too recent for the
+age gate, and only rewrites supported manifests when a maintainer passes both
+`--update <ecosystem:name>` and `--yes`. Docker and apt updates are review-only;
+verify the upstream changelog, image digest, and package provenance before
+changing them.

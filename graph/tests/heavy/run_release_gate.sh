@@ -17,6 +17,7 @@ RUN_CONCURRENCY="${RUN_CONCURRENCY:-1}"
 RUN_METADATA="${RUN_METADATA:-1}"
 RUN_RSS="${RUN_RSS:-0}"
 RUN_SYNTHETIC="${RUN_SYNTHETIC:-1}"
+RUN_PLAYGROUND="${RUN_PLAYGROUND:-1}"
 
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
   ./tests/heavy/run_pg_matrix.sh
@@ -69,6 +70,10 @@ if [[ "$RUN_SYNTHETIC" == "1" ]]; then
     MAX_BUILD_MS="${SYNTHETIC_MAX_BUILD_MS:-60000}" \
     MAX_QUERY_MS="${SYNTHETIC_MAX_QUERY_MS:-1000}" \
     ./tests/heavy/synthetic_release_smoke.sh
+fi
+
+if [[ "$RUN_PLAYGROUND" == "1" ]]; then
+  ./tests/heavy/playground_release_gate.sh
 fi
 
 if [[ "$RUN_PGBENCH" == "1" ]]; then

@@ -23,9 +23,10 @@ generated_sql="/tmp/graph-generated.sql"
 cargo pgrx schema --features "$PG_VERSION_FEATURE" --no-default-features > "$generated_sql"
 rg "CREATE TABLE IF NOT EXISTS graph\._registered_tables|CREATE TABLE IF NOT EXISTS graph\._sync_log|pg_extension_config_dump" "$generated_sql"
 
+package_version="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)"
 package_dir="target/release/graph-${PG_VERSION_FEATURE}"
 control_file="$(find "$package_dir" -path "*/extension/graph.control" -type f | head -n 1)"
-sql_file="$(find "$package_dir" -path "*/extension/graph--0.1.0.sql" -type f | head -n 1)"
+sql_file="$(find "$package_dir" -path "*/extension/graph--${package_version}.sql" -type f | head -n 1)"
 shared_library="$(find "$package_dir" \( -name "graph.so" -o -name "graph.dylib" \) -type f | head -n 1)"
 
 if [[ -z "$control_file" ]]; then
@@ -33,7 +34,7 @@ if [[ -z "$control_file" ]]; then
   exit 1
 fi
 if [[ -z "$sql_file" ]]; then
-  echo "Missing package artifact: graph--0.1.0.sql under $package_dir"
+  echo "Missing package artifact: graph--${package_version}.sql under $package_dir"
   exit 1
 fi
 if [[ -z "$shared_library" ]]; then
