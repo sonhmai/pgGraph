@@ -748,11 +748,14 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
 ///
 /// Uses the `graph.data_dir` GUC (default: "graph").
 pub fn graph_file_path() -> GraphResult<PathBuf> {
-    let pgdata = std::env::var("PGDATA").map_err(|_| {
-        GraphError::Internal(
-            "PGDATA is not set; cannot determine durable graph artifact path".to_string(),
-        )
-    })?;
+    let pgdata = std::env::var("PGDATA")
+        .ok()
+        .or_else(postgres_data_directory)
+        .ok_or_else(|| {
+            GraphError::Internal(
+                "PGDATA is not set; cannot determine durable graph artifact path".to_string(),
+            )
+        })?;
     if pgdata.trim().is_empty() {
         return Err(GraphError::Internal(
             "PGDATA is empty; cannot determine durable graph artifact path".to_string(),
@@ -768,6 +771,30 @@ pub fn graph_file_path() -> GraphResult<PathBuf> {
         ))
     })?;
     Ok(dir.join("main.pggraph"))
+}
+
+#[cfg(any(not(test), feature = "pg_test"))]
+fn postgres_data_directory() -> Option<String> {
+    // SAFETY: `DataDir` is initialized by PostgreSQL before extension code runs
+    // in a backend. It is a NUL-terminated server-owned string and is only read
+    // here to derive the durable artifact directory.
+    let data_dir = unsafe {
+        let ptr = pgrx::pg_sys::DataDir;
+        if ptr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(ptr)
+    };
+    data_dir
+        .to_str()
+        .ok()
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(all(test, not(feature = "pg_test")))]
+fn postgres_data_directory() -> Option<String> {
+    None
 }
 
 fn graph_data_dir() -> String {

@@ -871,6 +871,7 @@ mod tests {
 
         // SAFETY: Pointers are into the local region and are not dereferenced.
         assert!(unsafe { MmapEdgeArrays::new(valid) }.is_some());
+        // SAFETY: Pointers are into the local region and are not dereferenced.
         assert!(unsafe {
             MmapEdgeArrays::new(MmapEdgeArrayParts {
                 region_len: 24,
@@ -878,6 +879,7 @@ mod tests {
             })
         }
         .is_none());
+        // SAFETY: Pointers are into the local region and are not dereferenced.
         assert!(unsafe {
             MmapEdgeArrays::new(MmapEdgeArrayParts {
                 targets_ptr: base.wrapping_add(1).cast::<u32>(),
@@ -885,6 +887,7 @@ mod tests {
             })
         }
         .is_none());
+        // SAFETY: Pointers are into the local region and are not dereferenced.
         assert!(unsafe {
             MmapEdgeArrays::new(MmapEdgeArrayParts {
                 offsets_ptr: std::ptr::null(),
@@ -900,6 +903,8 @@ mod tests {
         let base = region.as_ptr().cast::<u8>();
         let near_usize_end = usize::MAX as *const u32;
 
+        // SAFETY: The constructor validates the deliberately overflowing
+        // pointer metadata and returns `None` before dereferencing.
         assert!(unsafe {
             MmapEdgeArrays::new(MmapEdgeArrayParts {
                 region_ptr: base,
