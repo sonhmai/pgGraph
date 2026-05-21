@@ -260,6 +260,43 @@ def render_loading_button(slot) -> None:
     )
 
 
+def render_main_top() -> None:
+    st.markdown(
+        """
+        <div class="main-top">
+          <div></div>
+          <div class="dataset-label">ICIJ Offshore Leaks</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_strip(status: dict | None) -> None:
+    status = status or {}
+    st.markdown(
+        f"""
+        <div class="metric-strip">
+          <div class="metric"><div class="metric-label">Nodes</div><div class="metric-value">{status.get("node_count", 0):,}</div></div>
+          <div class="metric"><div class="metric-label">Edges</div><div class="metric-value">{status.get("edge_count", 0):,}</div></div>
+          <div class="metric"><div class="metric-label">Schema</div><div class="metric-value">{status.get("schema_status", "loading")}</div></div>
+          <div class="metric"><div class="metric-label">Sync</div><div class="metric-value">{status.get("sync_status", "loading")}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def initialize_graph() -> tuple[psycopg.Connection, dict]:
+    with st.status("Preparing Panama graph...", expanded=True) as status_box:
+        st.write("Connecting to PostgreSQL and checking the loaded dataset.")
+        conn = connection()
+        st.write("Verifying graph catalog registration and build status.")
+        graph_status = fetch_one(conn, "SELECT * FROM graph.status();")
+        status_box.update(label="Panama graph is ready.", state="complete", expanded=False)
+    return conn, graph_status
+
+
 def apply_css() -> None:
     st.markdown(
         """
@@ -346,6 +383,7 @@ def apply_css() -> None:
           color: var(--text);
           font-size: 20px;
           font-weight: 700;
+          overflow-wrap: anywhere;
         }
         .workflow {
           color: var(--muted);
@@ -463,30 +501,19 @@ def main() -> None:
     if "result" not in st.session_state:
         st.session_state.result = {}
 
-    conn = connection()
-    status = fetch_one(conn, "SELECT * FROM graph.status();")
+    render_main_top()
+    metrics_slot = st.empty()
+    with metrics_slot.container():
+        render_metric_strip(None)
 
-    st.markdown(
-        """
-        <div class="main-top">
-          <div></div>
-          <div class="dataset-label">ICIJ Offshore Leaks</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    try:
+        _, status = initialize_graph()
+    except Exception as exc:
+        st.error(f"Could not prepare the playground graph: {type(exc).__name__}: {exc}")
+        st.stop()
 
-    st.markdown(
-        f"""
-        <div class="metric-strip">
-          <div class="metric"><div class="metric-label">Nodes</div><div class="metric-value">{status.get("node_count", 0):,}</div></div>
-          <div class="metric"><div class="metric-label">Edges</div><div class="metric-value">{status.get("edge_count", 0):,}</div></div>
-          <div class="metric"><div class="metric-label">Schema</div><div class="metric-value">{status.get("schema_status", "unknown")}</div></div>
-          <div class="metric"><div class="metric-label">Sync</div><div class="metric-value">{status.get("sync_status", "unknown")}</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with metrics_slot.container():
+        render_metric_strip(status)
 
     st.subheader(st.session_state.question)
     st.caption(PLAYGROUND_CONTEXT)
