@@ -239,15 +239,15 @@ impl FilterIndex {
             return matches!(op, FilterOp::IsNull(_));
         }
         match op {
-            FilterOp::Gt(_, _)
-            | FilterOp::Gte(_, _)
-            | FilterOp::Lt(_, _)
-            | FilterOp::Lte(_, _)
-            | FilterOp::Eq(_, _)
-            | FilterOp::Neq(_, _)
-            | FilterOp::Between(_, _, _) => {
+            FilterOp::Gt(_, threshold) => self.get_value(column_idx, node_idx) > *threshold,
+            FilterOp::Gte(_, threshold) => self.get_value(column_idx, node_idx) >= *threshold,
+            FilterOp::Lt(_, threshold) => self.get_value(column_idx, node_idx) < *threshold,
+            FilterOp::Lte(_, threshold) => self.get_value(column_idx, node_idx) <= *threshold,
+            FilterOp::Eq(_, threshold) => self.get_value(column_idx, node_idx) == *threshold,
+            FilterOp::Neq(_, threshold) => self.get_value(column_idx, node_idx) != *threshold,
+            FilterOp::Between(_, lo, hi) => {
                 let value = self.get_value(column_idx, node_idx);
-                op.check(value)
+                value >= *lo && value <= *hi
             }
             FilterOp::EqI64(_, expected) => storage.encoded_i64(node_idx) == Some(*expected),
             FilterOp::NeqI64(_, expected) => storage.encoded_i64(node_idx) != Some(*expected),
@@ -721,6 +721,8 @@ mod tests {
     //! Covers filter column registration and predicate evaluation boundaries so
     //! traversal filters preserve their typed comparison semantics.
 
+    use crate::types::UnsignedFilterOp;
+
     use super::*;
 
     #[test]
@@ -892,11 +894,11 @@ mod tests {
         fi.set_value(0, 0, u32::MAX);
         fi.set_value(0, 1, 0);
 
-        let op = FilterOp::Gte(0, u32::MAX);
+        let op = UnsignedFilterOp::Gte(0, u32::MAX);
         assert!(op.check(fi.get_value(0, 0))); // u32::MAX >= u32::MAX
         assert!(!op.check(fi.get_value(0, 1))); // 0 >= u32::MAX
 
-        let op = FilterOp::Lte(0, 0);
+        let op = UnsignedFilterOp::Lte(0, 0);
         assert!(!op.check(fi.get_value(0, 0))); // u32::MAX <= 0
         assert!(op.check(fi.get_value(0, 1))); // 0 <= 0
     }

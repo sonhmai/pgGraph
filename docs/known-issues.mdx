@@ -140,7 +140,6 @@ but they do not change core user behavior.
 | Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
 | Job statuses | Background job status strings are repeated across SQL and Rust mapping code. | Add a small Rust enum and consider a PostgreSQL enum or CHECK constraint if schema validation is useful. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
-| Legacy unsigned filter evaluation | A legacy `FilterOp::check` boundary still accepts typed variants and returns `false`. | Make unsigned-only evaluation explicit so typed variants are impossible at that API. |
 | Sync row parsing | Some sync paths parse the same row JSON more than once. | Parse once at the boundary and pass borrowed row values through replay helpers. |
 | Internal sync SQL | Some internal sync queries still interpolate numeric IDs or generated ID lists. | Parameterize where practical or use temp-table cleanup for larger applied ID sets. |
 | Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |

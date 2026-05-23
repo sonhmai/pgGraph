@@ -272,19 +272,82 @@ pub enum FilterOp {
     IsNotNull(usize),
 }
 
-impl FilterOp {
-    /// Evaluate this filter against a value.
+/// Legacy unsigned numeric filter operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsignedFilterOp {
+    /// Unsigned numeric column is greater than the threshold.
+    Gt(usize, u32),
+    /// Unsigned numeric column is greater than or equal to the threshold.
+    Gte(usize, u32),
+    /// Unsigned numeric column is less than the threshold.
+    Lt(usize, u32),
+    /// Unsigned numeric column is less than or equal to the threshold.
+    Lte(usize, u32),
+    /// Unsigned numeric column equals the value.
+    Eq(usize, u32),
+    /// Unsigned numeric column does not equal the value.
+    Neq(usize, u32),
+    /// Unsigned numeric column is within the inclusive range.
+    Between(usize, u32, u32),
+}
+
+impl UnsignedFilterOp {
+    /// Evaluate this unsigned numeric filter against a value.
     #[inline]
     pub fn check(&self, value: u32) -> bool {
         match self {
-            FilterOp::Gt(_, threshold) => value > *threshold,
-            FilterOp::Gte(_, threshold) => value >= *threshold,
-            FilterOp::Lt(_, threshold) => value < *threshold,
-            FilterOp::Lte(_, threshold) => value <= *threshold,
-            FilterOp::Eq(_, threshold) => value == *threshold,
-            FilterOp::Neq(_, threshold) => value != *threshold,
-            FilterOp::Between(_, lo, hi) => value >= *lo && value <= *hi,
-            _ => false,
+            UnsignedFilterOp::Gt(_, threshold) => value > *threshold,
+            UnsignedFilterOp::Gte(_, threshold) => value >= *threshold,
+            UnsignedFilterOp::Lt(_, threshold) => value < *threshold,
+            UnsignedFilterOp::Lte(_, threshold) => value <= *threshold,
+            UnsignedFilterOp::Eq(_, threshold) => value == *threshold,
+            UnsignedFilterOp::Neq(_, threshold) => value != *threshold,
+            UnsignedFilterOp::Between(_, lo, hi) => value >= *lo && value <= *hi,
+        }
+    }
+
+    /// Get the column index this unsigned filter operates on.
+    #[inline]
+    pub fn column_idx(&self) -> usize {
+        match self {
+            UnsignedFilterOp::Gt(idx, _)
+            | UnsignedFilterOp::Gte(idx, _)
+            | UnsignedFilterOp::Lt(idx, _)
+            | UnsignedFilterOp::Lte(idx, _)
+            | UnsignedFilterOp::Eq(idx, _)
+            | UnsignedFilterOp::Neq(idx, _)
+            | UnsignedFilterOp::Between(idx, _, _) => *idx,
+        }
+    }
+}
+
+impl FilterOp {
+    /// Convert this filter to the legacy unsigned numeric evaluator shape.
+    #[inline]
+    pub fn as_unsigned(&self) -> Option<UnsignedFilterOp> {
+        match self {
+            FilterOp::Gt(idx, threshold) => Some(UnsignedFilterOp::Gt(*idx, *threshold)),
+            FilterOp::Gte(idx, threshold) => Some(UnsignedFilterOp::Gte(*idx, *threshold)),
+            FilterOp::Lt(idx, threshold) => Some(UnsignedFilterOp::Lt(*idx, *threshold)),
+            FilterOp::Lte(idx, threshold) => Some(UnsignedFilterOp::Lte(*idx, *threshold)),
+            FilterOp::Eq(idx, threshold) => Some(UnsignedFilterOp::Eq(*idx, *threshold)),
+            FilterOp::Neq(idx, threshold) => Some(UnsignedFilterOp::Neq(*idx, *threshold)),
+            FilterOp::Between(idx, lo, hi) => Some(UnsignedFilterOp::Between(*idx, *lo, *hi)),
+            FilterOp::EqI64(_, _)
+            | FilterOp::NeqI64(_, _)
+            | FilterOp::GtI64(_, _)
+            | FilterOp::GteI64(_, _)
+            | FilterOp::LtI64(_, _)
+            | FilterOp::LteI64(_, _)
+            | FilterOp::BetweenI64(_, _, _)
+            | FilterOp::EqBool(_, _)
+            | FilterOp::NeqBool(_, _)
+            | FilterOp::EqToken(_, _)
+            | FilterOp::NeqToken(_, _)
+            | FilterOp::EqUuid(_, _)
+            | FilterOp::NeqUuid(_, _)
+            | FilterOp::IsNull(_)
+            | FilterOp::IsNotNull(_) => None,
         }
     }
 
@@ -325,11 +388,11 @@ mod tests {
 
     use super::*;
 
-    // Legacy unsigned FilterOp::check() boundary behavior.
+    // Legacy unsigned filter evaluation boundary behavior.
 
     #[test]
     fn filter_gt_boundary() {
-        let op = FilterOp::Gt(0, 10);
+        let op = UnsignedFilterOp::Gt(0, 10);
         assert!(!op.check(9));
         assert!(!op.check(10));
         assert!(op.check(11));
@@ -337,21 +400,21 @@ mod tests {
 
     #[test]
     fn filter_gt_zero_threshold() {
-        let op = FilterOp::Gt(0, 0);
+        let op = UnsignedFilterOp::Gt(0, 0);
         assert!(!op.check(0));
         assert!(op.check(1));
     }
 
     #[test]
     fn filter_gt_u32_max_threshold() {
-        let op = FilterOp::Gt(0, u32::MAX);
+        let op = UnsignedFilterOp::Gt(0, u32::MAX);
         assert!(!op.check(u32::MAX));
         assert!(!op.check(0));
     }
 
     #[test]
     fn filter_gte_boundary() {
-        let op = FilterOp::Gte(0, 10);
+        let op = UnsignedFilterOp::Gte(0, 10);
         assert!(!op.check(9));
         assert!(op.check(10));
         assert!(op.check(11));
@@ -360,14 +423,14 @@ mod tests {
     #[test]
     fn filter_gte_zero() {
         // >= 0 is always true for u32
-        let op = FilterOp::Gte(0, 0);
+        let op = UnsignedFilterOp::Gte(0, 0);
         assert!(op.check(0));
         assert!(op.check(u32::MAX));
     }
 
     #[test]
     fn filter_lt_boundary() {
-        let op = FilterOp::Lt(0, 10);
+        let op = UnsignedFilterOp::Lt(0, 10);
         assert!(op.check(9));
         assert!(!op.check(10));
         assert!(!op.check(11));
@@ -376,14 +439,14 @@ mod tests {
     #[test]
     fn filter_lt_zero_threshold() {
         // < 0 is always false for u32
-        let op = FilterOp::Lt(0, 0);
+        let op = UnsignedFilterOp::Lt(0, 0);
         assert!(!op.check(0));
         assert!(!op.check(1));
     }
 
     #[test]
     fn filter_lte_boundary() {
-        let op = FilterOp::Lte(0, 10);
+        let op = UnsignedFilterOp::Lte(0, 10);
         assert!(op.check(9));
         assert!(op.check(10));
         assert!(!op.check(11));
@@ -391,7 +454,7 @@ mod tests {
 
     #[test]
     fn filter_eq_exact_match() {
-        let op = FilterOp::Eq(0, 42);
+        let op = UnsignedFilterOp::Eq(0, 42);
         assert!(!op.check(41));
         assert!(op.check(42));
         assert!(!op.check(43));
@@ -399,7 +462,7 @@ mod tests {
 
     #[test]
     fn filter_neq_exact_mismatch() {
-        let op = FilterOp::Neq(0, 42);
+        let op = UnsignedFilterOp::Neq(0, 42);
         assert!(op.check(41));
         assert!(!op.check(42));
         assert!(op.check(43));
@@ -407,7 +470,7 @@ mod tests {
 
     #[test]
     fn filter_between_inclusive_boundaries() {
-        let op = FilterOp::Between(0, 10, 20);
+        let op = UnsignedFilterOp::Between(0, 10, 20);
         assert!(!op.check(9));
         assert!(op.check(10)); // inclusive lower
         assert!(op.check(15));
@@ -417,7 +480,7 @@ mod tests {
 
     #[test]
     fn filter_between_single_value_range() {
-        let op = FilterOp::Between(0, 5, 5);
+        let op = UnsignedFilterOp::Between(0, 5, 5);
         assert!(!op.check(4));
         assert!(op.check(5));
         assert!(!op.check(6));
@@ -425,24 +488,43 @@ mod tests {
 
     #[test]
     fn filter_between_full_u32_range() {
-        let op = FilterOp::Between(0, 0, u32::MAX);
+        let op = UnsignedFilterOp::Between(0, 0, u32::MAX);
         assert!(op.check(0));
         assert!(op.check(u32::MAX));
         assert!(op.check(u32::MAX / 2));
     }
 
-    // ─── FilterOp::column_idx() ───
+    #[test]
+    fn typed_filter_ops_do_not_convert_to_unsigned_evaluators() {
+        assert_eq!(
+            FilterOp::Gt(2, 9).as_unsigned(),
+            Some(UnsignedFilterOp::Gt(2, 9))
+        );
+
+        for op in [
+            FilterOp::EqI64(2, -1),
+            FilterOp::EqBool(2, true),
+            FilterOp::EqToken(2, 7),
+            FilterOp::EqUuid(2, 7),
+            FilterOp::IsNull(2),
+            FilterOp::IsNotNull(2),
+        ] {
+            assert_eq!(op.as_unsigned(), None, "{op:?}");
+        }
+    }
+
+    // ─── UnsignedFilterOp::column_idx() ───
 
     #[test]
-    fn column_idx_returns_correct_index_for_all_variants() {
-        let cases: Vec<FilterOp> = vec![
-            FilterOp::Gt(3, 0),
-            FilterOp::Gte(3, 0),
-            FilterOp::Lt(3, 0),
-            FilterOp::Lte(3, 0),
-            FilterOp::Eq(3, 0),
-            FilterOp::Neq(3, 0),
-            FilterOp::Between(3, 0, 0),
+    fn unsigned_column_idx_returns_correct_index_for_all_variants() {
+        let cases: Vec<UnsignedFilterOp> = vec![
+            UnsignedFilterOp::Gt(3, 0),
+            UnsignedFilterOp::Gte(3, 0),
+            UnsignedFilterOp::Lt(3, 0),
+            UnsignedFilterOp::Lte(3, 0),
+            UnsignedFilterOp::Eq(3, 0),
+            UnsignedFilterOp::Neq(3, 0),
+            UnsignedFilterOp::Between(3, 0, 0),
         ];
         for op in cases {
             assert_eq!(op.column_idx(), 3, "column_idx wrong for {:?}", op);
