@@ -71,6 +71,51 @@ fn align_data(data: &mut Vec<u8>, alignment: usize) {
     data.resize(data.len() + padding, 0);
 }
 
+fn begin_section(
+    data: &mut Vec<u8>,
+    section_offsets: &mut [u64; NUM_SECTIONS],
+    section: usize,
+    alignment: Option<usize>,
+) -> GraphResult<()> {
+    if let Some(alignment) = alignment {
+        align_data(data, alignment);
+    }
+    section_offsets[section] =
+        u64::try_from(data.len()).map_err(|_| GraphError::Internal("artifact too large".into()))?;
+    Ok(())
+}
+
+fn write_u32_values(data: &mut Vec<u8>, values: &[u32]) {
+    for &value in values {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn write_u64_values<I>(data: &mut Vec<u8>, values: I)
+where
+    I: IntoIterator<Item = u64>,
+{
+    for value in values {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn write_length_prefixed_payload(
+    data: &mut Vec<u8>,
+    payload: &[u8],
+    label: &str,
+) -> GraphResult<()> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+        GraphError::Internal(format!(
+            "{} section payload exceeds u32 length prefix",
+            label
+        ))
+    })?;
+    data.extend_from_slice(&payload_len.to_le_bytes());
+    data.extend_from_slice(payload);
+    Ok(())
+}
+
 fn checked_section_size(count: u32, width: usize, label: &str) -> GraphResult<usize> {
     (count as usize)
         .checked_mul(width)
@@ -377,51 +422,30 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     // Track section offsets
     let mut section_offsets = [0u64; NUM_SECTIONS];
 
-    // Section 0: is_active (packed bits as raw bytes)
-    section_offsets[0] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 0, None)?;
     let is_active_bytes = engine.node_store.is_active_bytes();
     data.extend_from_slice(&is_active_bytes);
 
-    // Section 1: table_oids (u32 array)
-    align_data(&mut data, 4);
-    section_offsets[1] = data.len() as u64;
-    for &oid in engine.node_store.table_oids_slice() {
-        data.extend_from_slice(&oid.to_le_bytes());
-    }
+    begin_section(&mut data, &mut section_offsets, 1, Some(4))?;
+    write_u32_values(&mut data, engine.node_store.table_oids_slice());
 
-    // Section 2: edge_offsets (u32 array)
-    align_data(&mut data, 4);
-    section_offsets[2] = data.len() as u64;
-    for &offset in engine.edge_store.offsets_slice() {
-        data.extend_from_slice(&offset.to_le_bytes());
-    }
+    begin_section(&mut data, &mut section_offsets, 2, Some(4))?;
+    write_u32_values(&mut data, engine.edge_store.offsets_slice());
 
-    // Section 3: targets (u32 array)
-    align_data(&mut data, 4);
-    section_offsets[3] = data.len() as u64;
-    for &target in engine.edge_store.targets_slice() {
-        data.extend_from_slice(&target.to_le_bytes());
-    }
+    begin_section(&mut data, &mut section_offsets, 3, Some(4))?;
+    write_u32_values(&mut data, engine.edge_store.targets_slice());
 
-    // Section 4: type_ids (u8 array)
-    section_offsets[4] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 4, None)?;
     data.extend_from_slice(engine.edge_store.type_ids_slice());
 
-    // Section 5: weights (u32 array, optional)
-    align_data(&mut data, 4);
-    section_offsets[5] = data.len() as u64;
-    for &weight in engine.edge_store.weights_slice() {
-        data.extend_from_slice(&weight.to_le_bytes());
-    }
+    begin_section(&mut data, &mut section_offsets, 5, Some(4))?;
+    write_u32_values(&mut data, engine.edge_store.weights_slice());
 
-    // Section 6: ResolutionIndex (sorted array)
-    section_offsets[6] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 6, None)?;
     let ri_bytes = engine.resolution_to_bytes();
     data.extend_from_slice(&ri_bytes);
 
-    // Section 7: primary key offsets (u64 array) and section 8: UTF-8 bytes
-    align_data(&mut data, 8);
-    section_offsets[7] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 7, Some(8))?;
     let mut pk_bytes = Vec::new();
     let mut pk_offsets = Vec::with_capacity(engine.node_store.node_count() as usize + 1);
     pk_offsets.push(0u64);
@@ -433,27 +457,21 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
     while pk_offsets.len() < engine.node_store.node_count() as usize + 1 {
         pk_offsets.push(*pk_offsets.last().unwrap_or(&0));
     }
-    for offset in pk_offsets {
-        data.extend_from_slice(&offset.to_le_bytes());
-    }
+    write_u64_values(&mut data, pk_offsets);
 
-    section_offsets[8] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 8, None)?;
     data.extend_from_slice(&pk_bytes);
 
-    // Section 9: FilterIndex (Bincode)
-    section_offsets[9] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 9, None)?;
     let filter_bytes = bincode::serialize(&engine.filter_index)
         .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
-    data.extend_from_slice(&(filter_bytes.len() as u32).to_le_bytes());
-    data.extend_from_slice(&filter_bytes);
+    write_length_prefixed_payload(&mut data, &filter_bytes, "filter index")?;
 
-    // Section 10: edge_type_registry (Bincode)
-    section_offsets[10] = data.len() as u64;
+    begin_section(&mut data, &mut section_offsets, 10, None)?;
     let edge_type_bytes = bincode::serialize(&engine.edge_type_registry).map_err(|e| {
         GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
     })?;
-    data.extend_from_slice(&(edge_type_bytes.len() as u32).to_le_bytes());
-    data.extend_from_slice(&edge_type_bytes);
+    write_length_prefixed_payload(&mut data, &edge_type_bytes, "edge type registry")?;
 
     // Compute CRC32 of everything after the header
     let crc = crc32fast::hash(&data[HEADER_SIZE..]);
