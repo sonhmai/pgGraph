@@ -27,6 +27,126 @@ use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::quote::quote_ident;
 use crate::safety::{GraphError, GraphResult};
 
+/// Typed primary-key column set for a registered table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PrimaryKeySpec {
+    columns: Vec<String>,
+}
+
+impl PrimaryKeySpec {
+    pub(crate) fn from_columns(columns: Vec<String>) -> Self {
+        Self { columns }
+    }
+
+    pub(crate) fn from_catalog_text(raw: &str) -> Self {
+        Self {
+            columns: split_catalog_columns(raw),
+        }
+    }
+
+    pub(crate) fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    pub(crate) fn as_catalog_text(&self) -> String {
+        self.columns.join(",")
+    }
+
+    pub(crate) fn select_expr(&self) -> String {
+        if self.columns.len() > 1 {
+            let parts = self
+                .columns
+                .iter()
+                .map(|col| format!("{}::text", quote_ident(col)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("jsonb_build_array({parts})::text")
+        } else if let Some(column) = self.columns.first() {
+            format!("{}::text", quote_ident(column))
+        } else {
+            "NULL::text".to_string()
+        }
+    }
+}
+
+impl From<&str> for PrimaryKeySpec {
+    fn from(value: &str) -> Self {
+        Self::from_catalog_text(value)
+    }
+}
+
+impl From<&PrimaryKeySpec> for PrimaryKeySpec {
+    fn from(value: &PrimaryKeySpec) -> Self {
+        value.clone()
+    }
+}
+
+impl From<Vec<String>> for PrimaryKeySpec {
+    fn from(value: Vec<String>) -> Self {
+        Self::from_columns(value)
+    }
+}
+
+/// Typed property-column set for a registered table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PropertyColumns {
+    columns: Vec<String>,
+}
+
+impl PropertyColumns {
+    pub(crate) fn from_columns(columns: Vec<String>) -> Self {
+        Self { columns }
+    }
+
+    pub(crate) fn from_catalog_text(raw: &str) -> Self {
+        Self {
+            columns: split_catalog_columns(raw),
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.columns
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &String> {
+        self.columns.iter()
+    }
+
+    pub(crate) fn to_vec(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+
+    pub(crate) fn as_catalog_text(&self) -> String {
+        self.columns.join(",")
+    }
+}
+
+impl From<&str> for PropertyColumns {
+    fn from(value: &str) -> Self {
+        Self::from_catalog_text(value)
+    }
+}
+
+impl From<&PropertyColumns> for PropertyColumns {
+    fn from(value: &PropertyColumns) -> Self {
+        value.clone()
+    }
+}
+
+impl From<Vec<String>> for PropertyColumns {
+    fn from(value: Vec<String>) -> Self {
+        Self::from_columns(value)
+    }
+}
+
+pub(crate) fn split_catalog_columns(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|col| !col.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 enum PendingFilterValue {
     Encoded(EncodedFilterValue),
     Text(String),
@@ -48,8 +168,8 @@ fn structural_text_value(value: Option<String>) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct RegisteredTable {
     pub table_name: String,
-    pub id_column: String,
-    pub columns: Vec<String>,
+    pub id_columns: PrimaryKeySpec,
+    pub columns: PropertyColumns,
     pub tenant_column: Option<String>,
 }
 
@@ -210,18 +330,7 @@ pub fn build_graph(
             .filter(|filter| filter.table_name == table.table_name)
             .collect();
 
-        // Build the PK expression: single column uses plain ::text cast,
-        // composite (comma-separated) uses jsonb_build_array for a JSON array string.
-        let pk_expression = if table.id_column.contains(',') {
-            let pk_parts: Vec<String> = table
-                .id_column
-                .split(',')
-                .map(|col| format!("{}::text", quote_ident(col.trim())))
-                .collect();
-            format!("jsonb_build_array({})::text", pk_parts.join(", "))
-        } else {
-            format!("{}::text", quote_ident(&table.id_column))
-        };
+        let pk_expression = table.id_columns.select_expr();
 
         let tenant_column = table
             .tenant_column
@@ -355,7 +464,7 @@ pub fn build_graph(
             tables
                 .iter()
                 .find(|table| table.table_name == edge.from_table)
-                .map(|table| primary_key_expr(&table.id_column))
+                .map(|table| primary_key_expr(&table.id_columns))
         });
         let from_expr = fk_style_source
             .clone()
@@ -955,17 +1064,13 @@ fn get_table_oid(table_name: &str) -> GraphResult<u32> {
     })
 }
 
-fn primary_key_expr(id_column: &str) -> String {
-    if id_column.contains(',') {
-        let pk_parts: Vec<String> = id_column
-            .split(',')
-            .map(str::trim)
-            .filter(|col| !col.is_empty())
-            .map(|col| format!("{}::text", quote_ident(col)))
-            .collect();
-        format!("jsonb_build_array({})::text", pk_parts.join(", "))
+fn primary_key_expr(primary_key: &PrimaryKeySpec) -> String {
+    if primary_key.columns().len() > 1 {
+        primary_key.select_expr()
+    } else if let Some(column) = primary_key.columns().first() {
+        quote_ident(column)
     } else {
-        quote_ident(id_column)
+        "NULL".to_string()
     }
 }
 

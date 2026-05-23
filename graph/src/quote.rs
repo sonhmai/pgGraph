@@ -5,6 +5,14 @@
 //! does not allow bind parameters.
 
 /// Quote a PostgreSQL identifier.
+#[cfg(not(test))]
+pub(crate) fn quote_ident(identifier: &str) -> String {
+    pgrx::spi::quote_identifier(identifier)
+}
+
+/// Quote a PostgreSQL identifier for pure Rust unit tests that run outside a
+/// PostgreSQL backend.
+#[cfg(test)]
 pub(crate) fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }

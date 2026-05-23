@@ -18,6 +18,7 @@
 //!
 //! See: `docs/contributor_guide/sync-internals.mdx`
 
+use crate::builder::PrimaryKeySpec;
 use crate::engine::Engine;
 use crate::quote::{quote_ident, quote_literal};
 use crate::safety::{GraphError, GraphResult};
@@ -202,10 +203,14 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
 
 /// Generate the SQL for creating trigger functions on a registered table.
 ///
-/// For composite PKs (id_column contains ','), the PK expression uses
+/// For composite PKs, the PK expression uses
 /// `jsonb_build_array(NEW."col1"::text, NEW."col2"::text)::text` to produce
 /// a JSON array string matching the builder's format.
-pub fn generate_trigger_sql(qt: &QualifiedTable, id_column: &str, columns: &[String]) -> String {
+pub fn generate_trigger_sql(
+    qt: &QualifiedTable,
+    primary_key: &PrimaryKeySpec,
+    columns: &[String],
+) -> String {
     let table_sql = qualified_table_sql(qt);
     let trigger_fn_name = format!("_sync_{}", qt.oid);
 
@@ -216,14 +221,15 @@ pub fn generate_trigger_sql(qt: &QualifiedTable, id_column: &str, columns: &[Str
         .join(", ");
 
     // Build PK expressions for NEW and OLD references
-    let (new_pk_expr, old_pk_expr) = if id_column.contains(',') {
+    let (new_pk_expr, old_pk_expr) = if primary_key.columns().len() > 1 {
         // Composite PK: jsonb_build_array(NEW."col1"::text, NEW."col2"::text)::text
-        let pk_cols: Vec<&str> = id_column.split(',').map(|s| s.trim()).collect();
-        let new_parts: Vec<String> = pk_cols
+        let new_parts: Vec<String> = primary_key
+            .columns()
             .iter()
             .map(|c| format!("NEW.{}::text", quote_ident(c)))
             .collect();
-        let old_parts: Vec<String> = pk_cols
+        let old_parts: Vec<String> = primary_key
+            .columns()
             .iter()
             .map(|c| format!("OLD.{}::text", quote_ident(c)))
             .collect();
@@ -232,6 +238,9 @@ pub fn generate_trigger_sql(qt: &QualifiedTable, id_column: &str, columns: &[Str
             format!("jsonb_build_array({})::text", old_parts.join(", ")),
         )
     } else {
+        let Some(id_column) = primary_key.columns().first() else {
+            return String::new();
+        };
         // Single PK: NEW."id"::text
         (
             format!("NEW.{}::text", quote_ident(id_column)),
@@ -348,9 +357,11 @@ mod tests {
             schema: "Weird Schema".to_string(),
             name: "select".to_string(),
         };
+        let primary_key =
+            PrimaryKeySpec::from_columns(vec!["Tenant ID".to_string(), "User ID".to_string()]);
         let sql = generate_trigger_sql(
             &qt,
-            "Tenant ID, User ID",
+            &primary_key,
             &["Display Name".to_string(), "order".to_string()],
         );
 
@@ -663,7 +674,12 @@ mod tests {
             schema: "public".into(),
             name: "users".into(),
         };
-        let sql = generate_trigger_sql(&qt, "id", &["name".to_string(), "email".to_string()]);
+        let primary_key = PrimaryKeySpec::from_columns(vec!["id".to_string()]);
+        let sql = generate_trigger_sql(
+            &qt,
+            &primary_key,
+            &["name".to_string(), "email".to_string()],
+        );
         assert!(
             sql.contains("\"public\".\"users\""),
             "should reference table name"

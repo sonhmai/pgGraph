@@ -6,15 +6,15 @@
 //! Composite primary keys are supported:
 //! - **Junction tables** (all PK columns are FKs) → registered as edges, not nodes.
 //! - **Composite entities** (≥1 PK column is not a FK) → registered as nodes with
-//!   a comma-separated `id_column` (e.g., `"order_id,line_number"`). The builder
-//!   generates `jsonb_build_array(col1::text, col2::text)::text` as the PK string.
+//!   a typed primary-key column set. The builder generates
+//!   `jsonb_build_array(col1::text, col2::text)::text` as the PK string.
 //!
 //! See: `docs/user_guide/schema-registration.mdx`
 
 use pgrx::prelude::*;
 use std::collections::HashSet;
 
-use crate::builder::{RegisteredEdge, RegisteredTable};
+use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
 use crate::catalog::{regclass_text, validate_column_exists};
 use crate::quote::{quote_ident, quote_literal};
 use crate::safety::{GraphError, GraphResult};
@@ -82,8 +82,8 @@ pub fn discover_schema(
                     quote_ident(schema_name),
                     quote_ident(&table.table_name)
                 ),
-                id_column,
-                columns: table.text_columns.clone(),
+                id_columns: PrimaryKeySpec::from_columns(vec![id_column]),
+                columns: PropertyColumns::from_columns(table.text_columns.clone()),
                 tenant_column: None,
             });
         } else {
@@ -113,7 +113,8 @@ pub fn discover_schema(
                 });
             } else {
                 // Composite entity: at least one PK col is NOT a FK — register as node
-                let id_column = table.pk_columns.join(",");
+                let id_columns = PrimaryKeySpec::from_columns(table.pk_columns.clone());
+                let id_column = id_columns.as_catalog_text();
                 discoveries.push(DiscoveryResult {
                     item_type: "table".to_string(),
                     item_name: table.table_name.clone(),
@@ -130,8 +131,8 @@ pub fn discover_schema(
                         quote_ident(schema_name),
                         quote_ident(&table.table_name)
                     ),
-                    id_column,
-                    columns: table.text_columns.clone(),
+                    id_columns,
+                    columns: PropertyColumns::from_columns(table.text_columns.clone()),
                     tenant_column: None,
                 });
             }
@@ -198,7 +199,11 @@ pub fn discover_table_set(
                 item_name: table.table_name.clone(),
                 details: discovery_details("pk", &id_column, &table.text_columns, tenant_column),
             });
-            tables.push(registered_table(table, id_column, tenant_column));
+            tables.push(registered_table(
+                table,
+                PrimaryKeySpec::from_columns(vec![id_column]),
+                tenant_column,
+            ));
         } else if table.id_is_primary
             && classify_as_junction(
                 table.table_oid,
@@ -222,7 +227,8 @@ pub fn discover_table_set(
                 ),
             });
         } else {
-            let id_column = table.pk_columns.join(",");
+            let id_columns = PrimaryKeySpec::from_columns(table.pk_columns.clone());
+            let id_column = id_columns.as_catalog_text();
             discoveries.push(DiscoveryResult {
                 item_type: "table".to_string(),
                 item_name: table.table_name.clone(),
@@ -237,7 +243,7 @@ pub fn discover_table_set(
                     tenant_column,
                 ),
             });
-            tables.push(registered_table(table, id_column, tenant_column));
+            tables.push(registered_table(table, id_columns, tenant_column));
         }
     }
 
@@ -700,7 +706,7 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
 
 fn registered_table(
     table: &DiscoveredTable,
-    id_column: String,
+    id_columns: PrimaryKeySpec,
     tenant_column: Option<&str>,
 ) -> RegisteredTable {
     RegisteredTable {
@@ -709,8 +715,8 @@ fn registered_table(
             quote_ident(&table.schema_name),
             quote_ident(&table.table_name)
         ),
-        id_column,
-        columns: table.text_columns.clone(),
+        id_columns,
+        columns: PropertyColumns::from_columns(table.text_columns.clone()),
         tenant_column: tenant_column.map(ToString::to_string),
     }
 }

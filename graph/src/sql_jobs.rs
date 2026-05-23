@@ -8,6 +8,7 @@ use crate::sql_build::{execute_build, execute_maintenance_rebuild};
 use crate::sql_sync::current_sync_mode;
 use pgrx::bgworkers::{BackgroundWorkerBuilder, BgWorkerStartTime};
 use pgrx::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobStatus {
@@ -26,6 +27,41 @@ impl JobStatus {
             JobStatus::Failed => "failed",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkerMetadata {
+    pub(crate) job_id: String,
+    pub(crate) database: String,
+    pub(crate) username: String,
+}
+
+impl WorkerMetadata {
+    pub(crate) fn new(job_id: &str, database: String, username: String) -> Self {
+        Self {
+            job_id: job_id.to_string(),
+            database,
+            username,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> safety::GraphResult<String> {
+        serde_json::to_string(self).map_err(|err| {
+            safety::GraphError::Internal(format!("worker metadata encoding failed: {}", err))
+        })
+    }
+
+    pub(crate) fn decode(raw: &str) -> safety::GraphResult<Self> {
+        serde_json::from_str(raw).map_err(|err| {
+            safety::GraphError::Internal(format!("worker metadata decoding failed: {}", err))
+        })
+    }
+}
+
+fn current_backend_pid() -> i32 {
+    // SAFETY: MyProcPid is a PostgreSQL backend global that is valid while this
+    // backend registers a dynamic background worker.
+    unsafe { pgrx::pg_sys::MyProcPid }
 }
 
 pub(crate) fn create_build_job() -> safety::GraphResult<String> {
@@ -325,16 +361,14 @@ pub(crate) fn current_database_and_user() -> safety::GraphResult<(String, String
 
 pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
     let (database, username) = current_database_and_user()?;
-    let extra = format!("{}|{}|{}", build_id, database, username);
+    let extra = WorkerMetadata::new(build_id, database, username).encode()?;
     BackgroundWorkerBuilder::new("graph concurrent build")
         .set_function("graph_build_worker_main")
         .set_library("graph")
         .enable_spi_access()
         .set_start_time(BgWorkerStartTime::RecoveryFinished)
         .set_restart_time(None)
-        // SAFETY: MyProcPid is a Postgres backend global valid while this
-        // backend is launching and registering the background worker.
-        .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
+        .set_notify_pid(current_backend_pid())
         .set_extra(&extra)
         .load_dynamic()
         .map(|_| ())
@@ -348,16 +382,14 @@ pub(crate) fn launch_build_worker(build_id: &str) -> safety::GraphResult<()> {
 
 pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()> {
     let (database, username) = current_database_and_user()?;
-    let extra = format!("{}|{}|{}", job_id, database, username);
+    let extra = WorkerMetadata::new(job_id, database, username).encode()?;
     BackgroundWorkerBuilder::new("graph maintenance")
         .set_function("graph_maintenance_worker_main")
         .set_library("graph")
         .enable_spi_access()
         .set_start_time(BgWorkerStartTime::RecoveryFinished)
         .set_restart_time(None)
-        // SAFETY: MyProcPid is a Postgres backend global valid while this
-        // backend is launching and registering the background worker.
-        .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
+        .set_notify_pid(current_backend_pid())
         .set_extra(&extra)
         .load_dynamic()
         .map(|_| ())
@@ -370,7 +402,7 @@ pub(crate) fn launch_maintenance_worker(job_id: &str) -> safety::GraphResult<()>
 
 #[cfg(test)]
 mod tests {
-    use super::JobStatus;
+    use super::{JobStatus, WorkerMetadata};
 
     #[test]
     fn job_status_as_str_matches_sql_contract_values() {
@@ -378,5 +410,15 @@ mod tests {
         assert_eq!(JobStatus::Running.as_str(), "running");
         assert_eq!(JobStatus::Completed.as_str(), "completed");
         assert_eq!(JobStatus::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn worker_metadata_round_trips_json_with_delimiters() {
+        let metadata = WorkerMetadata::new("job|1", "db|name".to_string(), "user|name".to_string());
+        let encoded = metadata.encode().expect("metadata encodes");
+        assert_eq!(
+            WorkerMetadata::decode(&encoded).expect("metadata decodes"),
+            metadata
+        );
     }
 }

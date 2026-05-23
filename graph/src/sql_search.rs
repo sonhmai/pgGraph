@@ -73,7 +73,7 @@ fn source_table_search_statements(
         acl::check_table_acl(table_oid)?;
         validate_column_exists(table_oid, property_key)?;
 
-        let pk_expr = primary_key_expr("src", &table.id_column);
+        let pk_expr = primary_key_expr("src", &table.id_columns);
         let value_expr = format!("src.{}::text", quote_ident(property_key));
         let node_select = if hydrate {
             "to_jsonb(src.*)"

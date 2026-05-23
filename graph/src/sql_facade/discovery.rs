@@ -59,11 +59,10 @@ fn register_discovery(
     discoveries: Vec<discover::DiscoveryResult>,
 ) -> safety::GraphResult<Vec<(String, String, String)>> {
     for table in &tables {
-        let cols_str = table.columns.join(",");
         insert_registered_table(
             &table.table_name,
-            &table.id_column,
-            &cols_str,
+            &table.id_columns,
+            &table.columns,
             table.tenant_column.as_deref(),
         )?;
     }

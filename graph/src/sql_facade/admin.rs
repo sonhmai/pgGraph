@@ -467,27 +467,28 @@ fn build() -> TableIterator<
 ///
 /// PostgreSQL invokes this function by name after `graph.build(concurrently :=
 /// true)` registers a dynamic background worker. Worker metadata is read from
-/// pgrx's background-worker `extra` field and must be in
-/// `build_id|database|username` form.
+/// pgrx's background-worker `extra` field as typed JSON metadata.
 pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let extra = BackgroundWorker::get_extra();
-    let parts: Vec<&str> = extra.split('|').collect();
-    let [build_id, database, username] = parts.as_slice() else {
-        pgrx::warning!("graph build worker received malformed worker metadata");
-        return;
+    let metadata = match WorkerMetadata::decode(extra) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            pgrx::warning!("graph build worker received malformed worker metadata: {}", err);
+            return;
+        }
     };
 
-    BackgroundWorker::connect_worker_to_spi(Some(database), Some(username));
+    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
 
     for _ in 0..50 {
         let job_visible = BackgroundWorker::transaction(|| {
-            build_job_row(build_id).is_ok_and(|row| row.is_some())
+            build_job_row(&metadata.job_id).is_ok_and(|row| row.is_some())
         });
         if job_visible {
             BackgroundWorker::transaction(|| {
-                if let Err(err) = run_build_job(build_id) {
-                    pgrx::warning!("graph concurrent build {} failed: {}", build_id, err);
+                if let Err(err) = run_build_job(&metadata.job_id) {
+                    pgrx::warning!("graph concurrent build {} failed: {}", metadata.job_id, err);
                 }
             });
             return;
@@ -499,7 +500,7 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
 
     pgrx::warning!(
         "graph concurrent build {} was not visible to worker before timeout",
-        build_id
+        metadata.job_id
     );
 }
 
@@ -509,26 +510,31 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
 /// PostgreSQL invokes this function by name after
 /// `graph.maintenance(concurrently := true)` registers a dynamic background
 /// worker. Worker metadata is read from pgrx's background-worker `extra` field
-/// and must be in `job_id|database|username` form.
+/// as typed JSON metadata.
 pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     let extra = BackgroundWorker::get_extra();
-    let parts: Vec<&str> = extra.split('|').collect();
-    let [job_id, database, username] = parts.as_slice() else {
-        pgrx::warning!("graph maintenance worker received malformed worker metadata");
-        return;
+    let metadata = match WorkerMetadata::decode(extra) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            pgrx::warning!(
+                "graph maintenance worker received malformed worker metadata: {}",
+                err
+            );
+            return;
+        }
     };
 
-    BackgroundWorker::connect_worker_to_spi(Some(database), Some(username));
+    BackgroundWorker::connect_worker_to_spi(Some(&metadata.database), Some(&metadata.username));
 
     for _ in 0..50 {
         let job_visible = BackgroundWorker::transaction(|| {
-            maintenance_job_row(job_id).is_ok_and(|row| row.is_some())
+            maintenance_job_row(&metadata.job_id).is_ok_and(|row| row.is_some())
         });
         if job_visible {
             BackgroundWorker::transaction(|| {
-                if let Err(err) = run_maintenance_job(job_id) {
-                    pgrx::warning!("graph maintenance {} failed: {}", job_id, err);
+                if let Err(err) = run_maintenance_job(&metadata.job_id) {
+                    pgrx::warning!("graph maintenance {} failed: {}", metadata.job_id, err);
                 }
             });
             return;
@@ -540,7 +546,7 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
 
     pgrx::warning!(
         "graph maintenance {} was not visible to worker before timeout",
-        job_id
+        metadata.job_id
     );
 }
 
@@ -707,13 +713,13 @@ fn add_table(
         .unwrap_or_else(|err| err.report());
 
         let table_regclass = regclass_text(table_name.to_u32()).unwrap_or_else(|err| err.report());
-        let cols = columns.unwrap_or_default();
-        let cols_str = cols.join(",");
+        let id_columns = builder::PrimaryKeySpec::from_catalog_text(id_column);
+        let cols = builder::PropertyColumns::from_columns(columns.unwrap_or_default());
 
         insert_registered_table(
             &table_regclass,
-            id_column,
-            &cols_str,
+            &id_columns,
+            &cols,
             tenant_column.as_deref(),
         )
         .unwrap_or_else(|err| err.report());
@@ -728,7 +734,7 @@ fn add_table_with_id_columns(
     columns: default!(Option<Vec<String>>, "NULL"),
     tenant_column: default!(Option<String>, "NULL"),
 ) {
-    let id_column = id_columns.join(",");
+    let id_column = builder::PrimaryKeySpec::from_columns(id_columns).as_catalog_text();
     add_table(table_name, &id_column, columns, tenant_column);
 }
 

@@ -49,6 +49,12 @@ remaining sections below are still open work.
 | Internal sync SQL | Sync status, tenant setting, and table-OID SPI reads bind data values through parameters. |
 | Persistence section writing | `.pggraph` section offsets, scalar arrays, and length-prefixed payloads now use writer helpers. |
 | Date and timestamp filters | Date and timestamptz structured-filter casts now bind input text through SPI parameters. |
+| Composite-key and property-column modeling | Registered primary-key and property-column data now crosses Rust build, discovery, sync, and trigger-generation paths through typed column-set structs instead of ad hoc comma splitting. |
+| Background worker metadata | Build and maintenance background workers now pass typed JSON metadata instead of fragile delimiter-separated strings. |
+| Filter catalog lookup SQL | Structured-filter catalog lookup now binds filter column values through SPI parameters. |
+| Node reference input | Traversal node-reference parsing now accepts normal JSON arrays and objects while preserving `graph.node_ref_string()` text compatibility. |
+| Native identifier quoting | Dynamic identifier fragments now use pgrx's PostgreSQL-backed identifier quoting outside pure Rust tests. |
+| PostgreSQL API boundary wrappers | Background-worker notify PID access now goes through a small wrapper, and remaining direct `pg_sys` usage is limited to extension ABI, ACL, OID, mmap, and PostgreSQL data-directory boundaries. |
 
 ### Data Correctness and Corruption
 
@@ -67,7 +73,6 @@ large JSON integers preserve exactness without implicit string/number matches.
 | Path aggregation | `all_possible_paths` can clone and materialize path sets aggressively near configured caps. | Preserve documented path-count semantics while reducing avoidable materialization. |
 | Filter model | Legacy raw filters and structured typed filters still have separate paths. | Remove, deprecate, or unify the legacy path so public filter behavior has one source of truth. |
 | Legacy numeric filters | Legacy unsigned filter paths can lose signed values if re-exposed. | Keep signed values out of unsigned-only paths, or remove the legacy public path. |
-| Composite keys | Composite primary keys are represented through comma-separated strings in some sync and trigger paths. | Store and pass composite key columns as structured catalog data. |
 
 ### SQL Safety and Schema Plumbing
 
@@ -89,7 +94,6 @@ large JSON integers preserve exactness without implicit string/number matches.
 | Truncate handling | Truncate can force a synchronous full-graph scan. | Track table membership, use table epochs, or queue a rebuild instead of scanning every node inline. |
 | Tenant bitmap mutation | Tenant update/delete handling can require broad bitmap work. | Use old and new tenant values from trigger payloads to mutate only affected tenant membership. |
 | Internal scheduler | pgGraph exposes `graph.run_scheduled_maintenance()` and Docker/pg_cron examples, but does not run an always-on internal scheduler. | Keep scheduler ownership explicit through `pg_cron`, Kubernetes CronJobs, systemd timers, or app-side schedulers unless an internal scheduler is added deliberately. |
-| Background worker metadata | Maintenance worker metadata is encoded as a fragile delimited string. | Pass durable job identity or use validated length-prefixed metadata. |
 | Background job failures | Failure status can be lost if the worker transaction aborts. | Separate job execution and failure-status recording transaction boundaries. |
 
 ### Internal Construction and Performance
@@ -136,9 +140,7 @@ not block use of the current documented SQL surface.
 | Structured filter operators | Structured filters currently focus on equality, inequality, range comparisons, and `between`. | Add `in`, `not_in`, text search, and explicit null operators as product requirements demand. |
 | Legacy raw filters | The legacy raw filter parser is intentionally not the preferred public SQL surface. | Delete it or unify it with structured typed-filter construction if it needs to remain. |
 | Case-insensitive search | `lower(src.col::text)` needs matching expression indexes for good performance. | Document recommended indexes and consider helper DDL. |
-| Node reference input | Some internal compatibility paths use a double-encoded node reference string. | Prefer normal JSON arrays or objects at newer boundaries while preserving compatibility where needed. |
 | GUC enum behavior | Some typed Rust settings are exposed as string GUCs to preserve aliases and warning behavior. | Consider native PostgreSQL enum GUCs only with an explicit compatibility plan. |
-| Native identifier quoting | Local identifier quoting is intentionally narrow. | Move to PostgreSQL-native identifier quoting for consistency with server rules. |
 
 ## P3: Internals and Maintainability
 

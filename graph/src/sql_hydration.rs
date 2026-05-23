@@ -29,7 +29,7 @@ pub(crate) fn hydrate_node(
 
     acl::check_table_acl(table_oid)?;
     let table_name = sql_table_name_from_catalog(&table.table_name)?;
-    let pk_expr = primary_key_expr("src", &table.id_column);
+    let pk_expr = primary_key_expr("src", &table.id_columns);
     Spi::connect(|client| {
         let query = format!(
             "SELECT to_jsonb(src.*) FROM {} src WHERE {} = $1 LIMIT 1",
@@ -84,7 +84,7 @@ pub(crate) fn hydrate_nodes(
         })?;
         acl::check_table_acl(table_oid)?;
         let table_name = sql_table_name_from_catalog(&table.table_name)?;
-        let pk_expr = primary_key_expr("src", &table.id_column);
+        let pk_expr = primary_key_expr("src", &table.id_columns);
         let query = format!(
             "SELECT {} AS graph_node_id, to_jsonb(src.*) FROM {} src WHERE {} = ANY($1::text[])",
             pk_expr,

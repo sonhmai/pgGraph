@@ -19,8 +19,8 @@ pub(crate) fn registered_schema_drift_reason(
         };
         if let Err(err) = validate_registered_table(
             oid,
-            &table.id_column,
-            Some(&table.columns),
+            &table.id_columns.as_catalog_text(),
+            Some(table.columns.as_slice()),
             table.tenant_column.as_deref(),
         ) {
             return Some(format!(
@@ -104,17 +104,9 @@ pub(crate) fn registered_schema_drift_reason(
     None
 }
 
-pub(crate) fn split_catalog_columns(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|col| !col.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::split_catalog_columns;
+    use crate::builder::split_catalog_columns;
 
     /// Covers catalog column-list parsing used by discovery functions and the
     /// `id_columns` compatibility layer.
@@ -189,18 +181,19 @@ pub(crate) fn table_oid_from_name(table_name: &str) -> safety::GraphResult<u32> 
     })
 }
 
-pub(crate) fn primary_key_expr(alias: &str, id_column: &str) -> String {
-    if id_column.contains(',') {
-        let parts = id_column
-            .split(',')
-            .map(str::trim)
-            .filter(|col| !col.is_empty())
+pub(crate) fn primary_key_expr(alias: &str, primary_key: &builder::PrimaryKeySpec) -> String {
+    if primary_key.columns().len() > 1 {
+        let parts = primary_key
+            .columns()
+            .iter()
             .map(|col| format!("{}.{}::text", alias, quote_ident(col)))
             .collect::<Vec<_>>()
             .join(", ");
         format!("jsonb_build_array({})::text", parts)
+    } else if let Some(column) = primary_key.columns().first() {
+        format!("{}.{}::text", alias, quote_ident(column))
     } else {
-        format!("{}.{}::text", alias, quote_ident(id_column))
+        "NULL::text".to_string()
     }
 }
 

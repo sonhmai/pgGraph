@@ -45,12 +45,8 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
                     safety::GraphError::Internal(format!("catalog read error (columns): {}", e))
                 })?
                 .unwrap_or_default();
-            let columns = columns_str
-                .split(',')
-                .map(str::trim)
-                .filter(|col| !col.is_empty())
-                .map(ToString::to_string)
-                .collect();
+            let id_columns = builder::PrimaryKeySpec::from_catalog_text(&id_column);
+            let columns = builder::PropertyColumns::from_catalog_text(&columns_str);
             let tenant_column = row
                 .get::<String>(4)
                 .map_err(|e| {
@@ -63,7 +59,7 @@ pub(crate) fn read_catalog() -> safety::GraphResult<(
 
             tables.push(builder::RegisteredTable {
                 table_name,
-                id_column,
+                id_columns,
                 columns,
                 tenant_column,
             });
@@ -213,7 +209,7 @@ pub(crate) fn catalog_fingerprint(
     table_rows.sort_by(|a, b| a.table_name.cmp(&b.table_name));
     for table in table_rows {
         table.table_name.hash(&mut hasher);
-        table.id_column.hash(&mut hasher);
+        table.id_columns.hash(&mut hasher);
         table.columns.hash(&mut hasher);
         table.tenant_column.hash(&mut hasher);
     }

@@ -1,12 +1,16 @@
-use crate::safety;
+use crate::{builder, safety};
 use pgrx::prelude::*;
 
 pub(crate) fn insert_registered_table(
     table_name: &str,
-    id_column: &str,
-    columns: &str,
+    id_columns: impl Into<builder::PrimaryKeySpec>,
+    columns: impl Into<builder::PropertyColumns>,
     tenant_column: Option<&str>,
 ) -> safety::GraphResult<()> {
+    let id_columns = id_columns.into();
+    let columns = columns.into();
+    let id_column = id_columns.as_catalog_text();
+    let columns = columns.as_catalog_text();
     Spi::run_with_args(
         "INSERT INTO graph._registered_tables (table_name, id_column, columns, tenant_column)
          VALUES ($1, $2, $3, $4)

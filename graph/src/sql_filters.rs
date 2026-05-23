@@ -1,7 +1,6 @@
 //! Structured SQL filter parsing and conversion into in-memory filter operations.
 
 use crate::catalog::{read_catalog, table_oid_from_name};
-use crate::quote::quote_literal;
 use crate::{acl, filter_index, safety, types};
 use pgrx::prelude::*;
 use std::collections::HashSet;
@@ -164,17 +163,19 @@ pub(crate) fn resolve_structured_filter_column(
     requested_table_oids: &HashSet<u32>,
 ) -> safety::GraphResult<FilterColumnResolution> {
     let registered = Spi::connect(|client| {
-        let query = format!(
-            "SELECT to_regclass(table_name)::oid::integer, column_type
+        let result = client
+            .select(
+                "SELECT to_regclass(table_name)::oid::integer, column_type
              FROM graph._registered_filter_columns
-             WHERE column_name = {}
+             WHERE column_name = $1
                AND to_regclass(table_name) IS NOT NULL
              ORDER BY table_name",
-            quote_literal(column)
-        );
-        let result = client.select(&query, None, &[]).map_err(|err| {
-            safety::GraphError::Internal(format!("filter catalog validation failed: {}", err))
-        })?;
+                None,
+                &[column.into()],
+            )
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("filter catalog validation failed: {}", err))
+            })?;
         let mut rows = Vec::new();
         for row in result {
             let table_oid = row

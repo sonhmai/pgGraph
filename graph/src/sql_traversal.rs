@@ -265,34 +265,57 @@ pub(crate) fn parse_node_ref_json_string(
 pub(crate) fn parse_node_ref_json_parts(
     value: &serde_json::Value,
 ) -> safety::GraphResult<(String, String)> {
-    let raw = value
-        .as_str()
-        .ok_or_else(|| safety::GraphError::InvalidFilter {
-            reason: "traversal.starts entries must be node_ref_string JSON strings".to_string(),
-        })?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|err| safety::GraphError::InvalidFilter {
-            reason: format!("invalid node_ref_string '{}': {}", raw, err),
-        })?;
-    let serde_json::Value::Array(parts) = parsed else {
-        return Err(safety::GraphError::InvalidFilter {
-            reason: "node_ref_string must decode to [table, id]".to_string(),
-        });
-    };
+    match value {
+        serde_json::Value::String(raw) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(raw).map_err(|err| safety::GraphError::InvalidFilter {
+                    reason: format!("invalid node_ref_string '{}': {}", raw, err),
+                })?;
+            parse_node_ref_value(&parsed)
+        }
+        other => parse_node_ref_value(other),
+    }
+}
+
+fn parse_node_ref_value(value: &serde_json::Value) -> safety::GraphResult<(String, String)> {
+    match value {
+        serde_json::Value::Array(parts) => parse_node_ref_array(parts),
+        serde_json::Value::Object(map) => {
+            let table =
+                map.get("table")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| safety::GraphError::InvalidFilter {
+                        reason: "node_ref object table must be text".to_string(),
+                    })?;
+            let id = map
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: "node_ref object id must be text".to_string(),
+                })?;
+            Ok((table.to_string(), id.to_string()))
+        }
+        _ => Err(safety::GraphError::InvalidFilter {
+            reason: "node_ref must be a [table, id] array, {table, id} object, or graph.node_ref_string() text".to_string(),
+        }),
+    }
+}
+
+fn parse_node_ref_array(parts: &[serde_json::Value]) -> safety::GraphResult<(String, String)> {
     if parts.len() != 2 {
         return Err(safety::GraphError::InvalidFilter {
-            reason: "node_ref_string must contain exactly [table, id]".to_string(),
+            reason: "node_ref array must contain exactly [table, id]".to_string(),
         });
     }
     let table = parts[0]
         .as_str()
         .ok_or_else(|| safety::GraphError::InvalidFilter {
-            reason: "node_ref_string table must be text".to_string(),
+            reason: "node_ref table must be text".to_string(),
         })?;
     let id = parts[1]
         .as_str()
         .ok_or_else(|| safety::GraphError::InvalidFilter {
-            reason: "node_ref_string id must be text".to_string(),
+            reason: "node_ref id must be text".to_string(),
         })?;
     Ok((table.to_string(), id.to_string()))
 }
@@ -468,6 +491,11 @@ mod tests {
     #[test]
     fn node_ref_json_part_parser_rejects_non_contract_shapes() {
         assert!(parse_node_ref_json_parts(&serde_json::json!("[\"public.users\",\"u1\"]")).is_ok());
+        assert!(parse_node_ref_json_parts(&serde_json::json!(["public.users", "u1"])).is_ok());
+        assert!(parse_node_ref_json_parts(
+            &serde_json::json!({"table": "public.users", "id": "u1"})
+        )
+        .is_ok());
         assert!(parse_node_ref_json_parts(&serde_json::json!(["public.users"])).is_err());
         assert!(parse_node_ref_json_parts(&serde_json::json!([42, "u1"])).is_err());
         assert!(parse_node_ref_json_parts(&serde_json::json!({"table": "public.users"})).is_err());

@@ -32,7 +32,7 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
     for table in &tables {
         let oid = table_oid_from_name(&table.table_name)?;
         let qt = sync::get_qualified_table(oid)?;
-        let mut trigger_columns = table.columns.clone();
+        let mut trigger_columns = table.columns.to_vec();
         for filter in filter_columns
             .iter()
             .filter(|filter| filter.table_name == table.table_name)
@@ -49,7 +49,7 @@ pub(crate) fn install_sync_triggers() -> safety::GraphResult<usize> {
                 trigger_columns.push(tenant_column.clone());
             }
         }
-        let trigger_sql = sync::generate_trigger_sql(&qt, &table.id_column, &trigger_columns);
+        let trigger_sql = sync::generate_trigger_sql(&qt, &table.id_columns, &trigger_columns);
         Spi::run(&trigger_sql).map_err(|e| {
             safety::GraphError::Internal(format!(
                 "trigger creation failed for {}: {}",
@@ -607,7 +607,7 @@ fn potential_row_edge_mutation_count(
         else {
             continue;
         };
-        if row_pk_value(&row, &from_table.id_column).is_none()
+        if row_pk_value(&row, &from_table.id_columns).is_none()
             || row_text_value(&row, &edge.from_column).is_none()
         {
             continue;
@@ -762,7 +762,7 @@ pub(crate) fn apply_row_edge_mutations(
         else {
             continue;
         };
-        let Some(from_pk) = row_pk_value(&row, &from_table.id_column) else {
+        let Some(from_pk) = row_pk_value(&row, &from_table.id_columns) else {
             continue;
         };
         let Some(to_pk) = row_text_value(&row, &edge.from_column) else {
@@ -817,19 +817,24 @@ pub(crate) fn resolve_sync_endpoint(
     all_oids.iter().find_map(|&oid| eng.resolve(oid, pk))
 }
 
-pub(crate) fn row_pk_value(row: &serde_json::Value, id_column: &str) -> Option<String> {
-    if id_column.contains(',') {
-        let values = id_column
-            .split(',')
-            .map(str::trim)
+pub(crate) fn row_pk_value(
+    row: &serde_json::Value,
+    primary_key: &builder::PrimaryKeySpec,
+) -> Option<String> {
+    if primary_key.columns().len() > 1 {
+        let values = primary_key
+            .columns()
+            .iter()
             .map(|column| row_text_value(row, column))
             .collect::<Option<Vec<_>>>()?;
         Some(
             serde_json::Value::Array(values.into_iter().map(serde_json::Value::String).collect())
                 .to_string(),
         )
+    } else if let Some(column) = primary_key.columns().first() {
+        row_text_value(row, column)
     } else {
-        row_text_value(row, id_column)
+        None
     }
 }
 
