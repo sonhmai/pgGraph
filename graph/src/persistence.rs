@@ -120,18 +120,23 @@ fn validate_length_prefixed_section(
     section: usize,
     label: &str,
 ) -> GraphResult<()> {
+    length_prefixed_payload(mmap, ranges, section, label).map(|_| ())
+}
+
+fn length_prefixed_payload<'a>(
+    mmap: &'a [u8],
+    ranges: &[(usize, usize); NUM_SECTIONS],
+    section: usize,
+    label: &str,
+) -> GraphResult<&'a [u8]> {
     if ranges[section].1 - ranges[section].0 < 4 {
         return Err(GraphError::CorruptFile {
             reason: format!("{} section too small for length prefix", label),
         });
     }
     let start = ranges[section].0;
-    let size = u32::from_le_bytes([
-        mmap[start],
-        mmap[start + 1],
-        mmap[start + 2],
-        mmap[start + 3],
-    ]) as usize;
+    let size = read_u32_at(mmap, start) as usize;
+    let payload_start = start + 4;
     let end = start
         .checked_add(4)
         .and_then(|payload_start| payload_start.checked_add(size))
@@ -146,29 +151,22 @@ fn validate_length_prefixed_section(
             ),
         });
     }
-    Ok(())
+    Ok(&mmap[payload_start..end])
+}
+
+fn read_le_array<const N: usize>(mmap: &[u8], offset: usize) -> [u8; N] {
+    let end = offset + N;
+    mmap[offset..end]
+        .try_into()
+        .expect("validated .pggraph scalar read")
 }
 
 fn read_u32_at(mmap: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        mmap[offset],
-        mmap[offset + 1],
-        mmap[offset + 2],
-        mmap[offset + 3],
-    ])
+    u32::from_le_bytes(read_le_array(mmap, offset))
 }
 
 fn read_u64_at(mmap: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        mmap[offset],
-        mmap[offset + 1],
-        mmap[offset + 2],
-        mmap[offset + 3],
-        mmap[offset + 4],
-        mmap[offset + 5],
-        mmap[offset + 6],
-        mmap[offset + 7],
-    ])
+    u64::from_le_bytes(read_le_array(mmap, offset))
 }
 
 fn validate_persisted_contents(
@@ -577,7 +575,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
             reason: "invalid magic bytes".to_string(),
         });
     }
-    let version = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]);
+    let version = read_u32_at(&mmap, 4);
     if version != VERSION {
         return Err(GraphError::IncompatibleVersion(
             "Graph file format is outdated. Please run SELECT graph.build() to regenerate it."
@@ -585,32 +583,18 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         ));
     }
 
-    let node_count = u32::from_le_bytes([mmap[12], mmap[13], mmap[14], mmap[15]]);
-    let edge_count = u32::from_le_bytes([mmap[16], mmap[17], mmap[18], mmap[19]]);
+    let node_count = read_u32_at(&mmap, 12);
+    let edge_count = read_u32_at(&mmap, 16);
 
     // Read section offsets
     let mut section_offsets = [0u64; NUM_SECTIONS];
     for (i, offset) in section_offsets.iter_mut().enumerate().take(NUM_SECTIONS) {
         let start = 20 + i * 8;
-        *offset = u64::from_le_bytes([
-            mmap[start],
-            mmap[start + 1],
-            mmap[start + 2],
-            mmap[start + 3],
-            mmap[start + 4],
-            mmap[start + 5],
-            mmap[start + 6],
-            mmap[start + 7],
-        ]);
+        *offset = read_u64_at(&mmap, start);
     }
 
     // Validate CRC32
-    let stored_crc = u32::from_le_bytes([
-        mmap[CRC_OFFSET],
-        mmap[CRC_OFFSET + 1],
-        mmap[CRC_OFFSET + 2],
-        mmap[CRC_OFFSET + 3],
-    ]);
+    let stored_crc = read_u32_at(&mmap, CRC_OFFSET);
     let computed_crc = crc32fast::hash(&mmap[HEADER_SIZE..]);
     if stored_crc != computed_crc {
         return Err(GraphError::CorruptFile {
@@ -693,25 +677,11 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     // FilterIndex and edge_type_registry are variable-size bincode sections.
     // They are deserialized into backend-local heap rather than kept as
     // mmap-backed stores.
-    let filter_start = section_ranges[9].0;
-    let filter_size = u32::from_le_bytes([
-        mmap[filter_start],
-        mmap[filter_start + 1],
-        mmap[filter_start + 2],
-        mmap[filter_start + 3],
-    ]) as usize;
-    let filter_data = &mmap[filter_start + 4..filter_start + 4 + filter_size];
+    let filter_data = length_prefixed_payload(&mmap, &section_ranges, 9, "filter index")?;
     let filter_index: FilterIndex = bincode::deserialize(filter_data)
         .map_err(|e| GraphError::Internal(format!("FilterIndex deserialization failed: {}", e)))?;
 
-    let registry_start = section_ranges[10].0;
-    let registry_size = u32::from_le_bytes([
-        mmap[registry_start],
-        mmap[registry_start + 1],
-        mmap[registry_start + 2],
-        mmap[registry_start + 3],
-    ]) as usize;
-    let registry_data = &mmap[registry_start + 4..registry_start + 4 + registry_size];
+    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 10, "edge type registry")?;
     let edge_type_registry: Vec<String> = bincode::deserialize(registry_data).map_err(|e| {
         GraphError::Internal(format!("edge_type_registry deserialization failed: {}", e))
     })?;
