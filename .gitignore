@@ -65,3 +65,8 @@ sandbox/benchmark/datasets/
 sandbox/benchmark/.venv/
 sandbox/playground/.venv/
 /sandbox/playground/__pycache__
+
+# Nix devshell (opt-in; see flake.nix)
+.direnv/
+.pgrx/
+.nix-cargo/
