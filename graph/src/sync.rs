@@ -30,12 +30,16 @@ pub struct QualifiedTable {
 
 pub fn get_qualified_table(oid: u32) -> GraphResult<QualifiedTable> {
     pgrx::Spi::connect(|client| {
-        let query = format!(
-            "SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = {}",
-            oid
-        );
+        let table_oid = pgrx::pg_sys::Oid::from_u32(oid);
         let result = client
-            .select(&query, None, &[])
+            .select(
+                "SELECT n.nspname::text, c.relname::text
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE c.oid = $1::oid",
+                None,
+                &[table_oid.into()],
+            )
             .map_err(|e| GraphError::Internal(format!("Failed to resolve OID: {}", e)))?;
         let row = result.first();
         let schema = row

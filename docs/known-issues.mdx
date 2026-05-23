@@ -136,7 +136,6 @@ but they do not change core user behavior.
 | Mmap resolution state | Mmap resolution offsets and backing storage are split across engine fields. | Couple the backing data with the `MmapBacked` variant so invalid states are harder to represent. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 | Sync row parsing | Some sync paths parse the same row JSON more than once. | Parse once at the boundary and pass borrowed row values through replay helpers. |
-| Internal sync SQL | Some internal sync queries still interpolate numeric IDs or generated ID lists. | Parameterize where practical or use temp-table cleanup for larger applied ID sets. |
 | Sync mutation coupling | Some edge overlay maintenance relies on caller ordering around node replacement. | Encapsulate node and edge replay behind a typed sync-row operation helper. |
 
 ## Lower-Priority Optimizations

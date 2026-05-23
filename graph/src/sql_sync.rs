@@ -2,7 +2,6 @@
 
 use crate::catalog::{read_catalog, table_oid_from_name};
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
-use crate::quote::quote_literal;
 use crate::sql_filters::{
     encode_date_filter_value, encode_timestamptz_filter_value, parse_uuid_u128,
 };
@@ -105,14 +104,14 @@ pub(crate) fn disabled_graph_trigger_count() -> safety::GraphResult<i32> {
 
 pub(crate) fn pending_sync_rows(applied_sync_id: i64) -> safety::GraphResult<i64> {
     Spi::connect(|client| {
-        let query = format!(
+        let result = client.select(
             "SELECT CASE
                 WHEN to_regclass('graph._sync_log') IS NULL THEN 0::bigint
-                ELSE (SELECT count(*)::bigint FROM graph._sync_log WHERE id > {})
+                ELSE (SELECT count(*)::bigint FROM graph._sync_log WHERE id > $1)
              END",
-            applied_sync_id
-        );
-        let result = client.select(&query, None, &[])?;
+            None,
+            &[applied_sync_id.into()],
+        )?;
         Ok::<_, pgrx::spi::SpiError>(result.first().get::<i64>(1)?.unwrap_or(0))
     })
     .map_err(|e| safety::GraphError::Internal(format!("sync status check failed: {}", e)))
@@ -1021,12 +1020,12 @@ pub(crate) fn resolve_tenant_scope(
 
     let tenant_setting = config::tenant_setting();
     if !tenant_setting.trim().is_empty() {
-        let query = format!(
-            "SELECT current_setting({}, true)",
-            quote_literal(&tenant_setting)
-        );
         let session_tenant = Spi::connect(|client| {
-            let result = client.select(&query, None, &[])?;
+            let result = client.select(
+                "SELECT current_setting($1, true)",
+                None,
+                &[tenant_setting.into()],
+            )?;
             Ok::<_, pgrx::spi::SpiError>(result.first().get::<String>(1)?.unwrap_or_default())
         })
         .map_err(|e| {
