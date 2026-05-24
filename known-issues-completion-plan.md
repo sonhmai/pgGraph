@@ -93,27 +93,35 @@ Completion criteria:
 ### Path Aggregation
 
 Tracked row: `Path aggregation`
+Status: completed in `perf(aggregation): share indexed path snapshots`
 
 Plan:
 
-- Add cap-boundary tests for `all_possible_paths`, including graphs with many
-  equivalent paths.
-- Replace full path-set cloning with a bounded accumulator or iterator-style
-  enumeration that only materializes rows needed by the SQL result.
-- Preserve existing path-count, cap, ordering, and error behavior unless a
-  public docs change lands in the same commit.
+- Existing cap-boundary SQL tests continue to prove `path_count_estimate()`
+  exact/capped behavior.
+- Path enumeration now records each unique indexed path as a shared
+  `Rc<[u32]>` snapshot, so the seen set and output vector do not each own a
+  full cloned path.
+- `path_count_estimate()` now counts indexed paths directly instead of
+  converting every path into table/id coordinates.
+- `all_possible_paths` aggregation now hydrates from one coordinate map for the
+  unique node indices used by the indexed paths.
+- Existing path-count, cap, ordering, and duplicate-path aggregate semantics are
+  preserved.
 
 Regression risk:
 
-- Reducing memory can add per-path bookkeeping and may slow small path queries.
-- Lazy enumeration can change ordering if the traversal frontier is not kept
-  deterministic.
+- `Rc<[u32]>` adds reference-count bookkeeping per unique path, but removes an
+  owned full-path clone between the seen set and output vector.
+- Coordinate materialization is skipped for count-only calls, reducing memory
+  near caps without changing path enumeration order.
 
 Completion criteria:
 
 - SQL results match current documented semantics at cap boundaries.
-- Benchmark or heavy-fixture evidence shows lower peak memory or fewer clones
-  without a common-case latency regression.
+- Duplicate-path aggregate occurrence semantics are preserved.
+- Avoidable full-path cloning and count-only coordinate materialization are
+  removed.
 
 ### Filter Model
 

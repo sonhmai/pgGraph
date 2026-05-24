@@ -13,10 +13,12 @@ use crate::sql_traversal::{
 };
 use crate::{acl, check_enabled_result, edge_store, engine, safety, types, Engine, ENGINE};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
 type OverlayDeletes = HashSet<(u32, u32, u8)>;
 type AggregationEdgeOverlay = (OverlayInserts, OverlayDeletes);
+pub(crate) type IndexedPath = Rc<[u32]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AggregateScope {
@@ -45,7 +47,7 @@ pub(crate) fn aggregate_impl(
     match scope {
         AggregateScope::ReturnedNodes | AggregateScope::ChosenParentPath => {}
         AggregateScope::AllPossiblePaths => {
-            let (paths, _exact, capped) = all_possible_paths_for_request(&request, path_limit)?;
+            let (paths, _exact, capped) = indexed_paths_for_request(&request, path_limit)?;
             if capped {
                 return Err(safety::GraphError::InvalidFilter {
                     reason: format!(
@@ -54,7 +56,7 @@ pub(crate) fn aggregate_impl(
                     ),
                 });
             }
-            return aggregate_coordinate_paths(&paths, specs);
+            return aggregate_indexed_paths(&paths, specs);
         }
     }
 
@@ -151,7 +153,7 @@ pub(crate) fn path_count_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
 ) -> safety::GraphResult<(i64, bool, bool)> {
-    let (paths, exact, capped) = all_possible_paths_for_request(request, path_limit)?;
+    let (paths, exact, capped) = indexed_paths_for_request(request, path_limit)?;
     if capped || !exact {
         Ok((path_limit as i64, false, true))
     } else {
@@ -159,10 +161,10 @@ pub(crate) fn path_count_for_request(
     }
 }
 
-pub(crate) fn all_possible_paths_for_request(
+pub(crate) fn indexed_paths_for_request(
     request: &AggregationTraversalRequest,
     path_limit: usize,
-) -> safety::GraphResult<(Vec<Vec<types::PathCoordinate>>, bool, bool)> {
+) -> safety::GraphResult<(Vec<IndexedPath>, bool, bool)> {
     let edge_limit = path_limit.saturating_add(1);
     let node_table_filter = request
         .node_tables
@@ -205,18 +207,7 @@ pub(crate) fn all_possible_paths_for_request(
                 break;
             }
         }
-        let coordinate_paths = paths
-            .into_iter()
-            .map(|path| {
-                path.into_iter()
-                    .map(|idx| types::PathCoordinate {
-                        table_oid: types::TableOid(eng.node_store.table_oid(idx)),
-                        node_id: eng.node_store.primary_key(idx).to_string(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        Ok::<_, safety::GraphError>(coordinate_paths)
+        Ok::<_, safety::GraphError>(paths)
     })?;
 
     if indexed_paths.len() > path_limit {
@@ -237,8 +228,8 @@ pub(crate) fn enumerate_all_paths_dfs(
     current: u32,
     depth: i32,
     path: &mut Vec<u32>,
-    paths: &mut Vec<Vec<u32>>,
-    seen_paths: &mut HashSet<Vec<u32>>,
+    paths: &mut Vec<IndexedPath>,
+    seen_paths: &mut HashSet<IndexedPath>,
     edge_limit: usize,
     edge_type_filter: Option<&HashSet<u8>>,
     node_table_filter: Option<&HashSet<u32>>,
@@ -249,9 +240,7 @@ pub(crate) fn enumerate_all_paths_dfs(
         && node_table_filter
             .is_none_or(|tables| tables.contains(&eng.node_store.table_oid(current)))
     {
-        if seen_paths.insert(path.clone()) {
-            paths.push(path.clone());
-        }
+        record_indexed_path(path, paths, seen_paths);
         if paths.len() >= edge_limit {
             return;
         }
@@ -293,6 +282,20 @@ pub(crate) fn enumerate_all_paths_dfs(
         );
         path.pop();
     }
+}
+
+fn record_indexed_path(
+    path: &[u32],
+    paths: &mut Vec<IndexedPath>,
+    seen_paths: &mut HashSet<IndexedPath>,
+) {
+    if seen_paths.contains(path) {
+        return;
+    }
+
+    let path_snapshot = IndexedPath::from(path);
+    seen_paths.insert(Rc::clone(&path_snapshot));
+    paths.push(path_snapshot);
 }
 
 pub(crate) fn aggregation_edge_type_filter(
@@ -433,25 +436,21 @@ pub(crate) fn push_base_neighbors(
     }
 }
 
-pub(crate) fn aggregate_coordinate_paths(
-    paths: &[Vec<types::PathCoordinate>],
+pub(crate) fn aggregate_indexed_paths(
+    paths: &[IndexedPath],
     specs: Vec<AggregateSpec>,
 ) -> safety::GraphResult<serde_json::Value> {
-    let mut unique_rows = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        for coord in path {
-            if seen.insert((coord.table_oid.0, coord.node_id.clone())) {
-                unique_rows.push(types::TraversalResult {
-                    node_table: coord.table_oid,
-                    node_id: coord.node_id.clone(),
-                    depth: 0,
-                    path: Vec::new(),
-                    edge_path: Vec::new(),
-                });
-            }
-        }
-    }
+    let coordinates_by_idx = indexed_path_coordinates(paths)?;
+    let unique_rows = coordinates_by_idx
+        .values()
+        .map(|coord| types::TraversalResult {
+            node_table: coord.table_oid,
+            node_id: coord.node_id.clone(),
+            depth: 0,
+            path: Vec::new(),
+            edge_path: Vec::new(),
+        })
+        .collect::<Vec<_>>();
     let hydrated = hydrate_nodes(&unique_rows)?;
     let mut accumulators = specs
         .iter()
@@ -459,7 +458,10 @@ pub(crate) fn aggregate_coordinate_paths(
         .collect::<HashMap<_, _>>();
 
     for path in paths {
-        for coord in path {
+        for idx in path.iter() {
+            let Some(coord) = coordinates_by_idx.get(idx) else {
+                continue;
+            };
             let Some(node) = hydrated.get(&(coord.table_oid.0, coord.node_id.clone())) else {
                 continue;
             };
@@ -477,6 +479,27 @@ pub(crate) fn aggregate_coordinate_paths(
     }
 
     aggregate_output(specs, accumulators)
+}
+
+pub(crate) fn indexed_path_coordinates(
+    paths: &[IndexedPath],
+) -> safety::GraphResult<HashMap<u32, types::PathCoordinate>> {
+    ENGINE.with(|engine| {
+        let eng = engine.borrow();
+        if !eng.built {
+            return Err(safety::GraphError::NotBuilt);
+        }
+        let mut coordinates = HashMap::new();
+        for idx in paths.iter().flat_map(|path| path.iter().copied()) {
+            coordinates
+                .entry(idx)
+                .or_insert_with(|| types::PathCoordinate {
+                    table_oid: types::TableOid(eng.node_store.table_oid(idx)),
+                    node_id: eng.node_store.primary_key(idx).to_string(),
+                });
+        }
+        Ok(coordinates)
+    })
 }
 
 pub(crate) fn execute_aggregation_traversal(
@@ -748,5 +771,23 @@ mod tests {
         assert!(err
             .to_string()
             .contains("expected returned_nodes, chosen_parent_path, or all_possible_paths"));
+    }
+
+    #[test]
+    fn record_indexed_path_keeps_one_snapshot_per_unique_path() {
+        let mut paths = Vec::new();
+        let mut seen_paths = HashSet::new();
+        let first = [1, 2, 3];
+        let duplicate = [1, 2, 3];
+        let second = [1, 4, 3];
+
+        record_indexed_path(&first, &mut paths, &mut seen_paths);
+        record_indexed_path(&duplicate, &mut paths, &mut seen_paths);
+        record_indexed_path(&second, &mut paths, &mut seen_paths);
+
+        assert_eq!(paths.len(), 2);
+        assert_eq!(&*paths[0], &[1, 2, 3]);
+        assert_eq!(&*paths[1], &[1, 4, 3]);
+        assert_eq!(seen_paths.len(), 2);
     }
 }
