@@ -170,7 +170,7 @@ but they do not change core user behavior.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | SQL facade and pg test layout | Some SQL facade and pg test files are included textually from `lib.rs`. | Replace `include!` usage with normal modules and local imports. |
-| Build/vacuum pipeline | Build and vacuum share a lot of pipeline logic. | Extract a shared helper while keeping build-only and vacuum-only behavior explicit. |
+| Build/vacuum pipeline | Build and vacuum now share replacement-engine construction, while build-only trigger setup and vacuum-only tombstone accounting remain explicit. | Keep shared helpers limited to common pipeline steps so operation-specific behavior stays readable. |
 | Engine state encapsulation | Production status, build, sync, vacuum, persisted-load, mmap materialization, and resolution-state transitions now route through engine helpers, but some fields remain public while tests and lower-level store setup are being cleaned up. | Continue narrowing field visibility after the remaining internal refactors stop depending on direct store access. |
 | Mmap mutation API | Sync paths materialize mmap-backed node stores through engine helpers before mutation, but lower-level stores still expose direct mutation primitives. | Keep mmap mutation at the engine boundary and make invalid direct mutation harder to call from production code. |
 | Mmap resolution state | The resolution offset/length now lives in `ResolutionStore::MmapBacked`, while the mmap handle remains engine-owned because node and edge stores borrow the same mapping. | Continue keeping resolution metadata attached to the active resolution backend and avoid reintroducing split offset fields. |

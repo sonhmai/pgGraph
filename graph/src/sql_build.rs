@@ -117,12 +117,8 @@ fn execute_build_inner(
     let force_read_only = guard_build_memory_headroom(&tables, &edges)?;
 
     report_progress(progress, build_phase, build_message)?;
-    let mut new_engine = builder::build_graph(&tables, &edges, &filter_columns)?;
-    if force_read_only {
-        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
-    }
-    new_engine.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filter_columns));
-    new_engine.record_applied_sync_id(max_sync_log_id()?);
+    let mut new_engine =
+        build_replacement_engine(&tables, &edges, &filter_columns, force_read_only)?;
 
     let nodes_loaded = new_engine.node_store.node_count() as i64;
     let edges_loaded = new_engine.edge_store.edge_count() as i64;
@@ -220,12 +216,8 @@ pub(crate) fn execute_vacuum(force_persist: bool) -> safety::GraphResult<VacuumE
     check_build_acls_result(&tables, &edges)?;
     let force_read_only = guard_build_memory_headroom(&tables, &edges)?;
 
-    let mut new_engine = builder::build_graph(&tables, &edges, &filter_columns)?;
-    if force_read_only {
-        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
-    }
-    new_engine.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filter_columns));
-    new_engine.record_applied_sync_id(max_sync_log_id()?);
+    let mut new_engine =
+        build_replacement_engine(&tables, &edges, &filter_columns, force_read_only)?;
 
     let nodes_after = new_engine.node_store.node_count() as i64;
     let edges_rebuilt = new_engine.edge_store.edge_count() as i64;
@@ -272,6 +264,21 @@ pub(crate) fn acquire_build_lock() -> safety::GraphResult<()> {
     } else {
         Err(safety::GraphError::BuildLocked)
     }
+}
+
+fn build_replacement_engine(
+    tables: &[builder::RegisteredTable],
+    edges: &[builder::RegisteredEdge],
+    filter_columns: &[builder::RegisteredFilterColumn],
+    force_read_only: bool,
+) -> safety::GraphResult<engine::Engine> {
+    let mut new_engine = builder::build_graph(tables, edges, filter_columns)?;
+    if force_read_only {
+        new_engine.mark_read_only(engine::ReadOnlyReason::MemoryLimit);
+    }
+    new_engine.set_catalog_fingerprint(catalog_fingerprint(tables, edges, filter_columns));
+    new_engine.record_applied_sync_id(max_sync_log_id()?);
+    Ok(new_engine)
 }
 
 pub(crate) fn guard_build_memory_headroom(
