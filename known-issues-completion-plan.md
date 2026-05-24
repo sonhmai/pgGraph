@@ -197,28 +197,36 @@ Completion criteria:
 ### Discovery SQL
 
 Tracked row: `Discovery SQL`
+Status: completed in `fix(discovery): parameterize catalog queries`
 
 Plan:
 
-- Replace generated `IN (...)` lists and formatted OID clauses with parameters,
-  array bindings, temp tables, or validated catalog fragments based on query
-  shape.
-- Batch discovery metadata where repeated per-table SPI calls are only used to
-  build the same candidate set.
-- Add fixtures for quoted identifiers, unusual schemas, dropped relations, and
-  restricted roles.
+- Schema-wide table and foreign-key discovery now bind `schema_name` through
+  SPI parameters.
+- Text-column discovery now binds schema, table, and primary-key exclusion
+  values; primary-key exclusions use a `text[]` parameter instead of generated
+  `column_name != ...` fragments.
+- Targeted table identifier discovery now binds the table OID instead of
+  formatting it into the query.
+- Targeted foreign-key discovery now binds the selected table set as an
+  `int8[]` parameter and uses `ANY()` instead of generating an `IN (...)` list.
+- Existing schema-wide and targeted discovery pgrx coverage exercises the
+  parameterized paths for composite keys, junction tables, and FK edges.
 
 Regression risk:
 
-- Temp-table or array-based shapes can be slower for very small lists if used
-  unconditionally.
-- Parameterization can expose missing type casts in older PostgreSQL versions.
+- Targeted FK discovery now casts relation OIDs to `bigint` for comparison
+  against the bound `int8[]` table set. This is metadata-only discovery work,
+  not traversal or build hot-path work.
+- Parameterized arrays make the query shape stable for PostgreSQL planning and
+  remove SQL string growth for larger targeted table sets.
 
 Completion criteria:
 
-- Discovery SQL has a documented query-shape rule for identifiers, OIDs, and
-  values.
-- Security and metadata tests pass for quoted and restricted catalog cases.
+- Discovery SQL uses parameters for schema values, table names, OIDs, PK
+  exclusions, and targeted OID sets.
+- Existing targeted and schema-wide metadata tests pass with the parameterized
+  query shapes.
 
 ## Milestone 3 - Sync, Jobs, and Operator Semantics
 

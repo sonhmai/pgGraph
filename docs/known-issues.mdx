@@ -64,6 +64,7 @@ remaining sections below are still open work.
 | Path aggregation | `all_possible_paths` counting and aggregation now keep enumerated paths as shared indexed snapshots, avoiding duplicate full-path clones and coordinate materialization for path-count checks. |
 | Filter model and legacy numeric filters | SQL traversal now builds pushdown predicates only from structured typed filters; the legacy unsigned condition parser is limited to tests, fuzzing, and development helpers so signed values cannot be reintroduced through the public traversal path. |
 | Dynamic table SQL | Build and estimate reltuples reads now resolve registered table names through bound OID lookups, while table and column SQL fragments remain limited to validated catalog/regclass names and quoted identifiers. |
+| Discovery SQL | Auto-discovery schema values, targeted table OIDs, primary-key exclusions, and targeted foreign-key table sets now use SPI parameters instead of generated literal or `IN (...)` SQL fragments. |
 
 ### Data Correctness and Corruption
 
@@ -84,9 +85,10 @@ structured typed-filter path only.
 
 ### SQL Safety and Schema Plumbing
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Discovery SQL | Some discovery queries still use formatted OIDs or generated `IN (...)` lists. | Replace generated OID/list shapes with parameters, array bindings, temp tables, or validated catalog fragments based on query size and PostgreSQL version support. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked next-update items remain in this category after dynamic
+table SQL and discovery SQL parameterization work.
+</Callout>
 
 ### Persistence and File Format
 

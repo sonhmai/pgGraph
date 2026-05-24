@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredEdge, RegisteredTable};
 use crate::catalog::{regclass_text, validate_column_exists};
-use crate::quote::{quote_ident, quote_literal};
+use crate::quote::quote_ident;
 use crate::safety::{GraphError, GraphResult};
 
 /// Result of auto-discovery for SQL output.
@@ -324,8 +324,7 @@ struct DiscoveredFk {
 /// Discover all tables and their primary key columns.
 fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTable>> {
     // Query all tables with their PK columns (supports composite PKs)
-    let table_pk_query = format!(
-        "SELECT t.table_name::text AS table_name,
+    let table_pk_query = "SELECT t.table_name::text AS table_name,
                 kcu.column_name::text AS pk_column,
                 kcu.ordinal_position
          FROM information_schema.tables t
@@ -334,17 +333,15 @@ fn discover_tables_with_pks(schema_name: &str) -> GraphResult<Vec<DiscoveredTabl
            AND tc.constraint_type = 'PRIMARY KEY'
          JOIN information_schema.key_column_usage kcu
            ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
-         WHERE t.table_schema = {}
+         WHERE t.table_schema = $1
            AND t.table_type = 'BASE TABLE'
-         ORDER BY t.table_name, kcu.ordinal_position",
-        quote_literal(schema_name)
-    );
+         ORDER BY t.table_name, kcu.ordinal_position";
 
     let mut table_map: Vec<(String, Vec<String>)> = Vec::new();
 
     Spi::connect(|client| {
         let result = client
-            .select(&table_pk_query, None, &[])
+            .select(table_pk_query, None, &[schema_name.into()])
             .map_err(|e| GraphError::Internal(format!("Schema discovery failed: {}", e)))?;
 
         for row in result {
@@ -392,34 +389,25 @@ fn discover_text_columns(
     table_name: &str,
     pk_columns: &[String],
 ) -> GraphResult<Vec<String>> {
-    let pk_exclusions = pk_columns
-        .iter()
-        .map(|c| format!("column_name != {}", quote_literal(c)))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-
-    let pk_filter = if pk_exclusions.is_empty() {
-        String::new()
-    } else {
-        format!(" AND {}", pk_exclusions)
-    };
-
-    let col_query = format!(
-        "SELECT column_name::text FROM information_schema.columns
-         WHERE table_schema = {} AND table_name = {}
+    let col_query = "SELECT column_name::text FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = $2
            AND data_type IN ('text', 'character varying')
            AND (character_maximum_length IS NULL OR character_maximum_length <= 128)
-           {}
-         ORDER BY ordinal_position",
-        quote_literal(schema_name),
-        quote_literal(table_name),
-        pk_filter
-    );
+           AND column_name <> ALL($3::text[])
+         ORDER BY ordinal_position";
 
     let mut columns = Vec::new();
     Spi::connect(|client| {
         let col_result = client
-            .select(&col_query, None, &[])
+            .select(
+                col_query,
+                None,
+                &[
+                    schema_name.into(),
+                    table_name.into(),
+                    pk_columns.to_vec().into(),
+                ],
+            )
             .map_err(|e| GraphError::Internal(format!("Column discovery failed: {}", e)))?;
 
         for col_row in col_result {
@@ -435,8 +423,7 @@ fn discover_text_columns(
 
 /// Discover all foreign key relationships in a schema.
 fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
-    let fk_query = format!(
-        "SELECT
+    let fk_query = "SELECT
             tc.table_name::text AS from_table,
             kcu.column_name::text AS from_column,
             ccu.table_name::text AS to_table,
@@ -447,14 +434,12 @@ fn discover_foreign_keys(schema_name: &str) -> GraphResult<Vec<DiscoveredFk>> {
          JOIN information_schema.constraint_column_usage ccu
            ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
          WHERE tc.constraint_type = 'FOREIGN KEY'
-           AND tc.table_schema = {}",
-        quote_literal(schema_name)
-    );
+           AND tc.table_schema = $1";
 
     let mut fks = Vec::new();
     Spi::connect(|client| {
         let result = client
-            .select(&fk_query, None, &[])
+            .select(fk_query, None, &[schema_name.into()])
             .map_err(|e| GraphError::Internal(format!("FK discovery failed: {}", e)))?;
 
         for row in result {
@@ -574,8 +559,7 @@ fn discover_tables_by_oid(table_oids: &[u32]) -> GraphResult<Vec<DiscoveredTable
 
 fn discover_identifier(table_oid: u32) -> GraphResult<(String, String, bool, Vec<String>)> {
     Spi::connect(|client| {
-        let query = format!(
-            "SELECT
+        let query = "SELECT
                 n.nspname::text,
                 c.relname::text,
                 i.indisprimary,
@@ -586,18 +570,19 @@ fn discover_identifier(table_oid: u32) -> GraphResult<(String, String, bool, Vec
              JOIN pg_index i ON i.indrelid = c.oid
              JOIN unnest(i.indkey) WITH ORDINALITY AS ord(attnum, n) ON true
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ord.attnum
-             WHERE c.oid = {}::oid
+             WHERE c.oid = $1::oid
                AND (i.indisprimary OR i.indisunique)
                AND i.indpred IS NULL
              GROUP BY n.nspname, c.relname, i.indexrelid, i.indisprimary
              HAVING bool_and(a.attnotnull)
              ORDER BY i.indisprimary DESC, i.indexrelid
-             LIMIT 1",
-            table_oid
-        );
-        let result = client.select(&query, None, &[]).map_err(|err| {
-            GraphError::Internal(format!("targeted table discovery failed: {}", err))
-        })?;
+             LIMIT 1";
+        let table_oid_arg = pgrx::pg_sys::Oid::from_u32(table_oid);
+        let result = client
+            .select(query, None, &[table_oid_arg.into()])
+            .map_err(|err| {
+                GraphError::Internal(format!("targeted table discovery failed: {}", err))
+            })?;
         let row = result.first();
         let Some(schema_name) = row
             .get::<String>(1)
@@ -631,11 +616,9 @@ fn discover_identifier(table_oid: u32) -> GraphResult<(String, String, bool, Vec
 fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<DiscoveredFk>> {
     let oid_list = table_oids
         .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "SELECT
+        .map(|oid| i64::from(*oid))
+        .collect::<Vec<_>>();
+    let query = "SELECT
             c.conrelid::oid::integer AS from_oid,
             from_class.relname::text AS from_table,
             from_attr.attname::text AS from_column,
@@ -650,17 +633,17 @@ fn discover_foreign_keys_for_tables(table_oids: &[u32]) -> GraphResult<Vec<Disco
          JOIN pg_attribute from_attr ON from_attr.attrelid = c.conrelid AND from_attr.attnum = fk_from.attnum
          JOIN pg_attribute to_attr ON to_attr.attrelid = c.confrelid AND to_attr.attnum = fk_to.attnum
          WHERE c.contype = 'f'
-           AND c.conrelid IN ({0})
-           AND c.confrelid IN ({0})
-         ORDER BY c.conrelid, c.oid, fk_from.n",
-        oid_list
-    );
+           AND c.conrelid::bigint = ANY($1::int8[])
+           AND c.confrelid::bigint = ANY($1::int8[])
+         ORDER BY c.conrelid, c.oid, fk_from.n";
 
     let mut fks = Vec::new();
     Spi::connect(|client| {
-        let result = client.select(&query, None, &[]).map_err(|err| {
-            GraphError::Internal(format!("targeted FK discovery failed: {}", err))
-        })?;
+        let result = client
+            .select(query, None, &[oid_list.into()])
+            .map_err(|err| {
+                GraphError::Internal(format!("targeted FK discovery failed: {}", err))
+            })?;
         for row in result {
             fks.push(DiscoveredFk {
                 from_oid: Some(
