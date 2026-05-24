@@ -457,8 +457,6 @@ Tracked P1 rows and specific plans:
   buffers; keep the current dense path for cases where it wins.
 - `Edge overlays`: benchmark cache-friendly overlay sets or oriented overlays
   once overlay buffers grow past a measured threshold.
-- `Reverse graph build`: add a linear two-pass reverse CSR builder only if
-  build-time memory measurements justify the additional code path.
 - `Build-time SPI setup`: batch metadata reads and reuse SPI contexts where
   query shape stays simple and error reporting remains clear.
 - `Source search recheck`: reduce per-candidate allocation while preserving
@@ -491,6 +489,14 @@ Completed P1 rows:
   objects before hydration. Pre/post timing was recorded in
   `/private/tmp/pggraph-connected-components-pre-benchmark.md` and
   `/private/tmp/pggraph-connected-components-post-benchmark.md`.
+- `Reverse graph build`: completed in
+  `perf(edges): build reverse csr linearly`. Reverse CSR construction now
+  counts inbound degrees, prefix-sums offsets, and fills reverse arrays in a
+  second pass over the forward CSR. Regression note: the change removes the
+  intermediate reversed `RawEdge` vector and sort, replacing it with a cloned
+  offset cursor and fixed-size output arrays. Pre/post timing was recorded in
+  `/private/tmp/pggraph-reverse-graph-build-pre-benchmark.md` and
+  `/private/tmp/pggraph-reverse-graph-build-post-benchmark.md`.
 
 Completion criteria:
 

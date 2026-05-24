@@ -388,19 +388,51 @@ impl EdgeStore {
     /// even when the forward graph was loaded from an mmap-backed file.
     pub fn reversed(&self) -> Self {
         let has_weights = self.has_weights();
-        let mut edges = Vec::with_capacity(self.edge_count() as usize);
+        let node_count = self.node_count();
+        let edge_count = self.edge_count() as usize;
+        let mut edge_offsets = vec![0u32; node_count as usize + 1];
+
+        for source in 0..node_count {
+            let (targets, _) = self.neighbors(source);
+            for &target in targets {
+                edge_offsets[target as usize + 1] += 1;
+            }
+        }
+
+        for idx in 1..edge_offsets.len() {
+            edge_offsets[idx] += edge_offsets[idx - 1];
+        }
+
+        let mut reversed_targets = vec![0u32; edge_count];
+        let mut reversed_type_ids = vec![0u8; edge_count];
+        let mut reversed_weights = if has_weights {
+            vec![0u32; edge_count]
+        } else {
+            Vec::new()
+        };
+        let mut write_offsets = edge_offsets.clone();
+
         for source in 0..self.node_count() {
             let (targets, type_ids, weights) = self.neighbors_weighted(source);
             for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
-                edges.push(RawEdge {
-                    source: target,
-                    target: source,
-                    type_id,
-                    weight: has_weights.then(|| weights.get(idx).copied().unwrap_or(1)),
-                });
+                let write_idx = write_offsets[target as usize] as usize;
+                write_offsets[target as usize] += 1;
+                reversed_targets[write_idx] = source;
+                reversed_type_ids[write_idx] = type_id;
+                if has_weights {
+                    reversed_weights[write_idx] = weights.get(idx).copied().unwrap_or(1);
+                }
             }
         }
-        Self::from_valid_edges(self.node_count(), edges, has_weights)
+
+        Self {
+            backing: EdgeBacking::Owned {
+                edge_offsets,
+                targets: reversed_targets,
+                type_ids: reversed_type_ids,
+                weights: reversed_weights,
+            },
+        }
     }
 
     /// Get the neighbor slice for a node. This is the BFS hot-loop access.
