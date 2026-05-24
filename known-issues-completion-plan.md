@@ -453,8 +453,9 @@ Apply this workflow to each P1 row:
 
 Tracked P1 rows and specific plans:
 
-- `Traversal internals`: benchmark sparse visited metadata and reusable scratch
-  buffers; keep the current dense path for cases where it wins.
+- `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
+  result metadata; keep dense traversal result vectors for cases where path
+  reconstruction across many returned rows remains faster.
 - `Edge overlays`: benchmark cache-friendly overlay sets or oriented overlays
   once overlay buffers grow past a measured threshold.
 - `Build-time SPI setup`: batch metadata reads and reuse SPI contexts where
@@ -512,6 +513,18 @@ Completed P1 rows:
   and candidate vector storage per delta key. Pre/post timing was recorded in
   `/private/tmp/pggraph-resolution-delta-pre-benchmark.md` and
   `/private/tmp/pggraph-resolution-delta-post-benchmark.md`.
+- `Path query allocations`: completed in
+  `perf(paths): store parent metadata sparsely`. Unweighted shortest-path
+  searches now keep only visited parent links and queue depth tuples instead of
+  allocating full-graph parent, edge-type, and depth vectors. Weighted
+  shortest-path searches still use a dense distance vector for fast Dijkstra
+  relaxation, but parent edge type and edge weight metadata are sparse and only
+  stored for relaxed nodes. Regression note: sparse maps reduce per-query
+  memory on large graphs and shallow paths, with extra hash lookups during path
+  reconstruction and parent updates compared with dense vector indexing.
+  Pre/post timing was recorded in
+  `/private/tmp/pggraph-traversal-allocations-pre-benchmark.md` and
+  `/private/tmp/pggraph-traversal-allocations-post-benchmark.md`.
 
 Completion criteria:
 

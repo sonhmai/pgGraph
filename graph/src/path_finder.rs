@@ -6,13 +6,26 @@
 //! See: `docs/contributor_guide/traversal-search-paths.mdx`
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use roaring::RoaringBitmap;
 
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
 use crate::types::{PathStep, TableOid, WeightedPathStep};
+
+#[derive(Debug, Clone, Copy)]
+struct ParentStep {
+    parent: u32,
+    edge_type: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WeightedParentStep {
+    parent: u32,
+    edge_type: u8,
+    edge_weight: u32,
+}
 
 /// Find the shortest unweighted path between two nodes using bidirectional BFS.
 ///
@@ -71,17 +84,27 @@ fn bidirectional_bfs(
 ) -> Option<Vec<PathStep>> {
     let mut fwd_visited = RoaringBitmap::new();
     let mut bwd_visited = RoaringBitmap::new();
-    let mut fwd_parent = vec![u32::MAX; node_store.node_count() as usize];
-    let mut bwd_parent = vec![u32::MAX; node_store.node_count() as usize];
-    let mut fwd_edge_type = vec![0u8; node_store.node_count() as usize];
-    let mut bwd_edge_type = vec![0u8; node_store.node_count() as usize];
+    let mut fwd_parent = HashMap::new();
+    let mut bwd_parent = HashMap::new();
     let mut fwd_frontier: VecDeque<u32> = VecDeque::new();
     let mut bwd_frontier: VecDeque<u32> = VecDeque::new();
 
     fwd_visited.insert(source);
     bwd_visited.insert(target);
-    fwd_parent[source as usize] = source;
-    bwd_parent[target as usize] = target;
+    fwd_parent.insert(
+        source,
+        ParentStep {
+            parent: source,
+            edge_type: 0,
+        },
+    );
+    bwd_parent.insert(
+        target,
+        ParentStep {
+            parent: target,
+            edge_type: 0,
+        },
+    );
     fwd_frontier.push_back(source);
     bwd_frontier.push_back(target);
 
@@ -104,15 +127,20 @@ fn bidirectional_bfs(
                     }
                     if !fwd_visited.contains(neighbor) {
                         fwd_visited.insert(neighbor);
-                        fwd_parent[neighbor as usize] = current;
-                        fwd_edge_type[neighbor as usize] = type_ids[i];
+                        fwd_parent.insert(
+                            neighbor,
+                            ParentStep {
+                                parent: current,
+                                edge_type: type_ids[i],
+                            },
+                        );
                         fwd_frontier.push_back(neighbor);
                     }
                     if bwd_visited.contains(neighbor) {
-                        if fwd_parent[neighbor as usize] == u32::MAX {
-                            fwd_parent[neighbor as usize] = current;
-                            fwd_edge_type[neighbor as usize] = type_ids[i];
-                        }
+                        fwd_parent.entry(neighbor).or_insert(ParentStep {
+                            parent: current,
+                            edge_type: type_ids[i],
+                        });
                         meeting_node = Some(neighbor);
                         break;
                     }
@@ -135,15 +163,20 @@ fn bidirectional_bfs(
                     }
                     if !bwd_visited.contains(neighbor) {
                         bwd_visited.insert(neighbor);
-                        bwd_parent[neighbor as usize] = current;
-                        bwd_edge_type[neighbor as usize] = type_ids[i];
+                        bwd_parent.insert(
+                            neighbor,
+                            ParentStep {
+                                parent: current,
+                                edge_type: type_ids[i],
+                            },
+                        );
                         bwd_frontier.push_back(neighbor);
                     }
                     if fwd_visited.contains(neighbor) {
-                        if bwd_parent[neighbor as usize] == u32::MAX {
-                            bwd_parent[neighbor as usize] = current;
-                            bwd_edge_type[neighbor as usize] = type_ids[i];
-                        }
+                        bwd_parent.entry(neighbor).or_insert(ParentStep {
+                            parent: current,
+                            edge_type: type_ids[i],
+                        });
                         meeting_node = Some(neighbor);
                         break;
                     }
@@ -166,29 +199,25 @@ fn bidirectional_bfs(
     let mut fwd_path = Vec::new();
     let mut current = meet;
     while current != source {
-        fwd_path.push((current, fwd_edge_type[current as usize]));
-        current = fwd_parent[current as usize];
-        if current == u32::MAX {
-            return None;
-        }
+        let step = fwd_parent.get(&current)?;
+        fwd_path.push((current, step.edge_type));
+        current = step.parent;
     }
     fwd_path.push((source, 0));
     fwd_path.reverse();
 
     let mut bwd_path = Vec::new();
     let mut child = meet;
-    current = bwd_parent[meet as usize];
-    if current != u32::MAX && current != meet {
+    current = bwd_parent.get(&meet)?.parent;
+    if current != meet {
         loop {
-            bwd_path.push((current, bwd_edge_type[child as usize]));
+            let step = bwd_parent.get(&child)?;
+            bwd_path.push((current, step.edge_type));
             if current == target {
                 break;
             }
             child = current;
-            current = bwd_parent[current as usize];
-            if current == u32::MAX {
-                return None;
-            }
+            current = bwd_parent.get(&current)?.parent;
         }
     }
 
@@ -238,18 +267,20 @@ fn single_direction_bfs(
     edge_type_registry: &[String],
 ) -> Option<Vec<PathStep>> {
     let mut visited = RoaringBitmap::new();
-    let mut parent = vec![u32::MAX; node_store.node_count() as usize];
-    let mut edge_types_used = vec![0u8; node_store.node_count() as usize];
-    let mut frontier: VecDeque<u32> = VecDeque::new();
-    let mut depth_map = vec![-1i32; node_store.node_count() as usize];
+    let mut parent = HashMap::new();
+    let mut frontier: VecDeque<(u32, i32)> = VecDeque::new();
 
     visited.insert(source);
-    parent[source as usize] = source;
-    depth_map[source as usize] = 0;
-    frontier.push_back(source);
+    parent.insert(
+        source,
+        ParentStep {
+            parent: source,
+            edge_type: 0,
+        },
+    );
+    frontier.push_back((source, 0));
 
-    while let Some(current) = frontier.pop_front() {
-        let current_depth = depth_map[current as usize];
+    while let Some((current, current_depth)) = frontier.pop_front() {
         if current_depth >= max_depth {
             continue;
         }
@@ -262,21 +293,26 @@ fn single_direction_bfs(
             }
 
             visited.insert(neighbor);
-            parent[neighbor as usize] = current;
-            edge_types_used[neighbor as usize] = type_ids[i];
-            depth_map[neighbor as usize] = current_depth + 1;
-            frontier.push_back(neighbor);
+            parent.insert(
+                neighbor,
+                ParentStep {
+                    parent: current,
+                    edge_type: type_ids[i],
+                },
+            );
+            frontier.push_back((neighbor, current_depth + 1));
 
             if neighbor == target {
                 // Found target — reconstruct path
                 let mut path = Vec::new();
                 let mut cur = target;
                 loop {
-                    path.push((cur, edge_types_used[cur as usize]));
+                    let step = parent.get(&cur)?;
+                    path.push((cur, step.edge_type));
                     if cur == source {
                         break;
                     }
-                    cur = parent[cur as usize];
+                    cur = step.parent;
                 }
                 path.reverse();
 
@@ -327,13 +363,18 @@ pub fn weighted_shortest_path(
 
     let node_count = node_store.node_count() as usize;
     let mut dist = vec![u64::MAX; node_count];
-    let mut parent = vec![u32::MAX; node_count];
-    let mut parent_edge_type = vec![0u8; node_count];
-    let mut parent_edge_weight = vec![0u32; node_count];
+    let mut parent = HashMap::new();
     let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
 
     dist[source as usize] = 0;
-    parent[source as usize] = source;
+    parent.insert(
+        source,
+        WeightedParentStep {
+            parent: source,
+            edge_type: 0,
+            edge_weight: 0,
+        },
+    );
     heap.push(Reverse((0, source)));
 
     while let Some(Reverse((cost, current))) = heap.pop() {
@@ -355,9 +396,14 @@ pub fn weighted_shortest_path(
 
             if new_cost < dist[neighbor as usize] && node_store.is_active(neighbor) {
                 dist[neighbor as usize] = new_cost;
-                parent[neighbor as usize] = current;
-                parent_edge_type[neighbor as usize] = type_ids[i];
-                parent_edge_weight[neighbor as usize] = edge_weight;
+                parent.insert(
+                    neighbor,
+                    WeightedParentStep {
+                        parent: current,
+                        edge_type: type_ids[i],
+                        edge_weight,
+                    },
+                );
                 heap.push(Reverse((new_cost, neighbor)));
             }
         }
@@ -375,7 +421,7 @@ pub fn weighted_shortest_path(
         if current == source {
             break;
         }
-        current = parent[current as usize];
+        current = parent.get(&current)?.parent;
     }
     nodes.reverse();
 
@@ -384,7 +430,11 @@ pub fn weighted_shortest_path(
             .into_iter()
             .enumerate()
             .map(|(step, node)| {
-                let edge_type = parent_edge_type[node as usize];
+                let parent_step = parent.get(&node).copied().unwrap_or(WeightedParentStep {
+                    parent: node,
+                    edge_type: 0,
+                    edge_weight: 0,
+                });
                 WeightedPathStep {
                     step: step as i32,
                     node_table: TableOid(node_store.table_oid(node)),
@@ -394,12 +444,12 @@ pub fn weighted_shortest_path(
                     } else {
                         Some(
                             edge_type_registry
-                                .get(edge_type as usize)
+                                .get(parent_step.edge_type as usize)
                                 .cloned()
-                                .unwrap_or_else(|| format!("type_{}", edge_type)),
+                                .unwrap_or_else(|| format!("type_{}", parent_step.edge_type)),
                         )
                     },
-                    edge_weight: (step != 0).then_some(parent_edge_weight[node as usize]),
+                    edge_weight: (step != 0).then_some(parent_step.edge_weight),
                     step_cost: dist[node as usize],
                     total_cost,
                 }

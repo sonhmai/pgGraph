@@ -97,6 +97,9 @@ to `(table_oid, primary_key)` coordinates.
 The path finder can use bidirectional search when safe. When the graph contains
 any unidirectional edges, correctness requires a forward search path that does
 not assume reverse reachability represents the original directed graph.
+Shortest-path parent metadata is sparse: unweighted path search records only
+visited parent links, and weighted path search records parent edge metadata only
+for relaxed nodes.
 
 ## Weighted Shortest Path
 
@@ -105,6 +108,9 @@ The path layer accumulates costs as `u64` values with checked addition so valid
 large path costs do not collide with the unreachable sentinel. The SQL wrapper
 returns one row per path step and exposes `step_cost` and `total_cost` as
 `bigint`; costs outside the SQL `bigint` range fail instead of being capped.
+Weighted search still uses a dense distance vector for fast relaxation checks,
+but parent edge type and weight metadata are stored sparsely and only for nodes
+that receive a better distance.
 The SQL wrapper returns no rows when:
 
 | Condition | Reason |
