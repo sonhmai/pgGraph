@@ -455,8 +455,6 @@ Tracked P1 rows and specific plans:
 
 - `Traversal internals`: benchmark sparse visited metadata and reusable scratch
   buffers; keep the current dense path for cases where it wins.
-- `DFS neighbor expansion`: replace eager neighbor vectors with iterator-based
-  expansion while preserving deterministic traversal order.
 - `Edge overlays`: benchmark cache-friendly overlay sets or oriented overlays
   once overlay buffers grow past a measured threshold.
 - `Connected components`: reuse component-size data and delay row materializing
@@ -473,6 +471,18 @@ Tracked P1 rows and specific plans:
   lifetimes allow it.
 - `Resolution delta lookups`: add an indexed delta map only if sync-delta
   growth benchmarks show material lookup cost.
+
+Completed P1 rows:
+
+- `DFS neighbor expansion`: completed in
+  `perf(traversal): stream dfs neighbor expansion`. DFS now pushes base and
+  overlay neighbors in the same reverse stack order without allocating a full
+  per-node neighbor vector. Overlay insertions still skip base duplicates and
+  later duplicate overlay entries. Regression note: the change removes the
+  eager vector allocation; it adds small reverse-slice scans for overlay
+  duplicate checks only when inserted overlay edges exist. Pre/post timing was
+  recorded in `/private/tmp/pggraph-dfs-neighbor-expansion-pre-benchmark.md`
+  and `/private/tmp/pggraph-dfs-neighbor-expansion-post-benchmark.md`.
 
 Completion criteria:
 

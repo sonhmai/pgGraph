@@ -233,47 +233,26 @@ pub fn execute_dfs(
             continue;
         }
 
-        let mut next = neighbors(edge_store, current, config);
-        next.reverse();
-        for (neighbor, edge_type) in next {
-            if !candidate_allowed(
-                node_store,
-                filter_index,
-                config,
-                neighbor,
-                edge_type,
-                &visited,
-                has_filters,
-            ) {
-                continue;
-            }
-
-            visited.insert(neighbor);
-            depth_map[neighbor as usize] = current_depth + 1;
-            parent[neighbor as usize] = current;
-            parent_edge_type[neighbor as usize] = edge_type;
-            nodes_visited += 1;
-
-            if nodes_visited >= config.max_nodes {
-                return BfsResult {
-                    visited,
-                    depth: depth_map,
-                    parent,
-                    parent_edge_type,
-                };
-            }
-
-            if current_depth + 1 < config.max_depth {
-                stack.push(neighbor);
-                if stack.len() as u32 >= config.max_frontier {
-                    return BfsResult {
-                        visited,
-                        depth: depth_map,
-                        parent,
-                        parent_edge_type,
-                    };
-                }
-            }
+        let mut push = DfsPushContext {
+            node_store,
+            edge_store,
+            filter_index,
+            config,
+            visited: &mut visited,
+            depth_map: &mut depth_map,
+            parent: &mut parent,
+            parent_edge_type: &mut parent_edge_type,
+            stack: &mut stack,
+            nodes_visited: &mut nodes_visited,
+            has_filters,
+        };
+        if push.push_neighbors(current, current_depth) {
+            return BfsResult {
+                visited,
+                depth: depth_map,
+                parent,
+                parent_edge_type,
+            };
         }
     }
 
@@ -361,33 +340,6 @@ fn neighbors_iter<'a>(
     NeighborIter::new(edge_store, node_idx, config)
 }
 
-fn neighbors(edge_store: &EdgeStore, node_idx: u32, config: &BfsConfig) -> Vec<(u32, u8)> {
-    let (targets, type_ids) = edge_store.neighbors(node_idx);
-    let mut result = Vec::with_capacity(
-        targets.len()
-            + config
-                .overlay_insert_edges
-                .get(&node_idx)
-                .map_or(0, Vec::len),
-    );
-    for (&target, &type_id) in targets.iter().zip(type_ids.iter()) {
-        if !config
-            .overlay_deleted_edges
-            .contains(&(node_idx, target, type_id))
-        {
-            result.push((target, type_id));
-        }
-    }
-    if let Some(inserted) = config.overlay_insert_edges.get(&node_idx) {
-        for &(target, type_id) in inserted {
-            if !result.contains(&(target, type_id)) {
-                result.push((target, type_id));
-            }
-        }
-    }
-    result
-}
-
 fn candidate_allowed(
     node_store: &NodeStore,
     filter_index: &FilterIndex,
@@ -423,6 +375,99 @@ fn candidate_allowed(
         return false;
     }
     true
+}
+
+fn base_contains(targets: &[u32], type_ids: &[u8], target: u32, type_id: u8) -> bool {
+    targets
+        .iter()
+        .zip(type_ids.iter())
+        .any(|(&base_target, &base_type)| base_target == target && base_type == type_id)
+}
+
+struct DfsPushContext<'a> {
+    node_store: &'a NodeStore,
+    edge_store: &'a EdgeStore,
+    filter_index: &'a FilterIndex,
+    config: &'a BfsConfig,
+    visited: &'a mut RoaringBitmap,
+    depth_map: &'a mut [i32],
+    parent: &'a mut [u32],
+    parent_edge_type: &'a mut [u8],
+    stack: &'a mut Vec<u32>,
+    nodes_visited: &'a mut u32,
+    has_filters: bool,
+}
+
+impl DfsPushContext<'_> {
+    fn push_neighbors(&mut self, current: u32, current_depth: i32) -> bool {
+        let (targets, type_ids) = self.edge_store.neighbors(current);
+
+        if let Some(inserted) = self.config.overlay_insert_edges.get(&current) {
+            for insert_pos in (0..inserted.len()).rev() {
+                let (neighbor, edge_type) = inserted[insert_pos];
+                if base_contains(targets, type_ids, neighbor, edge_type)
+                    || inserted[..insert_pos].contains(&(neighbor, edge_type))
+                    || self.push_candidate(current, current_depth, neighbor, edge_type)
+                {
+                    continue;
+                }
+                return true;
+            }
+        }
+
+        for (&neighbor, &edge_type) in targets.iter().zip(type_ids.iter()).rev() {
+            if self
+                .config
+                .overlay_deleted_edges
+                .contains(&(current, neighbor, edge_type))
+                || self.push_candidate(current, current_depth, neighbor, edge_type)
+            {
+                continue;
+            }
+            return true;
+        }
+
+        false
+    }
+
+    fn push_candidate(
+        &mut self,
+        current: u32,
+        current_depth: i32,
+        neighbor: u32,
+        edge_type: u8,
+    ) -> bool {
+        if !candidate_allowed(
+            self.node_store,
+            self.filter_index,
+            self.config,
+            neighbor,
+            edge_type,
+            self.visited,
+            self.has_filters,
+        ) {
+            return true;
+        }
+
+        self.visited.insert(neighbor);
+        self.depth_map[neighbor as usize] = current_depth + 1;
+        self.parent[neighbor as usize] = current;
+        self.parent_edge_type[neighbor as usize] = edge_type;
+        *self.nodes_visited += 1;
+
+        if *self.nodes_visited >= self.config.max_nodes {
+            return false;
+        }
+
+        if current_depth + 1 < self.config.max_depth {
+            self.stack.push(neighbor);
+            if self.stack.len() as u32 >= self.config.max_frontier {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 /// Reconstruct the path from seed to a specific node using the parent array.
@@ -736,6 +781,58 @@ mod tests {
             result.visited.contains(4),
             "unaffected base edge should still stream"
         );
+    }
+
+    #[test]
+    fn dfs_streams_reverse_neighbors_without_materializing_vector() {
+        let mut ns = NodeStore::new();
+        for idx in 0..4u32 {
+            ns.add_node(100, format!("PK-{}", idx));
+        }
+        let es = EdgeStore::from_edges(
+            4,
+            vec![
+                RawEdge {
+                    source: 0,
+                    target: 1,
+                    type_id: 1,
+                    weight: None,
+                },
+                RawEdge {
+                    source: 0,
+                    target: 2,
+                    type_id: 1,
+                    weight: None,
+                },
+            ],
+            false,
+        );
+        let fi = FilterIndex::new();
+        let mut overlay_insert_edges = std::collections::HashMap::new();
+        overlay_insert_edges.insert(0, vec![(3, 1), (2, 1), (3, 1)]);
+
+        let config = BfsConfig {
+            seed_node: 0,
+            max_depth: 10,
+            max_nodes: 2,
+            max_frontier: 100000,
+            edge_type_filter: crate::types::EdgeTypeFilter::All,
+            filter_ops: vec![],
+            tenant: None,
+            tenanted_table_oids: HashSet::new(),
+            tenant_membership: std::collections::HashMap::new(),
+            overlay_insert_edges,
+            overlay_deleted_edges: HashSet::new(),
+        };
+
+        let result = execute_dfs(&ns, &es, &fi, &config);
+
+        assert!(result.visited.contains(0));
+        assert!(
+            result.visited.contains(3),
+            "DFS should preserve the previous reversed overlay expansion order"
+        );
+        assert_eq!(result.visited.len(), 2);
     }
 
     #[test]
