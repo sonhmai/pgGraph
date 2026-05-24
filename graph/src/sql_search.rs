@@ -8,13 +8,80 @@ use crate::catalog::{
 use crate::quote::quote_ident;
 use crate::{acl, safety, types};
 use pgrx::prelude::*;
-use std::collections::HashSet;
+use std::borrow::Cow;
 
 struct SourceSearchStatement {
     table_oid: u32,
     table_name: String,
+    display_table_name: String,
     query: String,
     params: Vec<String>,
+}
+
+enum PreparedSearchExpected<'a> {
+    Text(Cow<'a, str>),
+    Tokens(Vec<String>),
+}
+
+struct SearchValueMatcher<'a> {
+    mode: types::SearchMode,
+    case_sensitive: bool,
+    expected: PreparedSearchExpected<'a>,
+}
+
+impl<'a> SearchValueMatcher<'a> {
+    fn new(expected: &'a str, mode: types::SearchMode, case_sensitive: bool) -> Self {
+        let comparable_expected = if case_sensitive {
+            Cow::Borrowed(expected)
+        } else {
+            Cow::Owned(expected.to_lowercase())
+        };
+        let expected = match mode {
+            types::SearchMode::Token => PreparedSearchExpected::Tokens(
+                comparable_expected
+                    .split(|ch: char| !ch.is_alphanumeric())
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            _ => PreparedSearchExpected::Text(comparable_expected),
+        };
+
+        Self {
+            mode,
+            case_sensitive,
+            expected,
+        }
+    }
+
+    fn matches(&self, actual: &str) -> bool {
+        let actual = if self.case_sensitive {
+            Cow::Borrowed(actual)
+        } else {
+            Cow::Owned(actual.to_lowercase())
+        };
+
+        match (&self.expected, self.mode) {
+            (PreparedSearchExpected::Text(expected), types::SearchMode::Contains) => {
+                actual.contains(expected.as_ref())
+            }
+            (PreparedSearchExpected::Text(expected), types::SearchMode::Exact) => {
+                actual == expected.as_ref()
+            }
+            (PreparedSearchExpected::Text(expected), types::SearchMode::Prefix) => {
+                actual.starts_with(expected.as_ref())
+            }
+            (PreparedSearchExpected::Tokens(expected_tokens), types::SearchMode::Token) => {
+                expected_tokens.iter().all(|expected| {
+                    actual
+                        .split(|ch: char| !ch.is_alphanumeric())
+                        .filter(|token| !token.is_empty())
+                        .any(|token| token == expected)
+                })
+            }
+            _ => false,
+        }
+    }
 }
 
 pub(crate) fn validate_search_request(
@@ -117,6 +184,7 @@ fn source_table_search_statements(
         statements.push(SourceSearchStatement {
             table_oid,
             table_name: table_name.as_sql().to_string(),
+            display_table_name: regclass_text(table_oid).unwrap_or_else(|_| table_oid.to_string()),
             query,
             params,
         });
@@ -210,6 +278,8 @@ pub(crate) fn source_table_search_rows(
         Some(candidate_limit),
     )?;
     let mut rows = Vec::new();
+    let matcher = SearchValueMatcher::new(property_value, mode, case_sensitive);
+    let match_type = mode.as_match_type().to_string();
 
     for statement in statements {
         Spi::connect(|client| {
@@ -241,7 +311,7 @@ pub(crate) fn source_table_search_rows(
                 else {
                     continue;
                 };
-                if !search_value_matches(&actual, property_value, mode, case_sensitive) {
+                if !matcher.matches(&actual) {
                     continue;
                 }
                 let node = row.get::<pgrx::JsonB>(3).map_err(|e| {
@@ -250,12 +320,11 @@ pub(crate) fn source_table_search_rows(
                 rows.push((
                     pgrx::pg_sys::Oid::from_u32(statement.table_oid),
                     node_id,
-                    mode.as_match_type().to_string(),
+                    match_type.clone(),
                     1.0,
                     true,
                     node,
-                    regclass_text(statement.table_oid)
-                        .unwrap_or_else(|_| statement.table_oid.to_string()),
+                    statement.display_table_name.clone(),
                 ));
             }
             Ok::<(), safety::GraphError>(())
@@ -369,30 +438,68 @@ fn escape_regex_pattern(value: &str) -> String {
     escaped
 }
 
-pub(crate) fn search_value_matches(
+#[cfg(test)]
+fn search_value_matches(
     actual: &str,
     expected: &str,
     mode: types::SearchMode,
     case_sensitive: bool,
 ) -> bool {
-    let (actual, expected) = if case_sensitive {
-        (actual.to_string(), expected.to_string())
-    } else {
-        (actual.to_lowercase(), expected.to_lowercase())
-    };
-    match mode {
-        types::SearchMode::Contains => actual.contains(&expected),
-        types::SearchMode::Exact => actual == expected,
-        types::SearchMode::Prefix => actual.starts_with(&expected),
-        types::SearchMode::Token => {
-            let actual_tokens = actual
-                .split(|ch: char| !ch.is_alphanumeric())
-                .filter(|token| !token.is_empty())
-                .collect::<HashSet<_>>();
-            expected
-                .split(|ch: char| !ch.is_alphanumeric())
-                .filter(|token| !token.is_empty())
-                .all(|token| actual_tokens.contains(token))
-        }
+    SearchValueMatcher::new(expected, mode, case_sensitive).matches(actual)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SearchMode;
+
+    #[test]
+    fn search_value_matcher_preserves_text_modes_and_case_handling() {
+        assert!(search_value_matches(
+            "Alpha Source",
+            "alpha",
+            SearchMode::Contains,
+            false
+        ));
+        assert!(!search_value_matches(
+            "Alpha Source",
+            "alpha",
+            SearchMode::Contains,
+            true
+        ));
+        assert!(search_value_matches(
+            "Alpha Source",
+            "Alpha",
+            SearchMode::Prefix,
+            true
+        ));
+        assert!(search_value_matches(
+            "Alpha Source",
+            "alpha source",
+            SearchMode::Exact,
+            false
+        ));
+    }
+
+    #[test]
+    fn search_value_matcher_preserves_token_semantics() {
+        assert!(search_value_matches(
+            "Alpha-Source Match",
+            "source alpha",
+            SearchMode::Token,
+            false
+        ));
+        assert!(!search_value_matches(
+            "Alpha-Source Match",
+            "source beta",
+            SearchMode::Token,
+            false
+        ));
+        assert!(search_value_matches(
+            "Alpha Source",
+            "",
+            SearchMode::Token,
+            false
+        ));
     }
 }

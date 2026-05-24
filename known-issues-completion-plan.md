@@ -456,8 +456,6 @@ Tracked P1 rows and specific plans:
 - `Traversal internals`: benchmark reusable BFS/DFS scratch buffers and sparse
   result metadata; keep dense traversal result vectors for cases where path
   reconstruction across many returned rows remains faster.
-- `Source search recheck`: reduce per-candidate allocation while preserving
-  SQL/Rust predicate parity.
 - `Aggregation hydration`: use borrowed lookup shapes internally where pgrx row
   lifetimes allow it.
 
@@ -543,6 +541,16 @@ Completed P1 rows:
   repeated catalog estimate reads. Pre/post timing was recorded in
   `/private/tmp/pggraph-build-spi-setup-pre-benchmark.md` and
   `/private/tmp/pggraph-build-spi-setup-post-benchmark.md`.
+- `Source search recheck`: completed in
+  `perf(search): reuse source recheck state`. Source-row search now prepares
+  Rust match state once per query, reuses normalized token/text expectations
+  for every candidate row, and resolves the source-table display label once per
+  generated statement. Regression note: case-insensitive verification still
+  lowercases each candidate value to preserve SQL/Rust parity, but it no longer
+  lowercases the query value or builds a token set for every candidate. Pre/post
+  timing was recorded in
+  `/private/tmp/pggraph-source-search-recheck-pre-benchmark.md` and
+  `/private/tmp/pggraph-source-search-recheck-post-benchmark.md`.
 
 Completion criteria:
 

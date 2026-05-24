@@ -123,7 +123,9 @@ Missing per-edge weights in a weighted store default to cost `1`.
 ## Source-Table Search
 
 Search is intentionally not a graph-artifact lookup. `sql_search.rs` builds SQL
-over registered source tables and verifies matches against source rows.
+over registered source tables and verifies matches against source rows. The
+Rust recheck prepares query match state once and reuses it across candidate
+rows so SQL/Rust predicate parity does not require per-row query normalization.
 
 Search modes:
 
