@@ -724,7 +724,8 @@ mod tests {
             .expect("valid mmap node metadata")
         };
         // SAFETY: The validated metadata above outlives this test store.
-        eng.node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
+        let node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
+        eng.install_mmap_node_store_for_test(node_store);
 
         let result = sync_insert(&mut eng, 42, "U-1", None);
         assert!(result.is_ok());
@@ -777,7 +778,8 @@ mod tests {
             .expect("valid mmap node metadata")
         };
         // SAFETY: The validated metadata above outlives this test store.
-        eng.node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
+        let node_store = unsafe { crate::node_store::NodeStore::from_mmap(arrays) };
+        eng.install_mmap_node_store_for_test(node_store);
 
         let result = sync_truncate(&mut eng, 42);
         assert_eq!(result.unwrap(), 0);

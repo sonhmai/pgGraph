@@ -35,7 +35,23 @@ pub enum ResolutionStore {
     Finalized(Vec<u8>),
     /// Loaded from `.pggraph` file via mmap. The mmap handle is held by
     /// [`Engine::_mmap`]; resolution lookups borrow that section's bytes.
-    MmapBacked,
+    MmapBacked(MmapResolutionState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmapResolutionState {
+    offset: usize,
+    len: usize,
+}
+
+impl MmapResolutionState {
+    pub fn new(offset: usize, len: usize) -> Self {
+        Self { offset, len }
+    }
+
+    fn range(&self) -> std::ops::Range<usize> {
+        self.offset..self.offset + self.len
+    }
 }
 
 /// The core graph engine. Holds all data stores.
@@ -71,10 +87,6 @@ pub struct Engine {
     /// mmap handle. Keeps the mapping alive for mmap-backed NodeStore arrays,
     /// forward EdgeStore arrays, and ResolutionIndex bytes.
     pub _mmap: Option<memmap2::Mmap>,
-    /// Offset and length of the resolution section within the mmap.
-    pub mmap_resolution_offset: usize,
-    pub mmap_resolution_len: usize,
-
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub edge_buffer: Vec<EdgeMutation>,
@@ -197,8 +209,6 @@ impl Engine {
             resolution_store: ResolutionStore::Builder(ResolutionIndexBuilder::new()),
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
-            mmap_resolution_offset: 0,
-            mmap_resolution_len: 0,
             edge_buffer: Vec::new(),
             is_read_only: false,
             read_only_reason: None,
@@ -329,6 +339,27 @@ impl Engine {
         self.last_vacuum = vacuumed_at;
     }
 
+    pub fn install_mmap_backed_graph(
+        &mut self,
+        node_store: NodeStore,
+        edge_store: EdgeStore,
+        filter_index: FilterIndex,
+        edge_type_registry: Vec<String>,
+        mmap: memmap2::Mmap,
+        resolution_state: MmapResolutionState,
+    ) {
+        let reverse_edge_store = edge_store.reversed();
+        self.node_store = node_store;
+        self.edge_store = edge_store;
+        self.reverse_edge_store = reverse_edge_store;
+        self.filter_index = filter_index;
+        self.edge_type_registry = edge_type_registry;
+        self.rebuild_table_membership();
+        self.finish_build(None);
+        self.resolution_store = ResolutionStore::MmapBacked(resolution_state);
+        self._mmap = Some(mmap);
+    }
+
     /// Register a new edge type label. Returns the u8 type ID.
     pub fn register_edge_type(&mut self, label: &str) -> GraphResult<u8> {
         // Check if already registered
@@ -367,11 +398,9 @@ impl Engine {
             ResolutionStore::Finalized(bytes) => {
                 ResolutionIndex::from_bytes(bytes)?.resolve_verified(table_oid, pk, verify)
             }
-            ResolutionStore::MmapBacked => {
+            ResolutionStore::MmapBacked(resolution_state) => {
                 let mmap = self._mmap.as_ref()?;
-                let start = self.mmap_resolution_offset;
-                let end = start + self.mmap_resolution_len;
-                let data = &mmap[start..end];
+                let data = &mmap[resolution_state.range()];
                 ResolutionIndex::from_bytes(data)?.resolve_verified(table_oid, pk, verify)
             }
         }
@@ -431,6 +460,12 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_mmap_node_store_for_test(&mut self, node_store: NodeStore) {
+        debug_assert!(node_store.is_mmap_backed());
+        self.node_store = node_store;
+    }
+
     /// Finalize the resolution index: convert compact entries → sorted array.
     /// Called after node ingestion. Drops the build accumulator before edge linking.
     pub fn finalize_resolution(&mut self) {
@@ -451,11 +486,9 @@ impl Engine {
         match &self.resolution_store {
             ResolutionStore::Builder(builder) => builder.to_bytes(),
             ResolutionStore::Finalized(bytes) => bytes.clone(),
-            ResolutionStore::MmapBacked => {
+            ResolutionStore::MmapBacked(resolution_state) => {
                 if let Some(mmap) = &self._mmap {
-                    let start = self.mmap_resolution_offset;
-                    let end = start + self.mmap_resolution_len;
-                    mmap[start..end].to_vec()
+                    mmap[resolution_state.range()].to_vec()
                 } else {
                     ResolutionIndexBuilder::new().to_bytes()
                 }
@@ -768,7 +801,7 @@ impl Engine {
         let resolution_bytes = match &self.resolution_store {
             ResolutionStore::Builder(builder) => builder.estimated_heap_bytes(),
             ResolutionStore::Finalized(bytes) => bytes.capacity(),
-            ResolutionStore::MmapBacked => 0,
+            ResolutionStore::MmapBacked(_) => 0,
         } + self.resolution_delta.estimated_heap_bytes();
         let registry_bytes = self.edge_type_registry.capacity() * std::mem::size_of::<String>()
             + self

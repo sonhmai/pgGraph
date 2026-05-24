@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 
 use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
-use crate::engine::{Engine, ResolutionStore};
+use crate::engine::{Engine, MmapResolutionState};
 use crate::filter_index::FilterIndex;
 use crate::node_store::{MmapNodeArrayParts, MmapNodeArrays, NodeStore};
 use crate::resolution_index::{ResolutionIndex, ENTRY_SIZE as RESOLUTION_ENTRY_SIZE};
@@ -781,22 +781,17 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     }
 
     let mut engine = Engine::new();
-    engine.node_store = node_store;
-    engine.edge_store = edge_store;
-    // Reverse CSR is derived from the forward graph into owned heap so inbound
-    // traversal remains O(degree) without scanning all forward edges.
-    engine.reverse_edge_store = engine.edge_store.reversed();
-    engine.filter_index = filter_index;
-    engine.edge_type_registry = edge_type_registry;
-    engine.rebuild_table_membership();
-    engine.built = true;
+    engine.install_mmap_backed_graph(
+        node_store,
+        edge_store,
+        filter_index,
+        edge_type_registry,
+        mmap,
+        MmapResolutionState::new(ri_start, ri_len),
+    );
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
-        engine.applied_sync_id = applied_sync_id;
+        engine.record_applied_sync_id(applied_sync_id);
     }
-    engine.resolution_store = ResolutionStore::MmapBacked;
-    engine._mmap = Some(mmap);
-    engine.mmap_resolution_offset = ri_start;
-    engine.mmap_resolution_len = ri_len;
 
     Ok(engine)
 }
