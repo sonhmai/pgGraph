@@ -444,7 +444,7 @@ fn apply_sync_log_entry_with_context(
         None => context.table_oid_or_lookup(&entry.table_name)?,
     };
     let parsed = parse_sync_properties(entry.properties.as_deref());
-    let tenant = tenant_from_properties_with_context(table_oid, &parsed, context)?;
+    let tenant_change = tenant_change_from_entry(table_oid, entry, &parsed, context)?;
     let edge_mutation_reservation =
         sync_entry_edge_mutation_reservation(entry, table_oid, context)?;
 
@@ -463,7 +463,7 @@ fn apply_sync_log_entry_with_context(
                             entry.id
                         ))
                     })?;
-                sync::sync_insert(&mut eng, table_oid, pk, tenant.as_deref())?;
+                sync::sync_insert(&mut eng, table_oid, pk, tenant_change.new.as_deref())?;
                 refresh_filter_index_from_sync(
                     &mut eng,
                     table_oid,
@@ -496,7 +496,13 @@ fn apply_sync_log_entry_with_context(
                     engine::MutationKind::Delete,
                 )?;
                 if old_pk == new_pk {
-                    sync::sync_update(&mut eng, table_oid, new_pk, tenant.as_deref())?;
+                    sync::sync_update_tenant(
+                        &mut eng,
+                        table_oid,
+                        new_pk,
+                        tenant_change.old.as_deref(),
+                        tenant_change.new.as_deref(),
+                    )?;
                     refresh_filter_index_from_sync(
                         &mut eng,
                         table_oid,
@@ -506,7 +512,13 @@ fn apply_sync_log_entry_with_context(
                         entry,
                     )?;
                 } else {
-                    sync::sync_replace_pk(&mut eng, table_oid, old_pk, new_pk, tenant.as_deref())?;
+                    sync::sync_delete_tenant(
+                        &mut eng,
+                        table_oid,
+                        old_pk,
+                        tenant_change.old.as_deref(),
+                    )?;
+                    sync::sync_insert(&mut eng, table_oid, new_pk, tenant_change.new.as_deref())?;
                     refresh_filter_index_from_sync(
                         &mut eng,
                         table_oid,
@@ -543,7 +555,7 @@ fn apply_sync_log_entry_with_context(
                     entry.old_row.as_deref(),
                     engine::MutationKind::Delete,
                 )?;
-                sync::sync_delete(&mut eng, table_oid, pk)?;
+                sync::sync_delete_tenant(&mut eng, table_oid, pk, tenant_change.old.as_deref())?;
                 stats.deletes += 1;
             }
             SyncOp::Truncate => {
@@ -992,25 +1004,53 @@ fn delete_legacy_sync_entries(applied_ids: &[i64]) -> safety::GraphResult<()> {
     .map_err(|e| safety::GraphError::Internal(format!("legacy sync buffer cleanup failed: {}", e)))
 }
 
-fn tenant_from_properties_with_context(
+#[derive(Debug, Default)]
+struct TenantChange {
+    old: Option<String>,
+    new: Option<String>,
+}
+
+fn tenant_change_from_entry(
     table_oid: u32,
+    entry: &SyncLogEntry,
     properties: &[(String, String)],
     context: &SyncReplayContext,
-) -> safety::GraphResult<Option<String>> {
-    let Some(table) = context
+) -> safety::GraphResult<TenantChange> {
+    let Some(tenant_column) = tenant_column_for_table(table_oid, context) else {
+        return Ok(TenantChange::default());
+    };
+    let old = entry
+        .old_row
+        .as_deref()
+        .and_then(|row| tenant_from_row(row, &tenant_column).transpose())
+        .transpose()?;
+    let new = entry
+        .new_row
+        .as_deref()
+        .and_then(|row| tenant_from_row(row, &tenant_column).transpose())
+        .transpose()?
+        .or_else(|| {
+            properties
+                .iter()
+                .find(|(column, _)| column == &tenant_column)
+                .map(|(_, value)| value.clone())
+        });
+    Ok(TenantChange { old, new })
+}
+
+fn tenant_column_for_table(table_oid: u32, context: &SyncReplayContext) -> Option<String> {
+    context
         .tables
         .iter()
         .find(|table| context.table_oid(&table.table_name) == Some(table_oid))
-    else {
-        return Ok(None);
-    };
-    let Some(tenant_column) = &table.tenant_column else {
-        return Ok(None);
-    };
-    Ok(properties
-        .iter()
-        .find(|(column, _)| column == tenant_column)
-        .map(|(_, value)| value.clone()))
+        .and_then(|table| table.tenant_column.clone())
+}
+
+fn tenant_from_row(row_json: &str, tenant_column: &str) -> safety::GraphResult<Option<String>> {
+    let row: serde_json::Value = serde_json::from_str(row_json).map_err(|e| {
+        safety::GraphError::Internal(format!("sync tenant row JSON parse failed: {}", e))
+    })?;
+    Ok(row_text_value(&row, tenant_column))
 }
 
 pub(crate) fn resolve_tenant_scope(
@@ -1075,10 +1115,13 @@ pub(crate) fn parse_sync_properties(raw: Option<&str>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_sync_op, parse_sync_properties, required_sync_i64, required_sync_string, SyncOp,
+        parse_sync_op, parse_sync_properties, required_sync_i64, required_sync_string,
+        tenant_change_from_entry, SyncLogEntry, SyncOp, SyncReplayContext,
     };
+    use crate::builder::{PrimaryKeySpec, PropertyColumns, RegisteredTable};
     use crate::safety::GraphError;
     use proptest::prelude::*;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn parse_sync_op_accepts_supported_codes() {
@@ -1095,6 +1138,46 @@ mod tests {
 
         assert!(matches!(err, GraphError::Internal(_)));
         assert!(err.to_string().contains("unsupported operation 'X'"));
+    }
+
+    #[test]
+    fn tenant_change_prefers_old_and_new_row_images() {
+        let context = SyncReplayContext {
+            tables: vec![RegisteredTable {
+                table_name: "public.accounts".to_string(),
+                id_columns: PrimaryKeySpec::from_columns(vec!["id".to_string()]),
+                columns: PropertyColumns::from_columns(vec!["name".to_string()]),
+                tenant_column: Some("tenant_id".to_string()),
+            }],
+            edges: Vec::new(),
+            filters: Vec::new(),
+            table_oids: HashMap::from([("public.accounts".to_string(), 42)]),
+            all_table_oids: vec![42],
+            edge_source_tables: HashSet::new(),
+            edge_source_oids: HashSet::new(),
+        };
+        let entry = SyncLogEntry {
+            id: 1,
+            op: SyncOp::Update,
+            table_oid: Some(42),
+            table_name: "public.accounts".to_string(),
+            old_pk: Some("a1".to_string()),
+            new_pk: Some("a1".to_string()),
+            properties: Some(r#"{"tenant_id":"tenant-from-properties"}"#.to_string()),
+            old_row: Some(r#"{"id":"a1","tenant_id":"tenant-old"}"#.to_string()),
+            new_row: Some(r#"{"id":"a1","tenant_id":"tenant-new"}"#.to_string()),
+        };
+
+        let change = tenant_change_from_entry(
+            42,
+            &entry,
+            &parse_sync_properties(entry.properties.as_deref()),
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(change.old.as_deref(), Some("tenant-old"));
+        assert_eq!(change.new.as_deref(), Some("tenant-new"));
     }
 
     #[test]

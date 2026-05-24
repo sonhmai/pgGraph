@@ -46,6 +46,11 @@ durable log keeps `old_pk` and `new_pk` nullable because valid operations need
 different PK images, while the legacy buffer requires its coalesced old/new PK
 fields before replay.
 
+For tables with a registered `tenant_column`, durable sync replay reads old and
+new tenant values from captured row images when available. Tenant bitmap
+maintenance can then touch only the affected old/new tenant entries; legacy rows
+without row images retain the broader compatibility fallback.
+
 ## Trigger Capture
 
 Generated triggers capture:

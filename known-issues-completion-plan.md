@@ -267,22 +267,37 @@ Completion criteria:
 
 Tracked row: `Tenant bitmap mutation`
 
+Status: completed in `fix(sync): bound tenant bitmap updates`
+
 Plan:
 
-- Parse old and new tenant values at the sync boundary.
-- Update only the bitmaps for tenants that changed during insert, update, and
-  delete replay.
-- Keep a fallback path only for older payloads that lack tenant values, and make
-  that fallback visible in tests or docs.
+- Durable trigger rows already capture `old_row` and `new_row` payloads for
+  update, delete, and primary-key replacement replay.
+- Sync replay reads old and new tenant values from row images for tables with a
+  registered `tenant_column`, falling back to properties for legacy insert-style
+  payloads.
+- `sync_update_tenant` and `sync_delete_tenant` mutate only the known old/new
+  tenant bitmaps when old tenant data is available.
+- Primary-key replacement uses bounded delete plus insert tenant maintenance
+  instead of a broad tenant-bitmap scan.
+- Legacy or manual sync rows without old tenant data retain the broad-removal
+  compatibility fallback.
 
 Regression risk:
 
-- Carrying old/new tenant payloads increases trigger JSON size.
-- Incorrect fallback logic can leave tenant indexes stale.
+- No sync-log schema change is required; the durable trigger row images already
+  contain the tenant source data.
+- Legacy rows without old tenant data still use the previous broad-removal
+  fallback, preserving correctness at the cost of older-path work.
+- Bounded update and delete reduce tenant-bitmap work for normal durable replay
+  and do not add graph artifact fields.
 
 Completion criteria:
 
-- Tenant moves and deletes mutate only affected tenant membership in tests.
+- Unit coverage verifies old/new tenant extraction prefers row images over
+  properties.
+- Unit coverage verifies update and delete preserve unrelated tenant bitmaps
+  when the old tenant is known.
 
 ### Internal Scheduler
 

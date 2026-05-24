@@ -104,6 +104,16 @@ pub fn sync_update(
     pk: &str,
     tenant: Option<&str>,
 ) -> GraphResult<()> {
+    sync_update_tenant(engine, table_oid, pk, None, tenant)
+}
+
+pub fn sync_update_tenant(
+    engine: &mut Engine,
+    table_oid: u32,
+    pk: &str,
+    old_tenant: Option<&str>,
+    tenant: Option<&str>,
+) -> GraphResult<()> {
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
@@ -117,12 +127,20 @@ pub fn sync_update(
             pk: pk.to_string(),
         })?;
 
-    if let Some(tenant) = tenant {
+    if old_tenant.is_some() || tenant.is_some() {
         engine.tenanted_table_oids.insert(table_oid);
-        for bitmap in engine.tenant_membership.values_mut() {
-            bitmap.remove(node_idx);
+        if let Some(old_tenant) = old_tenant {
+            if let Some(bitmap) = engine.tenant_membership.get_mut(old_tenant) {
+                bitmap.remove(node_idx);
+            }
+        } else {
+            for bitmap in engine.tenant_membership.values_mut() {
+                bitmap.remove(node_idx);
+            }
         }
-        engine.insert_tenant_membership(tenant, node_idx);
+        if let Some(tenant) = tenant {
+            engine.insert_tenant_membership(tenant, node_idx);
+        }
     }
 
     Ok(())
@@ -133,6 +151,7 @@ pub fn sync_update(
 /// The old key is tombstoned and the new key is inserted as a fresh active node.
 /// Edge CSR storage is immutable. Callers add delete/insert edge overlays from
 /// old and new row images before invoking this helper.
+#[cfg(any(test, feature = "development", feature = "fuzzing"))]
 pub fn sync_replace_pk(
     engine: &mut Engine,
     table_oid: u32,
@@ -152,7 +171,17 @@ pub fn sync_replace_pk(
 ///
 /// Tombstones the node (sets is_active = false).
 /// The node slot remains allocated until the next vacuum/rebuild.
+#[cfg(any(test, feature = "development", feature = "fuzzing"))]
 pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult<()> {
+    sync_delete_tenant(engine, table_oid, pk, None)
+}
+
+pub fn sync_delete_tenant(
+    engine: &mut Engine,
+    table_oid: u32,
+    pk: &str,
+    old_tenant: Option<&str>,
+) -> GraphResult<()> {
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
@@ -170,8 +199,14 @@ pub fn sync_delete(engine: &mut Engine, table_oid: u32, pk: &str) -> GraphResult
     engine.node_store.deactivate(node_idx);
     engine.remove_table_membership(table_oid, node_idx);
 
-    for bitmap in engine.tenant_membership.values_mut() {
-        bitmap.remove(node_idx);
+    if let Some(old_tenant) = old_tenant {
+        if let Some(bitmap) = engine.tenant_membership.get_mut(old_tenant) {
+            bitmap.remove(node_idx);
+        }
+    } else {
+        for bitmap in engine.tenant_membership.values_mut() {
+            bitmap.remove(node_idx);
+        }
     }
 
     Ok(())
@@ -583,6 +618,40 @@ mod tests {
                 .unwrap_or_default(),
             1
         );
+    }
+
+    #[test]
+    fn tenant_update_and_delete_use_known_old_tenant_when_available() {
+        let mut eng = test_engine();
+        sync_insert(&mut eng, 42, "A", Some("tenant-a")).unwrap();
+        let node_idx = eng.resolve(42, "A").unwrap();
+        eng.insert_tenant_membership("unrelated-tenant", node_idx);
+
+        sync_update_tenant(&mut eng, 42, "A", Some("tenant-a"), Some("tenant-b")).unwrap();
+
+        assert!(!eng
+            .tenant_membership
+            .get("tenant-a")
+            .is_some_and(|bitmap| bitmap.contains(node_idx)));
+        assert!(eng
+            .tenant_membership
+            .get("tenant-b")
+            .is_some_and(|bitmap| bitmap.contains(node_idx)));
+        assert!(eng
+            .tenant_membership
+            .get("unrelated-tenant")
+            .is_some_and(|bitmap| bitmap.contains(node_idx)));
+
+        sync_delete_tenant(&mut eng, 42, "A", Some("tenant-b")).unwrap();
+
+        assert!(!eng
+            .tenant_membership
+            .get("tenant-b")
+            .is_some_and(|bitmap| bitmap.contains(node_idx)));
+        assert!(eng
+            .tenant_membership
+            .get("unrelated-tenant")
+            .is_some_and(|bitmap| bitmap.contains(node_idx)));
     }
 
     proptest! {
