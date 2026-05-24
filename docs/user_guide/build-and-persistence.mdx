@@ -39,6 +39,9 @@ SELECT * FROM graph.build_status('<build_id>');
 The background path creates a row in `graph._build_jobs` and launches a dynamic
 background worker. If worker launch fails, the job row is marked failed and the
 SQL call reports the error.
+If the worker starts and the build later fails, pgGraph records the failed
+status and error detail from a fresh worker transaction so
+`graph.build_status('<build_id>')` remains the operator source of truth.
 
 ## Return Columns
 

@@ -333,24 +333,35 @@ Completion criteria:
 
 Tracked row: `Background job failures`
 
+Status: completed in `fix(jobs): persist worker failure status`
+
 Plan:
 
-- Split job execution from failure-status recording.
-- Record failure state in a separate transaction or independent SPI context
-  after the work transaction aborts.
-- Add a test-only failing job path that proves final failure status survives an
-  aborted worker transaction.
+- Build and maintenance job execution now return work errors without trying to
+  update failure status inside the same transaction.
+- Background-worker entrypoints run the work transaction first, then record
+  failed status and error detail from a fresh worker transaction when the work
+  transaction returns an error.
+- Failure updates are idempotent for retries: queued, running, and already
+  failed rows can receive failure detail, but completed rows are not overwritten.
+- Operator docs describe `build_status()` and `maintenance_status()` as the
+  source of truth for worker failure detail.
 
 Regression risk:
 
 - Separate transactions can briefly show an in-progress job before the failure
-  status is recorded.
-- Failure recording must be idempotent so retries do not corrupt job history.
+  status transaction commits.
+- Failure recording now avoids overwriting completed jobs; a late failure after
+  completion leaves the completed status intact.
+- No hot-path traversal or build-memory regression; changes are limited to
+  background-worker status updates and docs.
 
 Completion criteria:
 
-- Worker failures have durable final status and error detail even when the work
-  transaction aborts.
+- Worker failures have durable final status and error detail after the work
+  transaction returns an error.
+- Regression tests verify failure detail is stored and late failure updates do
+  not corrupt completed job history.
 
 ## Milestone 4 - Persistence
 

@@ -226,6 +226,94 @@ fn maintenance_status_reads_durable_job_rows() {
 }
 
 #[pg_test]
+fn failed_job_status_updates_are_idempotent_and_do_not_overwrite_completed_jobs() {
+    reset_and_create_fixtures();
+
+    let failed_build_id = super::create_build_job().expect("create failed build job");
+    super::update_build_job_failed(&failed_build_id, "build exploded")
+        .expect("mark build failed");
+    let failed_build = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'failed'
+                AND progress_phase = 'failed'
+                AND progress_message = 'build exploded'
+                AND error = 'build exploded'
+                AND finished_at IS NOT NULL
+         FROM graph._build_jobs
+         WHERE build_id = {}",
+        super::sql_literal(&failed_build_id)
+    ))
+    .expect("failed build status read")
+    .unwrap_or(false);
+    assert!(failed_build);
+
+    let completed_build_id = super::create_build_job().expect("create completed build job");
+    let build_result = super::BuildExecutionResult {
+        nodes_loaded: 1,
+        edges_loaded: 0,
+        build_time_ms: 1.0,
+        memory_used_mb: 1.0,
+        sync_mode: "manual".to_string(),
+    };
+    super::update_build_job_completed(&completed_build_id, &build_result)
+        .expect("mark build completed");
+    super::update_build_job_failed(&completed_build_id, "late build failure")
+        .expect("late build failure update is idempotent");
+    let completed_build_preserved = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'completed'
+                AND error IS NULL
+                AND progress_message = 'build completed'
+         FROM graph._build_jobs
+         WHERE build_id = {}",
+        super::sql_literal(&completed_build_id)
+    ))
+    .expect("completed build status read")
+    .unwrap_or(false);
+    assert!(completed_build_preserved);
+
+    let failed_maintenance_id =
+        super::create_maintenance_job().expect("create failed maintenance job");
+    super::update_maintenance_job_failed(&failed_maintenance_id, "maintenance exploded")
+        .expect("mark maintenance failed");
+    let failed_maintenance = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'failed'
+                AND progress_phase = 'failed'
+                AND progress_message = 'maintenance exploded'
+                AND error = 'maintenance exploded'
+                AND finished_at IS NOT NULL
+         FROM graph._maintenance_jobs
+         WHERE job_id = {}",
+        super::sql_literal(&failed_maintenance_id)
+    ))
+    .expect("failed maintenance status read")
+    .unwrap_or(false);
+    assert!(failed_maintenance);
+
+    let completed_maintenance_id =
+        super::create_maintenance_job().expect("create completed maintenance job");
+    let maintenance_result = super::MaintenanceExecutionResult {
+        sync_rows_applied: 0,
+        nodes_after: 1,
+        edges_after: 0,
+        vacuum_time_ms: 1.0,
+    };
+    super::update_maintenance_job_completed(&completed_maintenance_id, &maintenance_result)
+        .expect("mark maintenance completed");
+    super::update_maintenance_job_failed(&completed_maintenance_id, "late maintenance failure")
+        .expect("late maintenance failure update is idempotent");
+    let completed_maintenance_preserved = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'completed'
+                AND error IS NULL
+                AND progress_message = 'maintenance completed'
+         FROM graph._maintenance_jobs
+         WHERE job_id = {}",
+        super::sql_literal(&completed_maintenance_id)
+    ))
+    .expect("completed maintenance status read")
+    .unwrap_or(false);
+    assert!(completed_maintenance_preserved);
+}
+
+#[pg_test]
 fn traverse_accepts_v1_node_ref_array_starts() {
     reset_and_create_fixtures();
     Spi::run(

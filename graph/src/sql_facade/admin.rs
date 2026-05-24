@@ -486,11 +486,25 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
             build_job_row(&metadata.job_id).is_ok_and(|row| row.is_some())
         });
         if job_visible {
-            BackgroundWorker::transaction(|| {
-                if let Err(err) = run_build_job(&metadata.job_id) {
-                    pgrx::warning!("graph concurrent build {} failed: {}", metadata.job_id, err);
+            let result = BackgroundWorker::transaction(|| run_build_job(&metadata.job_id));
+            if let Err(err) = result {
+                let message = err.to_string();
+                let record_result = BackgroundWorker::transaction(|| {
+                    update_build_job_failed(&metadata.job_id, &message)
+                });
+                if let Err(record_err) = record_result {
+                    pgrx::warning!(
+                        "graph concurrent build {} failed and failure status could not be recorded: {}",
+                        metadata.job_id,
+                        record_err
+                    );
                 }
-            });
+                pgrx::warning!(
+                    "graph concurrent build {} failed: {}",
+                    metadata.job_id,
+                    message
+                );
+            }
             return;
         }
         if !BackgroundWorker::wait_latch(Some(Duration::from_millis(100))) {
@@ -532,11 +546,21 @@ pub extern "C-unwind" fn graph_maintenance_worker_main(_arg: pgrx::pg_sys::Datum
             maintenance_job_row(&metadata.job_id).is_ok_and(|row| row.is_some())
         });
         if job_visible {
-            BackgroundWorker::transaction(|| {
-                if let Err(err) = run_maintenance_job(&metadata.job_id) {
-                    pgrx::warning!("graph maintenance {} failed: {}", metadata.job_id, err);
+            let result = BackgroundWorker::transaction(|| run_maintenance_job(&metadata.job_id));
+            if let Err(err) = result {
+                let message = err.to_string();
+                let record_result = BackgroundWorker::transaction(|| {
+                    update_maintenance_job_failed(&metadata.job_id, &message)
+                });
+                if let Err(record_err) = record_result {
+                    pgrx::warning!(
+                        "graph maintenance {} failed and failure status could not be recorded: {}",
+                        metadata.job_id,
+                        record_err
+                    );
                 }
-            });
+                pgrx::warning!("graph maintenance {} failed: {}", metadata.job_id, message);
+            }
             return;
         }
         if !BackgroundWorker::wait_latch(Some(Duration::from_millis(100))) {

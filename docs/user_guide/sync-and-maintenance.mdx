@@ -215,6 +215,10 @@ SELECT * FROM graph.maintenance(concurrently := true);
 SELECT * FROM graph.maintenance_status('<job_id>');
 ```
 
+If background maintenance fails after the worker starts, pgGraph records the
+failed status and error detail from a fresh worker transaction so
+`graph.maintenance_status('<job_id>')` remains the operator source of truth.
+
 Return columns:
 
 | Column | Meaning |

@@ -176,6 +176,7 @@ pub(crate) fn update_build_job_completed(
 
 pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::GraphResult<()> {
     let failed = JobStatus::Failed.as_str();
+    let completed = JobStatus::Completed.as_str();
     Spi::run_with_args(
         "UPDATE graph._build_jobs
          SET status = $2,
@@ -184,8 +185,13 @@ pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::Gr
              finished_at = now(),
              updated_at = now(),
              error = $3
-         WHERE build_id = $1",
-        &[build_id.into(), failed.into(), error.into()],
+         WHERE build_id = $1 AND status <> $4",
+        &[
+            build_id.into(),
+            failed.into(),
+            error.into(),
+            completed.into(),
+        ],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("build job failure update failed: {}", err))
@@ -194,14 +200,8 @@ pub(crate) fn update_build_job_failed(build_id: &str, error: &str) -> safety::Gr
 
 pub(crate) fn run_build_job(build_id: &str) -> safety::GraphResult<()> {
     update_build_job_started(build_id)?;
-    match execute_build(true) {
-        Ok(result) => update_build_job_completed(build_id, &result),
-        Err(err) => {
-            let message = err.to_string();
-            let _ = update_build_job_failed(build_id, &message);
-            Err(err)
-        }
-    }
+    let result = execute_build(true)?;
+    update_build_job_completed(build_id, &result)
 }
 
 pub(crate) fn create_maintenance_job() -> safety::GraphResult<String> {
@@ -313,6 +313,7 @@ pub(crate) fn update_maintenance_job_completed(
 
 pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety::GraphResult<()> {
     let failed = JobStatus::Failed.as_str();
+    let completed = JobStatus::Completed.as_str();
     Spi::run_with_args(
         "UPDATE graph._maintenance_jobs
          SET status = $2,
@@ -321,8 +322,8 @@ pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety
              finished_at = now(),
              updated_at = now(),
              error = $3
-         WHERE job_id = $1",
-        &[job_id.into(), failed.into(), error.into()],
+         WHERE job_id = $1 AND status <> $4",
+        &[job_id.into(), failed.into(), error.into(), completed.into()],
     )
     .map_err(|err| {
         safety::GraphError::Internal(format!("maintenance job failure update failed: {}", err))
@@ -331,14 +332,8 @@ pub(crate) fn update_maintenance_job_failed(job_id: &str, error: &str) -> safety
 
 pub(crate) fn run_maintenance_job(job_id: &str) -> safety::GraphResult<()> {
     update_maintenance_job_started(job_id)?;
-    match execute_maintenance_rebuild(true) {
-        Ok(result) => update_maintenance_job_completed(job_id, &result),
-        Err(err) => {
-            let message = err.to_string();
-            let _ = update_maintenance_job_failed(job_id, &message);
-            Err(err)
-        }
-    }
+    let result = execute_maintenance_rebuild(true)?;
+    update_maintenance_job_completed(job_id, &result)
 }
 
 pub(crate) fn current_database_and_user() -> safety::GraphResult<(String, String)> {

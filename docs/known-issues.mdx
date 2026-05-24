@@ -68,6 +68,7 @@ remaining sections below are still open work.
 | Truncate handling | Sync replay now maintains table-to-node membership bitmaps, so table truncation tombstones only nodes from the affected table and removes their tenant membership. |
 | Tenant bitmap mutation | Sync replay now uses old and new tenant values from row images to mutate only the affected tenant bitmaps for update, delete, and primary-key replacement. |
 | Internal scheduler | Scheduler ownership is documented as external: pgGraph exposes the admin-only `graph.run_scheduled_maintenance()` target, while pg_cron, Kubernetes CronJobs, systemd timers, Docker init SQL, or app schedulers own cadence and lifecycle. |
+| Background job failures | Build and maintenance workers now record failed status and error detail from a fresh worker transaction after the work transaction returns, and failure recording does not overwrite completed jobs. |
 
 ### Data Correctness and Corruption
 
@@ -101,9 +102,10 @@ table SQL and discovery SQL parameterization work.
 
 ### Sync, Jobs, and Operator Semantics
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Background job failures | Failure status can be lost if the worker transaction aborts. | Record worker failure status in a separate transaction or independent SPI context after the work transaction aborts, with an idempotent failure path. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked next-update items remain in this category after scheduler
+ownership and background-job failure handling were completed.
+</Callout>
 
 ### Internal Construction and Performance
 
