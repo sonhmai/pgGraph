@@ -544,3 +544,83 @@ The high-priority plan is complete when:
 - The validation ladder has passed for each affected milestone.
 - Regression measurements exist for changes that trade memory for speed or
   speed for memory.
+
+## Refactoring Notes - Large Rust Source Files
+
+These notes are planning guidance for future cleanup, not completion blockers
+for the known-issues milestones above. Per the Rust planning rules, file size by
+itself is not enough reason to introduce new crates or broad architecture
+changes; prefer module-level splits where a file has mixed responsibilities or
+where tests would become clearer through smaller public surfaces.
+
+### Priority 1 - Split `graph/src/sql_facade/admin.rs`
+
+This is the clearest large-file maintainability issue. The file currently mixes
+several SQL-facing concerns:
+
+- admin enablement and privilege checks
+- status and sync health entrypoints
+- scheduled maintenance decisions
+- build and maintenance background-worker entrypoints
+- table, edge, and filter registration APIs
+- structured filter helper SQL exports
+- remove, estimate, apply sync, vacuum, and maintenance APIs
+- development-only test hooks
+
+Recommended direction:
+
+- Keep SQL extern wrappers thin and grouped by operator-facing surface.
+- Move filter-constructor exports near the traversal/filter facade rather than
+  admin operations.
+- Move build and maintenance worker entrypoints near job orchestration code, or
+  into a dedicated SQL job facade.
+- Preserve the current SQL ABI and pgrx `include!` constraints while splitting;
+  this is a module organization refactor, not a behavior change.
+
+Completion criteria:
+
+- Each resulting module has one primary SQL surface or orchestration concern.
+- Existing `graph.*` SQL function names, overloads, result columns, and
+  SQLSTATE behavior are unchanged.
+- Existing pg tests continue to cover the moved entrypoints.
+
+### Priority 2 - Extract Build Pipeline Phases From `graph/src/builder.rs`
+
+`builder.rs` is conceptually cohesive, but `build_graph()` owns the whole
+pipeline: memory preflight, node ingestion, filter indexing, edge resolution,
+spool management, CSR construction, and final engine wiring. This is not urgent,
+but it is a good candidate for smaller testable phases.
+
+Recommended direction:
+
+- Keep the builder in the same crate and module family; do not split a workspace
+  or new crate just because the file is large.
+- Extract phase-level helpers around node ingestion, filter population, edge
+  spool resolution, and CSR loading.
+- Keep the data ownership clear: the builder produces an `Engine`; stores remain
+  owned by their existing modules.
+- Add focused tests around extracted pure or near-pure helpers where possible;
+  keep SPI-heavy behavior in pg tests.
+
+Completion criteria:
+
+- `build_graph()` reads as a phase coordinator.
+- Extracted helpers have narrow inputs and avoid hidden global state except
+  where pgrx/SPI requires it.
+- Build behavior, memory checks, and generated graph contents are unchanged.
+
+### Files Reviewed But Not Prioritized
+
+The following large files are acceptable as-is unless future work changes their
+responsibilities:
+
+- `graph/src/persistence.rs`: cohesive `.pggraph` file format, validation,
+  mmap loading, atomic writes, sync checkpoint I/O, and hardening tests.
+- `graph/src/engine.rs`: borderline large, but mostly an engine orchestrator
+  around owned stores, traversal, sync overlay state, and status calculation.
+- `graph/src/edge_store.rs`: cohesive CSR storage and mmap safety boundary.
+- `graph/src/bfs.rs`: cohesive traversal hot loop, DFS variant, neighbor
+  iteration, path reconstruction, and traversal result formatting.
+- `graph/src/filter_index.rs`: cohesive traversal filter index data structure.
+- `graph/src/pg_tests/maintenance_admin.rs`: large integration-test file; split
+  only if test navigation becomes a practical problem.
