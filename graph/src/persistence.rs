@@ -44,7 +44,7 @@
 //! See: `docs/contributor_guide/memory-model.mdx`
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
@@ -66,54 +66,108 @@ const HEADER_SIZE: usize = 128;
 const NUM_SECTIONS: usize = 11;
 const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
 
-fn align_data(data: &mut Vec<u8>, alignment: usize) {
-    let padding = (alignment - (data.len() % alignment)) % alignment;
-    data.resize(data.len() + padding, 0);
+struct GraphArtifactWriter {
+    writer: BufWriter<fs::File>,
+    section_offsets: [u64; NUM_SECTIONS],
+    position: u64,
+    hasher: crc32fast::Hasher,
 }
 
-fn begin_section(
-    data: &mut Vec<u8>,
-    section_offsets: &mut [u64; NUM_SECTIONS],
-    section: usize,
-    alignment: Option<usize>,
-) -> GraphResult<()> {
-    if let Some(alignment) = alignment {
-        align_data(data, alignment);
+impl GraphArtifactWriter {
+    fn new(file: fs::File) -> GraphResult<Self> {
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(&[0u8; HEADER_SIZE])
+            .map_err(|e| GraphError::Internal(format!("Header reservation failed: {}", e)))?;
+        Ok(Self {
+            writer,
+            section_offsets: [0u64; NUM_SECTIONS],
+            position: HEADER_SIZE as u64,
+            hasher: crc32fast::Hasher::new(),
+        })
     }
-    section_offsets[section] =
-        u64::try_from(data.len()).map_err(|_| GraphError::Internal("artifact too large".into()))?;
-    Ok(())
-}
 
-fn write_u32_values(data: &mut Vec<u8>, values: &[u32]) {
-    for &value in values {
-        data.extend_from_slice(&value.to_le_bytes());
+    fn begin_section(&mut self, section: usize, alignment: Option<usize>) -> GraphResult<()> {
+        if let Some(alignment) = alignment {
+            self.align(alignment)?;
+        }
+        self.section_offsets[section] = self.position;
+        Ok(())
     }
-}
 
-fn write_u64_values<I>(data: &mut Vec<u8>, values: I)
-where
-    I: IntoIterator<Item = u64>,
-{
-    for value in values {
-        data.extend_from_slice(&value.to_le_bytes());
+    fn align(&mut self, alignment: usize) -> GraphResult<()> {
+        let position = usize::try_from(self.position)
+            .map_err(|_| GraphError::Internal("artifact too large".into()))?;
+        let padding = (alignment - (position % alignment)) % alignment;
+        if padding > 0 {
+            self.write_body(&[0u8; 8][..padding])?;
+        }
+        Ok(())
     }
-}
 
-fn write_length_prefixed_payload(
-    data: &mut Vec<u8>,
-    payload: &[u8],
-    label: &str,
-) -> GraphResult<()> {
-    let payload_len = u32::try_from(payload.len()).map_err(|_| {
-        GraphError::Internal(format!(
-            "{} section payload exceeds u32 length prefix",
-            label
-        ))
-    })?;
-    data.extend_from_slice(&payload_len.to_le_bytes());
-    data.extend_from_slice(payload);
-    Ok(())
+    fn write_body(&mut self, bytes: &[u8]) -> GraphResult<()> {
+        self.hasher.update(bytes);
+        self.writer
+            .write_all(bytes)
+            .map_err(|e| GraphError::Internal(format!("Write failed: {}", e)))?;
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| GraphError::Internal("artifact too large".into()))?;
+        self.position = self
+            .position
+            .checked_add(len)
+            .ok_or_else(|| GraphError::Internal("artifact too large".into()))?;
+        Ok(())
+    }
+
+    fn write_u32_values(&mut self, values: &[u32]) -> GraphResult<()> {
+        for &value in values {
+            self.write_body(&value.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn write_u64_value(&mut self, value: u64) -> GraphResult<()> {
+        self.write_body(&value.to_le_bytes())
+    }
+
+    fn write_length_prefixed_payload(&mut self, payload: &[u8], label: &str) -> GraphResult<()> {
+        let payload_len = u32::try_from(payload.len()).map_err(|_| {
+            GraphError::Internal(format!(
+                "{} section payload exceeds u32 length prefix",
+                label
+            ))
+        })?;
+        self.write_body(&payload_len.to_le_bytes())?;
+        self.write_body(payload)
+    }
+
+    fn finish(mut self, node_count: u32, edge_count: u32) -> GraphResult<fs::File> {
+        let crc = std::mem::replace(&mut self.hasher, crc32fast::Hasher::new()).finalize();
+        let mut header = [0u8; HEADER_SIZE];
+        header[0..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        header[8..12].copy_from_slice(&0u32.to_le_bytes());
+        header[12..16].copy_from_slice(&node_count.to_le_bytes());
+        header[16..20].copy_from_slice(&edge_count.to_le_bytes());
+        for (i, &offset) in self.section_offsets.iter().enumerate() {
+            let start = 20 + i * 8;
+            header[start..start + 8].copy_from_slice(&offset.to_le_bytes());
+        }
+        header[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
+
+        self.writer
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| GraphError::Internal(format!("Header seek failed: {}", e)))?;
+        self.writer
+            .write_all(&header)
+            .map_err(|e| GraphError::Internal(format!("Header write failed: {}", e)))?;
+        self.writer
+            .flush()
+            .map_err(|e| GraphError::Internal(format!("Flush failed: {}", e)))?;
+        self.writer
+            .into_inner()
+            .map_err(|e| GraphError::Internal(format!("Flush failed: {}", e)))
+    }
 }
 
 fn checked_section_size(count: u32, width: usize, label: &str) -> GraphResult<usize> {
@@ -417,90 +471,69 @@ pub fn write_graph_file(engine: &Engine, path: &Path) -> GraphResult<()> {
         })?;
     }
 
-    let mut data = vec![0u8; HEADER_SIZE];
+    let file = fs::File::create(&tmp_path).map_err(|e| {
+        GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
+    })?;
+    let mut writer = GraphArtifactWriter::new(file)?;
 
-    // Track section offsets
-    let mut section_offsets = [0u64; NUM_SECTIONS];
-
-    begin_section(&mut data, &mut section_offsets, 0, None)?;
+    writer.begin_section(0, None)?;
     let is_active_bytes = engine.node_store.is_active_bytes();
-    data.extend_from_slice(&is_active_bytes);
+    writer.write_body(&is_active_bytes)?;
 
-    begin_section(&mut data, &mut section_offsets, 1, Some(4))?;
-    write_u32_values(&mut data, engine.node_store.table_oids_slice());
+    writer.begin_section(1, Some(4))?;
+    writer.write_u32_values(engine.node_store.table_oids_slice())?;
 
-    begin_section(&mut data, &mut section_offsets, 2, Some(4))?;
-    write_u32_values(&mut data, engine.edge_store.offsets_slice());
+    writer.begin_section(2, Some(4))?;
+    writer.write_u32_values(engine.edge_store.offsets_slice())?;
 
-    begin_section(&mut data, &mut section_offsets, 3, Some(4))?;
-    write_u32_values(&mut data, engine.edge_store.targets_slice());
+    writer.begin_section(3, Some(4))?;
+    writer.write_u32_values(engine.edge_store.targets_slice())?;
 
-    begin_section(&mut data, &mut section_offsets, 4, None)?;
-    data.extend_from_slice(engine.edge_store.type_ids_slice());
+    writer.begin_section(4, None)?;
+    writer.write_body(engine.edge_store.type_ids_slice())?;
 
-    begin_section(&mut data, &mut section_offsets, 5, Some(4))?;
-    write_u32_values(&mut data, engine.edge_store.weights_slice());
+    writer.begin_section(5, Some(4))?;
+    writer.write_u32_values(engine.edge_store.weights_slice())?;
 
-    begin_section(&mut data, &mut section_offsets, 6, None)?;
+    writer.begin_section(6, None)?;
     let ri_bytes = engine.resolution_to_bytes();
-    data.extend_from_slice(&ri_bytes);
+    writer.write_body(&ri_bytes)?;
 
-    begin_section(&mut data, &mut section_offsets, 7, Some(8))?;
-    let mut pk_bytes = Vec::new();
-    let mut pk_offsets = Vec::with_capacity(engine.node_store.node_count() as usize + 1);
-    pk_offsets.push(0u64);
+    writer.begin_section(7, Some(8))?;
+    let mut pk_offset = 0u64;
+    writer.write_u64_value(pk_offset)?;
     for node_idx in 0..engine.node_store.node_count() {
         let pk = engine.node_store.primary_key(node_idx);
-        pk_bytes.extend_from_slice(pk.as_bytes());
-        pk_offsets.push(pk_bytes.len() as u64);
+        pk_offset =
+            pk_offset
+                .checked_add(u64::try_from(pk.len()).map_err(|_| {
+                    GraphError::Internal("primary key payload too large".to_string())
+                })?)
+                .ok_or_else(|| GraphError::Internal("primary key payload too large".to_string()))?;
+        writer.write_u64_value(pk_offset)?;
     }
-    while pk_offsets.len() < engine.node_store.node_count() as usize + 1 {
-        pk_offsets.push(*pk_offsets.last().unwrap_or(&0));
+
+    writer.begin_section(8, None)?;
+    for node_idx in 0..engine.node_store.node_count() {
+        let pk = engine.node_store.primary_key(node_idx);
+        writer.write_body(pk.as_bytes())?;
     }
-    write_u64_values(&mut data, pk_offsets);
 
-    begin_section(&mut data, &mut section_offsets, 8, None)?;
-    data.extend_from_slice(&pk_bytes);
-
-    begin_section(&mut data, &mut section_offsets, 9, None)?;
+    writer.begin_section(9, None)?;
     let filter_bytes = bincode::serialize(&engine.filter_index)
         .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
-    write_length_prefixed_payload(&mut data, &filter_bytes, "filter index")?;
+    writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
 
-    begin_section(&mut data, &mut section_offsets, 10, None)?;
+    writer.begin_section(10, None)?;
     let edge_type_bytes = bincode::serialize(&engine.edge_type_registry).map_err(|e| {
         GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
     })?;
-    write_length_prefixed_payload(&mut data, &edge_type_bytes, "edge type registry")?;
+    writer.write_length_prefixed_payload(&edge_type_bytes, "edge type registry")?;
 
-    // Compute CRC32 of everything after the header
-    let crc = crc32fast::hash(&data[HEADER_SIZE..]);
-
-    // Write header
-    let node_count = engine.node_store.node_count();
-    let edge_count = engine.edge_store.edge_count();
-
-    data[0..4].copy_from_slice(MAGIC);
-    data[4..8].copy_from_slice(&VERSION.to_le_bytes());
-    data[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
-    data[12..16].copy_from_slice(&node_count.to_le_bytes());
-    data[16..20].copy_from_slice(&edge_count.to_le_bytes());
-
-    // Section offsets
-    for (i, &offset) in section_offsets.iter().enumerate() {
-        let start = 20 + i * 8;
-        data[start..start + 8].copy_from_slice(&offset.to_le_bytes());
-    }
-
-    // CRC32
-    data[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
-
-    // Write to temp file
-    let mut file = fs::File::create(&tmp_path).map_err(|e| {
-        GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
-    })?;
-    file.write_all(&data)
-        .map_err(|e| GraphError::Internal(format!("Write failed: {}", e)))?;
+    let file = writer.finish(
+        engine.node_store.node_count(),
+        engine.edge_store.edge_count(),
+    )?;
     file.sync_all()
         .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
 

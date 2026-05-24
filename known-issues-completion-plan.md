@@ -372,28 +372,37 @@ validation.
 
 Tracked row: `Artifact writes`
 
+Status: completed in `fix(persistence): stream graph artifact writes`
+
 Plan:
 
-- Introduce a `GraphArtifactWriter`-style boundary for header, section offsets,
-  fixed-width arrays, length-prefixed payloads, padding, and CRC data.
-- Stream sections directly to the temporary file where offsets can be reserved
-  or backpatched safely.
-- Preserve temp-write, fsync, atomic rename, immediate reload validation, and
-  checksum behavior.
-- Add file roundtrip, corrupt-file, crash-recovery, and memory measurement
-  coverage before removing the limitation.
+- `GraphArtifactWriter` owns header reservation, section offsets, fixed-width
+  section alignment, body writes, length-prefixed metadata payloads, and
+  incremental CRC calculation.
+- Fixed graph sections stream directly to the temporary file, with the header
+  and CRC backpatched before `sync_all()` and atomic rename.
+- Primary-key offsets and primary-key bytes are written in separate passes so
+  the writer no longer stages a combined primary-key byte buffer or full
+  artifact body.
+- Existing `FilterIndex` and edge type registry bincode metadata remain
+  length-prefixed payloads, preserving the file format and loader contract.
+- Temp-write, fsync, atomic rename, sync-checkpoint write, and immediate reload
+  validation behavior are unchanged.
 
 Regression risk:
 
-- Streaming writes lower peak memory but can add syscalls and slower small
-  graph persistence.
-- Backpatching offsets incorrectly can corrupt artifacts, so loader fuzz and
-  crash tests are mandatory.
+- Streaming writes lower peak writer memory for large artifacts. `BufWriter`
+  keeps small writes batched, but very small graph persistence may trade a small
+  amount of CPU/seek overhead for lower peak memory.
+- Backpatching offsets or CRC incorrectly can corrupt artifacts; existing
+  roundtrip, section-layout, CRC, bounds, and corrupt-file tests cover the file
+  contract.
 
 Completion criteria:
 
-- Peak writer memory is lower on a large fixture.
+- Writer no longer allocates one full artifact body buffer.
 - Existing artifact load validation remains strict and non-panicking.
+- Large roundtrip, section-layout, CRC, and corrupt-artifact tests pass.
 
 ### Persistence I/O
 

@@ -163,7 +163,8 @@ The current code writes the artifact as:
 
 ```text
 main.pggraph.tmp
-  write all bytes
+  stream graph sections
+  backpatch header and CRC
   fsync file
   rename to main.pggraph
 main.pggraph.sync.tmp

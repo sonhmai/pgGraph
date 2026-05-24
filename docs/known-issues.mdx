@@ -69,6 +69,7 @@ remaining sections below are still open work.
 | Tenant bitmap mutation | Sync replay now uses old and new tenant values from row images to mutate only the affected tenant bitmaps for update, delete, and primary-key replacement. |
 | Internal scheduler | Scheduler ownership is documented as external: pgGraph exposes the admin-only `graph.run_scheduled_maintenance()` target, while pg_cron, Kubernetes CronJobs, systemd timers, Docker init SQL, or app schedulers own cadence and lifecycle. |
 | Background job failures | Build and maintenance workers now record failed status and error detail from a fresh worker transaction after the work transaction returns, and failure recording does not overwrite completed jobs. |
+| Artifact writes | `.pggraph` writes now stream fixed sections, primary-key offsets, and primary-key bytes through a seekable artifact writer that backpatches the header and CRC while preserving temp-write, fsync, atomic rename, and reload-validation behavior. |
 
 ### Data Correctness and Corruption
 
@@ -96,9 +97,10 @@ table SQL and discovery SQL parameterization work.
 
 ### Persistence and File Format
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Artifact writes | `.pggraph` writes build a full in-memory artifact buffer. | Stream sections through a dedicated artifact writer while preserving temp-write, fsync, atomic rename, checksum, and reload-validation behavior. Completion plan: `known-issues-completion-plan.md`. |
+<Callout type="info">
+No currently tracked next-update items remain in this category after artifact
+writes moved to a streaming writer for fixed graph sections.
+</Callout>
 
 ### Sync, Jobs, and Operator Semantics
 

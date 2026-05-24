@@ -35,12 +35,14 @@ Section 10  edge type registry          u32 length + bincode payload
 
 1. Creates parent directory.
 2. Reserves a zeroed 128-byte header.
-3. Appends sections in order.
+3. Streams sections in order to `<path>.tmp`.
 4. Aligns fixed-width sections as needed.
-5. Serializes `FilterIndex` and edge type registry.
-6. Computes CRC32 over the payload after the header.
-7. Writes header fields.
-8. Writes to `<path>.tmp`.
+5. Streams primary-key offsets and primary-key bytes in separate passes so the
+   writer does not stage the full artifact body in memory.
+6. Serializes `FilterIndex` and edge type registry as length-prefixed metadata
+   sections.
+7. Computes CRC32 incrementally over the payload after the header.
+8. Backpatches header fields and section offsets.
 9. `sync_all()`.
 10. Atomically renames to final path.
 11. Writes the sync checkpoint through a temp file and atomic rename.
