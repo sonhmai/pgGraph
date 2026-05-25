@@ -1425,7 +1425,17 @@ fn maintenance_status(
 fn test_run_build_job(build_id: &str) -> Option<String> {
     with_panic_boundary("_test_run_build_job()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        run_build_job(build_id).err().map(|err| err.to_string())
+        run_build_job(build_id).err().map(|err| {
+            let message = err.to_string();
+            if let Err(record_err) = update_build_job_failed(build_id, &message) {
+                pgrx::warning!(
+                    "graph test build job {} failed and failure status could not be recorded: {}",
+                    build_id,
+                    record_err
+                );
+            }
+            message
+        })
     })
 }
 
@@ -1434,7 +1444,17 @@ fn test_run_build_job(build_id: &str) -> Option<String> {
 fn test_run_maintenance_job(job_id: &str) -> Option<String> {
     with_panic_boundary("_test_run_maintenance_job()", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
-        run_maintenance_job(job_id).err().map(|err| err.to_string())
+        run_maintenance_job(job_id).err().map(|err| {
+            let message = err.to_string();
+            if let Err(record_err) = update_maintenance_job_failed(job_id, &message) {
+                pgrx::warning!(
+                    "graph test maintenance job {} failed and failure status could not be recorded: {}",
+                    job_id,
+                    record_err
+                );
+            }
+            message
+        })
     })
 }
 

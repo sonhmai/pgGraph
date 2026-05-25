@@ -2,6 +2,88 @@
 
 Release notes are ordered newest first.
 
+## v0.1.2: Release Prep Hardening
+
+This release captures the higher-priority alpha hardening work completed after
+`v0.1.1`, updates public version markers, and records the current release-gate
+evidence for the `pg17` target.
+
+### Fixes
+
+- Development-only background job test runners now mark failed build and
+  maintenance jobs with the same durable failure helpers used by real background
+  workers. This keeps advisory-lock regression gates aligned with worker
+  behavior and verifies that failed job rows do not remain stuck in `running`.
+- Source-row search recheck work now prepares Rust match state once per query
+  and table display labels once per source-table statement.
+- Aggregation hydration now rekeys all-path hydration rows by table and reuses
+  borrowed parent-path rows instead of cloning every candidate row into lookup
+  maps.
+- Traversal result metadata stays dense for normal high-coverage traversals and
+  switches to sparse parent/depth maps only for low-visit-budget traversals on
+  large graphs.
+
+### Performance Notes
+
+- Source search warmed benchmark improved from 0.14s before the hardening pass
+  to 0.08s after the recheck refactor.
+- Aggregation hydration improved from 8.33s before the hardening pass to 6.32s
+  after the hydration lookup refactor.
+- Dense-path traversal internals improved from 0.37s before the hardening pass
+  to 0.11s after the traversal metadata refactor.
+- Sparse traversal metadata is used only for low-visit-budget traversals on
+  large graphs; normal and high-coverage traversals stay dense to avoid slowing
+  path reconstruction.
+
+### Release Gates
+
+The `pg17` heavy release gate passed through fmt, clippy, docs, unit tests, pgrx
+SQL tests, cargo-deny, fuzz check, package validation, fresh install smoke,
+metadata audit, SQLSTATE/ACL boundary tests, backup/restore, lock regressions,
+concurrency, synthetic release smoke, and pgbench sync stress:
+
+```bash
+PG_VERSION_FEATURE=pg17 DB_PREFIX=pggraph_release_prep3 RUN_PLAYGROUND=0 ./tests/heavy/run_release_gate.sh
+```
+
+The synthetic smoke portion produced `nodes=50000`, `edges=150889`,
+`build_ms=1775`, `query_ms=43`, and wrote
+`/opt/homebrew/var/postgresql@17/graph/main.pggraph`.
+
+The pgbench sync stress portion passed with zero failed transactions. Observed
+evidence: `3045` transactions, `0.000%` failures, average latency `3.739 ms`,
+`101.508310` TPS, `sync_log_rows=3045`, `rows_applied=3045`, `apply_ms=27`,
+`query_ms=10`, and `search_rows=0`.
+
+After Docker was made available, the Docker-backed playground gate passed and
+validated all `26` Streamlit playground query examples against the prepared
+Panama dataset:
+
+```bash
+PGGRAPH_PLAYGROUND_YES=1 PG_VERSION_FEATURE=pg17 ./tests/heavy/playground_release_gate.sh
+```
+
+The sandbox Panama benchmark gate also passed:
+
+```bash
+./sandbox/run_benchmarks.sh panama --yes
+```
+
+Observed sandbox evidence: `2016523` source nodes, `5802586` graph edges,
+`load_seconds=63.204512249998515`, `build_seconds=60.01402675001009`,
+`build_time_ms=35384.969724`, `memory_used_mb=185.5018720626831`, and
+`memory_limit_mb=2048`. Hot median query timings were `29.064 ms` for status,
+`83.2705 ms` for entity search, `107.39 ms` for depth-2 traversal, `3.1295 ms`
+for shortest path, `147.9435 ms` for component stats, and `572.17 ms` for
+largest component.
+
+The focused background job advisory-lock regression gate was rerun after the
+development test-runner fix and passed:
+
+```bash
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_prep_background_lock ./tests/heavy/background_job_lock_regression.sh
+```
+
 ## v0.1.1: Alpha Hardening Critical Paths
 
 This release hardens pgGraph's alpha SQL contract, sync behavior, persistence
@@ -212,7 +294,7 @@ building and querying a derived graph index over existing relational tables.
 
 <Callout type="info">
   `v0.1.0` was the version previously published from `main`. New deployments
-  should use `v0.1.1`; this entry is retained so the release-notes page tracks
+  should use `v0.1.2`; this entry is retained so the release-notes page tracks
   historical releases instead of only the latest merge.
 </Callout>
 
@@ -230,6 +312,6 @@ building and querying a derived graph index over existing relational tables.
 
 ### Upgrade Notes
 
-- `v0.1.1` supersedes this release and includes breaking SQL contract changes.
-  Review the `v0.1.1` breaking changes before moving applications from
-  `v0.1.0`.
+- `v0.1.2` supersedes this release and includes the `v0.1.1` breaking SQL
+  contract changes. Review the `v0.1.1` breaking changes before moving
+  applications from `v0.1.0`.

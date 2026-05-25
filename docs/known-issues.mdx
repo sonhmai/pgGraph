@@ -81,11 +81,12 @@ remaining sections below are still open work.
 | Source search recheck | Source-row search now prepares Rust match state once per query and table display labels once per source-table statement, avoiding repeated query normalization and regclass display lookups during candidate verification. |
 | Aggregation hydration | Aggregation now rekeys hydrated all-path nodes by table for borrowed node-id lookups and reuses borrowed parent-path hydration rows instead of cloning every candidate row into a lookup map. |
 | Traversal allocations and internals | BFS and DFS traversal result metadata now stays dense for normal high-coverage traversals, but switches to sparse parent/depth maps for low-visit-budget traversals on large graphs. |
+| Background job gate parity | Development-only background job test runners now record failed build and maintenance job status rows through the same failure helpers used by real workers, so advisory-lock release gates validate durable failure state. |
 
 ### Data Correctness and Corruption
 
 <Callout type="info">
-No currently tracked next-update items remain in this category after `v0.1.1`.
+No currently tracked next-update items remain in this category after `v0.1.2`.
 The previously listed edge endpoint validation and hydration numeric comparison
 issues were completed: invalid edge endpoints now fail as structural errors, and
 large JSON integers preserve exactness without implicit string/number matches.
