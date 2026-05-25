@@ -167,7 +167,7 @@ pub(super) fn maybe_auto_load() {
     });
 }
 
-pub(super) fn ensure_current_graph() -> safety::GraphResult<()> {
+pub(crate) fn ensure_current_graph() -> safety::GraphResult<()> {
     maybe_auto_load();
 
     let sync_mode = current_sync_mode()?;

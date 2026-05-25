@@ -41,19 +41,6 @@ pub(crate) use pgrx::Spi;
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::time::Duration;
 
-#[cfg(feature = "pg_test")]
-pub(crate) use crate::api_types::{BuildExecutionResult, MaintenanceExecutionResult};
-#[cfg(feature = "pg_test")]
-pub(crate) use crate::catalog::validate_numeric_column;
-#[cfg(feature = "pg_test")]
-pub(crate) use crate::quote::quote_literal as sql_literal;
-#[cfg(feature = "pg_test")]
-pub(crate) use crate::sql_jobs::{
-    update_build_job_completed, update_build_job_progress, update_build_job_started,
-    update_maintenance_job_completed, update_maintenance_job_progress,
-    update_maintenance_job_started,
-};
-
 mod admin;
 mod components;
 mod discovery;
@@ -63,3 +50,5 @@ mod traversal;
 mod workflow;
 
 pub(crate) use admin::check_enabled_result;
+#[cfg(feature = "pg_test")]
+pub(crate) use runtime::ensure_current_graph;

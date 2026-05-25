@@ -50,8 +50,26 @@ mod types;
 
 use engine::Engine;
 
+#[cfg(feature = "pg_test")]
+use api_types::{BuildExecutionResult, MaintenanceExecutionResult};
+#[cfg(feature = "pg_test")]
+use catalog::{
+    insert_registered_table, read_catalog, validate_numeric_column, validate_registered_table,
+};
+#[cfg(feature = "pg_test")]
+use quote::quote_literal as sql_literal;
+#[cfg(feature = "pg_test")]
+use sql_facade::ensure_current_graph;
 #[cfg(any(test, feature = "fuzzing"))]
 use sql_filters::validate_structured_operator_shape;
+#[cfg(feature = "pg_test")]
+use sql_jobs::{
+    create_build_job, create_maintenance_job, update_build_job_completed, update_build_job_failed,
+    update_build_job_progress, update_build_job_started, update_maintenance_job_completed,
+    update_maintenance_job_failed, update_maintenance_job_progress, update_maintenance_job_started,
+};
+#[cfg(feature = "pg_test")]
+use sql_sync::current_sync_mode;
 #[cfg(any(test, feature = "fuzzing"))]
 use sql_sync::parse_sync_properties;
 #[cfg(any(test, feature = "fuzzing"))]
