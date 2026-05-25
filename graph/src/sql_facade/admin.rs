@@ -1,4 +1,6 @@
-fn check_enabled() {
+use super::*;
+
+pub(super) fn check_enabled() {
     if !config::ENABLED.get() {
         safety::GraphError::Disabled.report();
     }
@@ -9,7 +11,7 @@ fn test_enabled() -> bool {
     config::ENABLED.get()
 }
 
-fn check_enabled_result() -> safety::GraphResult<()> {
+pub(crate) fn check_enabled_result() -> safety::GraphResult<()> {
     if config::ENABLED.get() {
         Ok(())
     } else {
@@ -17,7 +19,7 @@ fn check_enabled_result() -> safety::GraphResult<()> {
     }
 }
 
-fn require_graph_admin_result() -> safety::GraphResult<()> {
+pub(super) fn require_graph_admin_result() -> safety::GraphResult<()> {
     let allowed = Spi::connect(|client| {
         let result = client.select(
             "SELECT
@@ -48,7 +50,7 @@ fn require_graph_admin_result() -> safety::GraphResult<()> {
     }
 }
 
-fn with_panic_boundary<T>(_context: &str, f: impl FnOnce() -> T) -> T {
+pub(super) fn with_panic_boundary<T>(_context: &str, f: impl FnOnce() -> T) -> T {
     // pgrx already installs the real panic boundary around #[pg_extern] calls.
     // Catching inside SPI/user-code paths can accidentally intercept pgrx
     // ErrorReport panics and either erase the SQLSTATE or abort the backend, so
@@ -402,7 +404,7 @@ fn refreshed_engine_status() -> safety::GraphResult<crate::types::EngineStatus> 
 ///
 /// See: `docs/user_guide/build-and-persistence.mdx`
 #[pg_extern(schema = "graph")]
-fn build() -> TableIterator<
+pub(super) fn build() -> TableIterator<
     'static,
     (
         name!(nodes_loaded, i64),
@@ -437,7 +439,10 @@ pub extern "C-unwind" fn graph_build_worker_main(_arg: pgrx::pg_sys::Datum) {
     let metadata = match WorkerMetadata::decode(extra) {
         Ok(metadata) => metadata,
         Err(err) => {
-            pgrx::warning!("graph build worker received malformed worker metadata: {}", err);
+            pgrx::warning!(
+                "graph build worker received malformed worker metadata: {}",
+                err
+            );
             return;
         }
     };

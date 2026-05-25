@@ -12,7 +12,7 @@ belong in the [User Guide](/user_guide).
 <FileTree root="graph/" items={[
   { name: 'Cargo.toml', desc: 'pgrx extension crate, features, lints, dependencies' },
   { name: 'sql/bootstrap.sql', desc: 'extension-owned SQL bootstrap objects and catalogs' },
-  { name: 'src/lib.rs', desc: 'pgrx entry point, GUC init, SQL facade includes, engine TLS' },
+  { name: 'src/lib.rs', desc: 'pgrx entry point, GUC init, facade module registration, engine TLS' },
   { name: 'src/engine.rs', desc: 'Engine orchestration and store ownership' },
   { name: 'src/node_store.rs', desc: 'node struct-of-arrays and mmap backing' },
   { name: 'src/edge_store.rs', desc: 'CSR edge storage and mmap backing' },
@@ -20,7 +20,7 @@ belong in the [User Guide](/user_guide).
   { name: 'src/persistence.rs', desc: '.pggraph writer/loader and format validation' },
   { name: 'src/filter_index.rs', desc: 'typed traversal filter storage' },
   { name: 'src/resolution_index.rs', desc: 'table+primary-key resolution index' },
-  { name: 'src/sql_facade/', desc: 'pgrx SQL wrappers included from lib.rs' },
+  { name: 'src/sql_facade/', desc: 'pgrx SQL wrapper modules for user-facing functions' },
   { name: 'src/catalog/', desc: 'catalog read/write/validation helpers' },
   { name: 'tests/heavy/', desc: 'external boundary, release, packaging, and stress tests' },
   { name: 'fuzz/', desc: 'libFuzzer targets for parser and persistence boundaries' }

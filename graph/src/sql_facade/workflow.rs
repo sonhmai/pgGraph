@@ -1,3 +1,8 @@
+use super::admin::with_panic_boundary;
+use super::search::{search, traverse_search};
+use super::traversal::{shortest_path, traverse};
+use super::*;
+
 // Workflow-level SQL functions for common application and AI-tool queries.
 //
 // These wrappers keep the primitive APIs stable while providing smaller,
@@ -151,8 +156,8 @@ fn expand(
                             node_table_name,
                         ),
                     )| {
-                        let readable_path = readable_path(&path, &edge_path)
-                            .unwrap_or_else(|err| err.report());
+                        let readable_path =
+                            readable_path(&path, &edge_path).unwrap_or_else(|err| err.report());
                         (
                             root_table,
                             root_id,
@@ -312,10 +317,10 @@ fn find_related(
                         node_table_name,
                     ),
                 )| {
-                    let node =
-                        hydrate_node(node_table.to_u32(), &node_id).unwrap_or_else(|err| err.report());
-                    let readable_path = readable_path(&path, &edge_path)
+                    let node = hydrate_node(node_table.to_u32(), &node_id)
                         .unwrap_or_else(|err| err.report());
+                    let readable_path =
+                        readable_path(&path, &edge_path).unwrap_or_else(|err| err.report());
                     (
                         root_table,
                         root_id,
@@ -366,8 +371,15 @@ fn path(
     ),
 > {
     with_panic_boundary("path()", || {
-        let rows = shortest_path(source_table, source_id, target_table, target_id, max_depth, true)
-            .collect::<Vec<_>>();
+        let rows = shortest_path(
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            max_depth,
+            true,
+        )
+        .collect::<Vec<_>>();
         let readable = readable_shortest_path(&rows);
         TableIterator::new(
             rows.into_iter()
@@ -464,9 +476,15 @@ fn connection(
                 if !target_verified {
                     continue;
                 }
-                let path_rows =
-                    shortest_path(*source_oid, source_id, *target_oid, target_id, max_depth, true)
-                        .collect::<Vec<_>>();
+                let path_rows = shortest_path(
+                    *source_oid,
+                    source_id,
+                    *target_oid,
+                    target_id,
+                    max_depth,
+                    true,
+                )
+                .collect::<Vec<_>>();
                 if path_rows.is_empty() {
                     continue;
                 }
@@ -560,7 +578,19 @@ fn neighborhood(
         .collect::<Vec<_>>();
         let truncated = node_limit > 0 && rows.len() == node_limit as usize;
         let mut grouped = std::collections::BTreeMap::<(i32, u32, String), Vec<String>>::new();
-        for (_root_table, _root_id, node_table, node_id, depth, _path, _edge_path, _node, _root_table_name, node_table_name) in rows {
+        for (
+            _root_table,
+            _root_id,
+            node_table,
+            node_id,
+            depth,
+            _path,
+            _edge_path,
+            _node,
+            _root_table_name,
+            node_table_name,
+        ) in rows
+        {
             grouped
                 .entry((depth, node_table.to_u32(), node_table_name))
                 .or_default()
@@ -612,7 +642,10 @@ fn validate_nonnegative_arg(value: i32, name: &str) -> safety::GraphResult<usize
 }
 
 fn rank_from_offset(offset: usize, idx: usize) -> i32 {
-    offset.saturating_add(idx).saturating_add(1).min(i32::MAX as usize) as i32
+    offset
+        .saturating_add(idx)
+        .saturating_add(1)
+        .min(i32::MAX as usize) as i32
 }
 
 fn readable_path(path: &pgrx::JsonB, edge_path: &pgrx::JsonB) -> safety::GraphResult<String> {

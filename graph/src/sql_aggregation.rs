@@ -11,7 +11,9 @@ use crate::sql_traversal::{
     optional_string_array, parse_node_ref_json_string, path_node_field, required_string_field,
     usize_from_nonnegative,
 };
-use crate::{acl, check_enabled_result, edge_store, engine, safety, types, Engine, ENGINE};
+use crate::{
+    acl, edge_store, engine, safety, sql_facade::check_enabled_result, types, Engine, ENGINE,
+};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 

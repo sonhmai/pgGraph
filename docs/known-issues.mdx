@@ -82,6 +82,7 @@ remaining sections below are still open work.
 | Aggregation hydration | Aggregation now rekeys hydrated all-path nodes by table for borrowed node-id lookups and reuses borrowed parent-path hydration rows instead of cloning every candidate row into a lookup map. |
 | Traversal allocations and internals | BFS and DFS traversal result metadata now stays dense for normal high-coverage traversals, but switches to sparse parent/depth maps for low-visit-budget traversals on large graphs. |
 | Background job gate parity | Development-only background job test runners now record failed build and maintenance job status rows through the same failure helpers used by real workers, so advisory-lock release gates validate durable failure state. |
+| SQL facade module layout | SQL facade files now compile as normal Rust modules with explicit sibling helper visibility instead of being textually included from `lib.rs`. |
 
 ### Data Correctness and Corruption
 
@@ -170,7 +171,7 @@ but they do not change core user behavior.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| SQL facade and pg test layout | Some SQL facade and pg test files are included textually from `lib.rs`. | Replace `include!` usage with normal modules and local imports. |
+| pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs`. | Replace test `include!` usage with normal modules and local imports. |
 | Build/vacuum pipeline | Build and vacuum now share replacement-engine construction, while build-only trigger setup and vacuum-only tombstone accounting remain explicit. | Keep shared helpers limited to common pipeline steps so operation-specific behavior stays readable. |
 | Engine state encapsulation | Production status, build, sync, vacuum, persisted-load, mmap materialization, and resolution-state transitions now route through engine helpers, but some fields remain public while tests and lower-level store setup are being cleaned up. | Continue narrowing field visibility after the remaining internal refactors stop depending on direct store access. |
 | Mmap mutation API | Sync paths materialize mmap-backed node stores through engine helpers before mutation, but lower-level stores still expose direct mutation primitives. | Keep mmap mutation at the engine boundary and make invalid direct mutation harder to call from production code. |

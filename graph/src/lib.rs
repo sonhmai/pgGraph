@@ -11,11 +11,8 @@
     deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
 )]
 
-use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::time::Duration;
 
 // Module declarations ordered by dependency layer.
 mod acl;
@@ -37,6 +34,11 @@ mod resolution_index;
 mod safety;
 mod sql_aggregation;
 mod sql_build;
+#[allow(
+    dead_code,
+    reason = "pgrx discovers SQL and background-worker entrypoints through attributes"
+)]
+mod sql_facade;
 mod sql_filters;
 mod sql_hydration;
 mod sql_jobs;
@@ -46,47 +48,10 @@ mod sql_traversal;
 mod sync;
 mod types;
 
-use api_types::{BuildJobRow, ComponentNodeRow, MaintenanceJobRow, TraverseRequest};
-use catalog::{
-    catalog_fingerprint, current_catalog_state, insert_registered_edge, insert_registered_table,
-    read_catalog, regclass_text, split_catalog_columns, validate_column_exists,
-    validate_filter_column_type, validate_registered_table, RegisteredEdgeInsert,
-};
 use engine::Engine;
-use sql_aggregation::{aggregate_impl, path_count_estimate_impl};
-use sql_build::{execute_build, execute_maintenance_rebuild, execute_vacuum};
-use sql_filters::filter_helper;
-use sql_hydration::{hydrate_node, hydrate_nodes};
-use sql_jobs::{
-    build_job_row, create_build_job, create_maintenance_job, launch_build_worker,
-    launch_maintenance_worker, maintenance_job_row, run_build_job, run_maintenance_job,
-    update_build_job_failed, update_maintenance_job_failed, JobStatus, WorkerMetadata,
-};
-use sql_search::{source_table_search_rows, validate_search_request};
-use sql_sync::{
-    apply_sync_internal, apply_sync_until, current_sync_mode, disabled_graph_trigger_count,
-    install_sync_triggers, max_sync_log_id, pending_sync_rows, resolve_tenant_scope,
-};
-use sql_traversal::{
-    apply_traversal_uniqueness, canonical_node_ref_string, execute_traverse_candidates,
-    execute_traverse_rows, format_path_value, paginate_and_format_traverse_candidates,
-    sort_traverse_candidates_for_many, usize_from_nonnegative,
-};
 
-#[cfg(feature = "pg_test")]
-use api_types::{BuildExecutionResult, MaintenanceExecutionResult};
-#[cfg(feature = "pg_test")]
-use catalog::validate_numeric_column;
-#[cfg(feature = "pg_test")]
-use quote::quote_literal as sql_literal;
 #[cfg(any(test, feature = "fuzzing"))]
 use sql_filters::validate_structured_operator_shape;
-#[cfg(feature = "pg_test")]
-use sql_jobs::{
-    update_build_job_completed, update_build_job_progress, update_build_job_started,
-    update_maintenance_job_completed, update_maintenance_job_progress,
-    update_maintenance_job_started,
-};
 #[cfg(any(test, feature = "fuzzing"))]
 use sql_sync::parse_sync_properties;
 #[cfg(any(test, feature = "fuzzing"))]
@@ -215,18 +180,6 @@ pub extern "C-unwind" fn _PG_init() {
 
     pgrx::log!("graph: extension loaded (v{})", env!("CARGO_PKG_VERSION"));
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// SQL Functions — graph schema
-// ─────────────────────────────────────────────────────────────────────
-
-include!("sql_facade/admin.rs");
-include!("sql_facade/discovery.rs");
-include!("sql_facade/traversal.rs");
-include!("sql_facade/search.rs");
-include!("sql_facade/workflow.rs");
-include!("sql_facade/components.rs");
-include!("sql_facade/runtime.rs");
 
 // ─────────────────────────────────────────────────────────────────────
 // Test module

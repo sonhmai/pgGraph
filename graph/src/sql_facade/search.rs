@@ -1,3 +1,9 @@
+use super::admin::{check_enabled, check_enabled_result, with_panic_boundary};
+use super::runtime::{
+    current_query_freshness, ensure_current_graph, ensure_current_graph_for_query,
+};
+use super::*;
+
 /// Search for nodes by property value.
 ///
 /// See: `docs/user_guide/querying.mdx`
@@ -7,7 +13,7 @@
     clippy::type_complexity,
     reason = "pgrx SQL ABI exposes each SQL argument and row column"
 )]
-fn search(
+pub(super) fn search(
     property_key: &str,
     property_value: &str,
     table_filter: default!(Option<pgrx::pg_sys::Oid>, "NULL"),
@@ -128,7 +134,7 @@ fn search_nodes(
     clippy::type_complexity,
     reason = "pgrx SQL ABI exposes each SQL argument and row column"
 )]
-fn traverse_search(
+pub(super) fn traverse_search(
     property_key: &str,
     property_value: &str,
     table_filter: default!(Option<pgrx::pg_sys::Oid>, "NULL"),
@@ -175,14 +181,13 @@ fn traverse_search(
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
-        let (direction, strategy, uniqueness) =
-            crate::sql_traversal::validate_traverse_options(
-                direction,
-                tenant_scope.as_deref(),
-                strategy,
-                uniqueness,
-            )
-            .unwrap_or_else(|err| err.report());
+        let (direction, strategy, uniqueness) = crate::sql_traversal::validate_traverse_options(
+            direction,
+            tenant_scope.as_deref(),
+            strategy,
+            uniqueness,
+        )
+        .unwrap_or_else(|err| err.report());
 
         let starts = search(
             property_key,

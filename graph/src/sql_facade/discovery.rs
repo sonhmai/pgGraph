@@ -1,3 +1,6 @@
+use super::admin::{build, with_panic_boundary};
+use super::*;
+
 /// Auto-discover tables and foreign keys from a schema.
 ///
 /// See: `docs/user_guide/schema-registration.mdx`

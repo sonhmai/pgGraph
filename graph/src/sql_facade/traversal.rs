@@ -1,3 +1,7 @@
+use super::admin::{check_enabled, check_enabled_result, with_panic_boundary};
+use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
+use super::*;
+
 /// BFS traversal from a seed node.
 ///
 /// See: `docs/user_guide/querying.mdx`
@@ -7,7 +11,7 @@
     clippy::type_complexity,
     reason = "pgrx SQL ABI exposes each SQL argument and row column"
 )]
-fn traverse(
+pub(super) fn traverse(
     seed_table: pgrx::pg_sys::Oid,
     seed_id: &str,
     max_depth: default!(i32, "current_setting('graph.default_max_depth')::int"),
@@ -45,14 +49,13 @@ fn traverse(
         ensure_current_graph_for_query(freshness).unwrap_or_else(|err| err.report());
         let tenant_scope =
             resolve_tenant_scope(tenant.as_deref()).unwrap_or_else(|err| err.report());
-        let (direction, strategy, _uniqueness) =
-            crate::sql_traversal::validate_traverse_options(
-                direction,
-                tenant_scope.as_deref(),
-                strategy,
-                uniqueness,
-            )
-            .unwrap_or_else(|err| err.report());
+        let (direction, strategy, _uniqueness) = crate::sql_traversal::validate_traverse_options(
+            direction,
+            tenant_scope.as_deref(),
+            strategy,
+            uniqueness,
+        )
+        .unwrap_or_else(|err| err.report());
         let request = TraverseRequest {
             root_table: seed_table,
             root_id: seed_id,
@@ -131,14 +134,13 @@ fn traverse_many(
             }
             .report();
         }
-        let (direction, strategy, uniqueness) =
-            crate::sql_traversal::validate_traverse_options(
-                direction,
-                tenant_scope.as_deref(),
-                strategy,
-                uniqueness,
-            )
-            .unwrap_or_else(|err| err.report());
+        let (direction, strategy, uniqueness) = crate::sql_traversal::validate_traverse_options(
+            direction,
+            tenant_scope.as_deref(),
+            strategy,
+            uniqueness,
+        )
+        .unwrap_or_else(|err| err.report());
 
         let mut candidates = Vec::new();
         for (table, id) in start_tables.into_iter().zip(start_ids) {
@@ -181,7 +183,7 @@ fn traverse_many(
     clippy::type_complexity,
     reason = "pgrx SQL ABI row shape is intentionally explicit"
 )]
-fn shortest_path(
+pub(super) fn shortest_path(
     source_table: pgrx::pg_sys::Oid,
     source_id: &str,
     target_table: pgrx::pg_sys::Oid,
@@ -306,10 +308,12 @@ fn weighted_shortest_path(
 }
 
 fn u64_to_bigint(value: u64) -> safety::GraphResult<i64> {
-    i64::try_from(value).map_err(|_| safety::GraphError::Internal(format!(
-        "weighted path cost {} exceeds SQL bigint range",
-        value
-    )))
+    i64::try_from(value).map_err(|_| {
+        safety::GraphError::Internal(format!(
+            "weighted path cost {} exceeds SQL bigint range",
+            value
+        ))
+    })
 }
 
 /// Aggregate over traversal results without hydrating every row client-side.

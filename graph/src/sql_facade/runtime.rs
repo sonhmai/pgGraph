@@ -1,3 +1,6 @@
+use super::admin::{check_enabled_result, require_graph_admin_result, with_panic_boundary};
+use super::*;
+
 /// Reset the engine — clear graph and remove persisted files.
 #[pg_extern(schema = "graph")]
 fn reset() {
@@ -24,7 +27,7 @@ fn reset() {
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────
 
-fn largest_component_id() -> safety::GraphResult<i64> {
+pub(super) fn largest_component_id() -> safety::GraphResult<i64> {
     check_enabled_result()?;
     require_graph_admin_result()?;
     ensure_current_graph_for_query(current_query_freshness()?)?;
@@ -40,7 +43,7 @@ fn largest_component_id() -> safety::GraphResult<i64> {
     })
 }
 
-fn component_rows(
+pub(super) fn component_rows(
     component_id: i64,
     limit: i32,
     offset: i32,
@@ -72,7 +75,7 @@ fn component_rows(
     hydrate_component_page(page, hydrate)
 }
 
-fn hydrate_component_page(
+pub(super) fn hydrate_component_page(
     page: Vec<connected_components::ComponentRow>,
     hydrate: bool,
 ) -> safety::GraphResult<Vec<ComponentNodeRow>> {
@@ -113,7 +116,7 @@ fn hydrate_component_page(
 /// FilterIndex and the edge type registry are bincode-deserialized into
 /// backend-local heap, and the reverse EdgeStore CSR is rebuilt into heap for
 /// inbound traversal.
-fn maybe_auto_load() {
+pub(super) fn maybe_auto_load() {
     if !config::AUTO_LOAD.get() {
         return;
     }
@@ -142,9 +145,8 @@ fn maybe_auto_load() {
         match persistence::load_graph_file(&path) {
             Ok(mut loaded_engine) => {
                 if let Ok((tables, edges, filters)) = read_catalog() {
-                    loaded_engine.set_catalog_fingerprint(catalog_fingerprint(
-                        &tables, &edges, &filters,
-                    ));
+                    loaded_engine
+                        .set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
                 }
                 let nc = loaded_engine.node_store.node_count();
                 let ec = loaded_engine.edge_store.edge_count();
@@ -165,7 +167,7 @@ fn maybe_auto_load() {
     });
 }
 
-fn ensure_current_graph() -> safety::GraphResult<()> {
+pub(super) fn ensure_current_graph() -> safety::GraphResult<()> {
     maybe_auto_load();
 
     let sync_mode = current_sync_mode()?;
@@ -196,7 +198,7 @@ fn ensure_current_graph() -> safety::GraphResult<()> {
     Ok(())
 }
 
-fn current_query_freshness() -> safety::GraphResult<config::QueryFreshness> {
+pub(super) fn current_query_freshness() -> safety::GraphResult<config::QueryFreshness> {
     config::parsed_query_freshness().ok_or_else(|| safety::GraphError::InvalidFilter {
         reason: format!(
             "unsupported graph.query_freshness '{}'; expected 'off', 'apply_pending_sync', or 'error_on_pending'",
@@ -205,7 +207,7 @@ fn current_query_freshness() -> safety::GraphResult<config::QueryFreshness> {
     })
 }
 
-fn ensure_current_graph_for_query(
+pub(super) fn ensure_current_graph_for_query(
     freshness: config::QueryFreshness,
 ) -> safety::GraphResult<()> {
     ensure_current_graph()?;
