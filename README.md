@@ -117,8 +117,24 @@ scripts/quickstart.sh docker my-postgres 17 appdb postgres
 scripts/quickstart.sh pgrx
 
 # start Streamlit playground with a preset dataset (panama|ldbc)
-scripts/quickstart.sh playground panama 
+scripts/quickstart.sh playground panama
 ```
+
+Supported modes:
+
+- `quickstart` / `demo`: build and start the Docker Postgres service, load demo
+  data, and run example graph queries. This is the default mode.
+- `setup`: build and start Postgres with pgGraph installed, but do not load the
+  sample graph.
+- `psql`: build and start Postgres, prepare demo data, then open `psql`.
+- `docker CONTAINER [PG_MAJOR] [DB_NAME] [DB_USER]`: install pgGraph into an
+  existing running Postgres Docker container via
+  `scripts/install_into_docker_postgres.sh`.
+- `pgrx [PG_MAJOR]`: build and install pgGraph into a local PostgreSQL using
+  `cargo pgrx install`.
+- `playground [panama|ldbc]`: start the Streamlit playground using a preset
+  dataset.
+- `clean`: stop the Compose database and remove its volume.
 
 The script works on macOS and Linux from a normal terminal, and on Windows from
 WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command

@@ -106,8 +106,22 @@ scripts/quickstart.sh docker my-postgres 17 appdb postgres
 scripts/quickstart.sh pgrx
 
 # 使用预设数据集启动 Streamlit playground（panama|ldbc）
-scripts/quickstart.sh playground panama 
+scripts/quickstart.sh playground panama
 ```
+
+支持的模式：
+
+- `quickstart` / `demo`：构建并启动 Docker Postgres 服务，加载演示数据，
+  并运行示例图查询。这是默认模式。
+- `setup`：构建并启动已安装 pgGraph 的 Postgres，但不加载示例图。
+- `psql`：构建并启动 Postgres，准备演示数据，然后打开 `psql`。
+- `docker CONTAINER [PG_MAJOR] [DB_NAME] [DB_USER]`：通过
+  `scripts/install_into_docker_postgres.sh` 将 pgGraph 安装到现有运行中的
+  Postgres Docker 容器。
+- `pgrx [PG_MAJOR]`：使用 `cargo pgrx install` 构建 pgGraph，并安装到本地
+  PostgreSQL。
+- `playground [panama|ldbc]`：使用预设数据集启动 Streamlit playground。
+- `clean`：停止 Compose 数据库并删除其 volume。
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
