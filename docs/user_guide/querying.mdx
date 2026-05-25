@@ -129,9 +129,10 @@ the same node-level result set.
 
 Traversal filters are structured JSON predicates built with helper functions
 such as `graph.eq()`, `graph.not_in()`, `graph.between()`, and
-`graph.is_null()`. Registered filter columns are pushed down into the graph
-filter index; predicates on other registered node columns are checked against
-hydrated source rows.
+`graph.is_null()`. Text filters can also use `graph.contains_text()` and
+`graph.prefix_text()` for substring and prefix checks. Registered filter
+columns are pushed down into the graph filter index; predicates on other
+registered node columns are checked against hydrated source rows.
 
 ```sql
 SELECT *

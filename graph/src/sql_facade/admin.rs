@@ -983,6 +983,26 @@ fn not_in(column_name: &str, values: pgrx::JsonB) -> pgrx::JsonB {
     filter_helper(column_name, "not_in", values)
 }
 
+/// Build a structured substring filter for text traversal filters.
+#[pg_extern(schema = "graph")]
+fn contains_text(column_name: &str, value: &str) -> pgrx::JsonB {
+    filter_helper(
+        column_name,
+        "contains",
+        pgrx::JsonB(serde_json::Value::String(value.to_string())),
+    )
+}
+
+/// Build a structured prefix filter for text traversal filters.
+#[pg_extern(schema = "graph")]
+fn prefix_text(column_name: &str, value: &str) -> pgrx::JsonB {
+    filter_helper(
+        column_name,
+        "prefix",
+        pgrx::JsonB(serde_json::Value::String(value.to_string())),
+    )
+}
+
 /// Build a structured SQL NULL filter.
 #[pg_extern(schema = "graph")]
 fn is_null(column_name: &str) -> pgrx::JsonB {

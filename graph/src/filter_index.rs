@@ -314,6 +314,12 @@ impl FilterIndex {
             FilterOp::NotInToken(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if !expected.contains(&value))
             }
+            FilterOp::ContainsToken(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if self.text_value(column_idx, value).is_some_and(|actual| actual.contains(expected)))
+            }
+            FilterOp::PrefixToken(_, expected) => {
+                matches!(storage.value(node_idx), Some(EncodedFilterValue::Text(value)) if self.text_value(column_idx, value).is_some_and(|actual| actual.starts_with(expected)))
+            }
             FilterOp::EqUuid(_, expected) => {
                 matches!(storage.value(node_idx), Some(EncodedFilterValue::Uuid(value)) if value == *expected)
             }
@@ -372,6 +378,14 @@ impl FilterIndex {
             .get(column_idx)
             .and_then(|dictionary| dictionary.get(value))
             .copied()
+    }
+
+    /// Return an interned text value by token for `column_idx`.
+    pub fn text_value(&self, column_idx: usize, token: u32) -> Option<&str> {
+        self.reverse_text_dictionaries
+            .get(column_idx)
+            .and_then(|dictionary| dictionary.get(token as usize))
+            .map(String::as_str)
     }
 
     /// Number of registered filter columns.
@@ -757,6 +771,8 @@ mod tests {
         assert_eq!(fi.storage_kind(col), Some(FilterStorageKind::SparseLookup));
         assert!(fi.check_filter(1, &FilterOp::EqToken(col, open)));
         assert!(fi.check_filter(2, &FilterOp::NeqToken(col, open)));
+        assert!(fi.check_filter(1, &FilterOp::ContainsToken(col, "pe".to_string())));
+        assert!(fi.check_filter(2, &FilterOp::PrefixToken(col, "cl".to_string())));
         assert!(!fi.check_filter(9, &FilterOp::NeqToken(col, open)));
         assert!(fi.check_filter(9, &FilterOp::IsNull(col)));
     }

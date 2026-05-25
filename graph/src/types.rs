@@ -278,6 +278,10 @@ pub enum FilterOp {
     InToken(usize, Vec<u32>),
     /// Dictionary-encoded text token is not one of the listed values.
     NotInToken(usize, Vec<u32>),
+    /// Dictionary-encoded text value contains the substring.
+    ContainsToken(usize, String),
+    /// Dictionary-encoded text value starts with the prefix.
+    PrefixToken(usize, String),
     /// UUID column equals the 128-bit UUID value.
     EqUuid(usize, u128),
     /// UUID column does not equal the 128-bit UUID value.
@@ -372,6 +376,8 @@ impl FilterOp {
             | FilterOp::NeqToken(_, _)
             | FilterOp::InToken(_, _)
             | FilterOp::NotInToken(_, _)
+            | FilterOp::ContainsToken(_, _)
+            | FilterOp::PrefixToken(_, _)
             | FilterOp::EqUuid(_, _)
             | FilterOp::NeqUuid(_, _)
             | FilterOp::InUuid(_, _)
@@ -411,6 +417,8 @@ impl FilterOp {
             | FilterOp::NeqToken(idx, _)
             | FilterOp::InToken(idx, _)
             | FilterOp::NotInToken(idx, _)
+            | FilterOp::ContainsToken(idx, _)
+            | FilterOp::PrefixToken(idx, _)
             | FilterOp::EqUuid(idx, _)
             | FilterOp::NeqUuid(idx, _)
             | FilterOp::InUuid(idx, _)

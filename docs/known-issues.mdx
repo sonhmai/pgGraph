@@ -86,6 +86,7 @@ remaining sections below are still open work.
 | Auto-discovery text properties | Auto-discovery documentation now states that discovered searchable properties are bounded string-like columns, and points users to manual registration for custom search surfaces and filter-column registration for traversal filters. |
 | Case-insensitive search indexes | Search documentation now describes the `lower(<column>::text)` expression shape and shows matching btree and trigram index examples for case-insensitive exact, prefix, and contains search. |
 | Structured filter membership and null operators | Structured traversal filters now support `graph.in()`, `graph.not_in()`, `graph.is_null()`, and `graph.is_not_null()` across typed pushdown filters and hydration filters. |
+| Structured text filter operators | Structured traversal filters now support `graph.contains_text()` and `graph.prefix_text()` across typed pushdown filters and hydration filters. |
 | Legacy raw filter exposure | The legacy unsigned raw-filter parser was removed from development builds before the remaining test/fuzz-only parser was deleted. |
 | Legacy raw filter removal | The remaining legacy unsigned raw-filter parser, its unit tests, and its fuzz target were removed; structured JSONB filter validation is the supported filter fuzz boundary. |
 | GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
@@ -168,9 +169,11 @@ were completed.
 These items clarify behavior or broaden the API. They are planned, but should
 not block use of the current documented SQL surface.
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| Structured text filter operators | Structured filters now cover equality, inequality, range comparisons, `between`, `in`, `not_in`, and explicit null checks. | Consider dedicated text-search filter operators only when traversal-filter product requirements need them beyond `graph.search()` and `graph.traverse_search()`. |
+<Callout type="info">
+No currently tracked P2 rows remain after structured traversal filters gained
+text substring and prefix predicates alongside equality, membership, range, and
+null checks.
+</Callout>
 
 ## P3: Internals and Maintainability
 
@@ -179,7 +182,7 @@ but they do not change core user behavior.
 
 | Area | Current limitation | Planned direction |
 |---|---|---|
-| pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs`. | Replace test `include!` usage with normal modules and local imports. |
+| pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs` because pgrx `#[pg_schema]` currently requires an inline `mod {}` body for generated SQL tests. | Revisit when the pgrx macro supports out-of-line modules or when the pg test harness is reorganized around macro-compatible test modules. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 
 ## Lower-Priority Optimizations

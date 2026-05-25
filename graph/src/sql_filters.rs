@@ -48,6 +48,8 @@ pub(crate) enum HydrationFilterOperator {
     Between(serde_json::Value, serde_json::Value),
     In(Vec<serde_json::Value>),
     NotIn(Vec<serde_json::Value>),
+    Contains(String),
+    Prefix(String),
     IsNull,
     IsNotNull,
 }
@@ -293,6 +295,14 @@ pub(crate) fn validate_structured_operator_shape(
 ) -> safety::GraphResult<()> {
     match operator {
         "eq" | "neq" | "gt" | "gte" | "lt" | "lte" => Ok(()),
+        "contains" | "prefix" => {
+            value
+                .as_str()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("{} filter for '{}' must be text", operator, column),
+                })?;
+            Ok(())
+        }
         "between" => {
             value
                 .as_array()
@@ -416,6 +426,18 @@ pub(crate) fn typed_pushdown_filter_op(
                         jsonb_filter_array(&filter.column, &filter.value, |value| {
                             jsonb_filter_text_token(filter_index, column_idx, value)
                         })?,
+                    ));
+                }
+                "contains" => {
+                    return Ok(types::FilterOp::ContainsToken(
+                        column_idx,
+                        jsonb_filter_text(&filter.value)?,
+                    ));
+                }
+                "prefix" => {
+                    return Ok(types::FilterOp::PrefixToken(
+                        column_idx,
+                        jsonb_filter_text(&filter.value)?,
                     ));
                 }
                 _ => {}
@@ -619,6 +641,22 @@ pub(crate) fn hydration_filter_operator(
         "gte" => Ok(HydrationFilterOperator::Gte(value.clone())),
         "lt" => Ok(HydrationFilterOperator::Lt(value.clone())),
         "lte" => Ok(HydrationFilterOperator::Lte(value.clone())),
+        "contains" => Ok(HydrationFilterOperator::Contains(
+            value
+                .as_str()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("contains filter for '{}' must be text", column),
+                })?
+                .to_string(),
+        )),
+        "prefix" => Ok(HydrationFilterOperator::Prefix(
+            value
+                .as_str()
+                .ok_or_else(|| safety::GraphError::InvalidFilter {
+                    reason: format!("prefix filter for '{}' must be text", column),
+                })?
+                .to_string(),
+        )),
         "is_null" => Ok(HydrationFilterOperator::IsNull),
         "is_not_null" => Ok(HydrationFilterOperator::IsNotNull),
         "between" => {
@@ -690,6 +728,15 @@ pub(crate) fn jsonb_filter_bool(value: &serde_json::Value) -> safety::GraphResul
         .as_bool()
         .ok_or_else(|| safety::GraphError::InvalidFilter {
             reason: "boolean filter values must be booleans".to_string(),
+        })
+}
+
+pub(crate) fn jsonb_filter_text(value: &serde_json::Value) -> safety::GraphResult<String> {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| safety::GraphError::InvalidFilter {
+            reason: "text filter values must be text".to_string(),
         })
 }
 
@@ -773,6 +820,12 @@ pub(crate) fn hydration_filter_match(node: &pgrx::JsonB, filter: &HydrationFilte
                     .iter()
                     .all(|expected| !json_values_equal(actual, expected))
         }
+        HydrationFilterOperator::Contains(expected) => actual
+            .as_str()
+            .is_some_and(|actual| actual.contains(expected)),
+        HydrationFilterOperator::Prefix(expected) => actual
+            .as_str()
+            .is_some_and(|actual| actual.starts_with(expected)),
         HydrationFilterOperator::IsNull => actual.is_null(),
         HydrationFilterOperator::IsNotNull => !actual.is_null(),
     }
@@ -897,6 +950,20 @@ mod tests {
     }
 
     #[test]
+    fn text_operator_shapes_require_text_values() {
+        assert!(validate_structured_operator_shape("name", "contains", &json!("ann")).is_ok());
+        assert!(validate_structured_operator_shape("name", "prefix", &json!("an")).is_ok());
+        assert!(matches!(
+            validate_structured_operator_shape("name", "contains", &json!(1)),
+            Err(safety::GraphError::InvalidFilter { .. })
+        ));
+        assert!(matches!(
+            validate_structured_operator_shape("name", "prefix", &json!([1, 2])),
+            Err(safety::GraphError::InvalidFilter { .. })
+        ));
+    }
+
+    #[test]
     fn typed_i64_op_accepts_membership_arrays() {
         assert!(matches!(
             typed_i64_op(0, "in", &serde_json::json!([1, 2]), test_i64_encoder),
@@ -926,10 +993,22 @@ mod tests {
             column: "closed_at".to_string(),
             operator: HydrationFilterOperator::IsNull,
         };
+        let contains_filter = HydrationFilter {
+            table_oid: 1,
+            column: "status".to_string(),
+            operator: HydrationFilterOperator::Contains("pe".to_string()),
+        };
+        let prefix_filter = HydrationFilter {
+            table_oid: 1,
+            column: "status".to_string(),
+            operator: HydrationFilterOperator::Prefix("op".to_string()),
+        };
 
         assert!(hydration_filter_match(&node, &in_filter));
         assert!(hydration_filter_match(&node, &not_in_filter));
         assert!(hydration_filter_match(&node, &null_filter));
+        assert!(hydration_filter_match(&node, &contains_filter));
+        assert!(hydration_filter_match(&node, &prefix_filter));
     }
 
     #[test]

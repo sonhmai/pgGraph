@@ -617,6 +617,8 @@ graph.neq(column_name text, value bigint) RETURNS jsonb
 
 graph.in(column_name text, values jsonb) RETURNS jsonb
 graph.not_in(column_name text, values jsonb) RETURNS jsonb
+graph.contains_text(column_name text, value text) RETURNS jsonb
+graph.prefix_text(column_name text, value text) RETURNS jsonb
 graph.is_null(column_name text) RETURNS jsonb
 graph.is_not_null(column_name text) RETURNS jsonb
 
