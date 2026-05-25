@@ -405,6 +405,7 @@ mod tests {
         let bytes = builder.to_bytes();
 
         assert_eq!(builder.len(), 3);
+        assert_eq!(builder.resolve(10, "A"), Some(0));
         assert_eq!(bytes.len(), 4 + 3 * ENTRY_SIZE);
     }
 
@@ -448,6 +449,8 @@ mod tests {
             delta.insert(10, &format!("unrelated-{i}"), i);
         }
         delta.insert(10, "target", 1001);
+
+        assert_eq!(delta.len(), 1001);
 
         let mut verified = 0;
         assert_eq!(
