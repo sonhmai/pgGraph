@@ -28,7 +28,7 @@ type TraversalEdgeOverlay = (OverlayInserts, OverlayDeletes);
 /// - `Finalized`: Sorted array, used after build, compact memory, binary search.
 /// - `MmapBacked`: Resolution section borrowed from the `.pggraph` mmap and
 ///   shared across backends via the OS page cache.
-pub enum ResolutionStore {
+pub(crate) enum ResolutionStore {
     /// Build-time: compact entries. Converted to Finalized before edge linking.
     Builder(ResolutionIndexBuilder),
     /// Post-build: sorted array in owned memory with binary-search lookups.
@@ -39,13 +39,13 @@ pub enum ResolutionStore {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MmapResolutionState {
+pub(crate) struct MmapResolutionState {
     offset: usize,
     len: usize,
 }
 
 impl MmapResolutionState {
-    pub fn new(offset: usize, len: usize) -> Self {
+    pub(crate) fn new(offset: usize, len: usize) -> Self {
         Self { offset, len }
     }
 
@@ -58,77 +58,77 @@ impl MmapResolutionState {
 pub struct Engine {
     /// Node metadata. After `.pggraph` load, base arrays are mmap-backed until a
     /// sync mutation materializes them into owned arrays.
-    pub node_store: NodeStore,
+    pub(crate) node_store: NodeStore,
     /// Forward CSR adjacency. After `.pggraph` load, this store is mmap-backed.
-    pub edge_store: EdgeStore,
+    pub(crate) edge_store: EdgeStore,
     /// Reverse CSR adjacency. This is derived into owned heap per backend.
-    pub reverse_edge_store: EdgeStore,
+    pub(crate) reverse_edge_store: EdgeStore,
     /// Traversal filter index. After `.pggraph` load, this is deserialized from a
     /// bincode section into backend-local heap.
-    pub filter_index: FilterIndex,
+    pub(crate) filter_index: FilterIndex,
     /// Edge label registry. After `.pggraph` load, this is deserialized from a
     /// bincode section into backend-local heap.
-    pub edge_type_registry: Vec<String>,
-    pub has_unidirectional_edges: bool,
-    pub built: bool,
-    pub sync_status: SyncStatus,
-    pub last_build: Option<TimestampWithTimeZone>,
-    pub last_vacuum: Option<TimestampWithTimeZone>,
+    pub(crate) edge_type_registry: Vec<String>,
+    pub(crate) has_unidirectional_edges: bool,
+    pub(crate) built: bool,
+    pub(crate) sync_status: SyncStatus,
+    pub(crate) last_build: Option<TimestampWithTimeZone>,
+    pub(crate) last_vacuum: Option<TimestampWithTimeZone>,
 
     /// Resolution store — switches from compact build entries to sorted array.
-    pub resolution_store: ResolutionStore,
+    pub(crate) resolution_store: ResolutionStore,
 
     /// Post-build indexed resolution delta for nodes inserted by sync replay.
     ///
     /// Finalized and mmap-backed resolution indexes are immutable. Inserts that
     /// arrive after build() live here until the next rebuild/vacuum merge.
-    pub resolution_delta: ResolutionDeltaIndex,
+    pub(crate) resolution_delta: ResolutionDeltaIndex,
 
     /// mmap handle. Keeps the mapping alive for mmap-backed NodeStore arrays,
     /// forward EdgeStore arrays, and ResolutionIndex bytes.
-    pub _mmap: Option<memmap2::Mmap>,
+    pub(crate) _mmap: Option<memmap2::Mmap>,
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
-    pub edge_buffer: Vec<EdgeMutation>,
+    pub(crate) edge_buffer: Vec<EdgeMutation>,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
     /// read-write engine.
-    pub is_read_only: bool,
+    pub(crate) is_read_only: bool,
     /// Operator-facing reason for read-only mode.
-    pub read_only_reason: Option<ReadOnlyReason>,
+    pub(crate) read_only_reason: Option<ReadOnlyReason>,
 
     /// Last durable sync-log row applied by this backend-local engine.
-    pub applied_sync_id: i64,
+    pub(crate) applied_sync_id: i64,
     /// Whether pending edge/node deltas require CSR rebuild.
-    pub needs_vacuum: bool,
+    pub(crate) needs_vacuum: bool,
     /// Whether catalog/schema drift requires graph rebuild.
-    pub needs_rebuild: bool,
+    pub(crate) needs_rebuild: bool,
     /// Schema state exposed by graph.status().
-    pub schema_state: SchemaState,
+    pub(crate) schema_state: SchemaState,
     /// Human-readable schema/sync invalidation reason.
-    pub invalid_reason: Option<String>,
+    pub(crate) invalid_reason: Option<String>,
     /// Disabled graph trigger count from the last schema/status check.
-    pub disabled_trigger_count: i32,
+    pub(crate) disabled_trigger_count: i32,
     /// Fingerprint of registered graph catalog state captured at build time.
-    pub catalog_fingerprint: Option<u64>,
+    pub(crate) catalog_fingerprint: Option<u64>,
     /// Number of pending durable sync rows from the last status/catch-up check.
-    pub pending_sync_rows: i64,
+    pub(crate) pending_sync_rows: i64,
     /// Active node membership by source table for table-scoped sync operations.
-    pub table_membership: HashMap<u32, RoaringBitmap>,
+    pub(crate) table_membership: HashMap<u32, RoaringBitmap>,
     /// Tenant membership by tenant value for tenanted table rows.
-    pub tenant_membership: HashMap<String, RoaringBitmap>,
+    pub(crate) tenant_membership: HashMap<String, RoaringBitmap>,
     /// Table OIDs that require tenant scoping.
-    pub tenanted_table_oids: HashSet<u32>,
+    pub(crate) tenanted_table_oids: HashSet<u32>,
 }
 
 /// A pending edge mutation from trigger sync.
 #[derive(Debug, Clone)]
 pub struct EdgeMutation {
-    pub source: u32,
-    pub target: u32,
-    pub type_id: u8,
-    pub kind: MutationKind,
+    pub(crate) source: u32,
+    pub(crate) target: u32,
+    pub(crate) type_id: u8,
+    pub(crate) kind: MutationKind,
 }
 
 /// Engine sync status. Replaces raw strings for type safety.
@@ -339,7 +339,7 @@ impl Engine {
         self.last_vacuum = vacuumed_at;
     }
 
-    pub fn install_mmap_backed_graph(
+    pub(crate) fn install_mmap_backed_graph(
         &mut self,
         node_store: NodeStore,
         edge_store: EdgeStore,

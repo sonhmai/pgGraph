@@ -90,6 +90,10 @@ remaining sections below are still open work.
 | GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
 | Mmap sync mutation boundary | Sync node insert, delete, and truncate paths now mutate node storage through engine helpers that materialize mmap-backed arrays before mutation. |
 | Sync row replay operation | Sync replay now resolves each durable row into a typed node operation before applying ordered edge overlays, tenant updates, filter refresh, and node replacement. |
+| Build/vacuum pipeline boundary | Build and vacuum share replacement-engine construction while keeping build-only trigger setup and vacuum-only tombstone accounting explicit. |
+| Mmap resolution ownership | Resolution offset/length metadata lives in `ResolutionStore::MmapBacked`, while the engine-owned mmap handle remains shared with node and edge stores. |
+| Sync row parsing boundary | Sync replay parses old/new row images once per log entry and passes borrowed JSON through tenant, filter, reservation, and edge replay helpers. |
+| Engine state encapsulation | Engine store, sync, resolution, mmap, and status fields are now crate-visible internals instead of public crate API fields. |
 
 ### Data Correctness and Corruption
 
@@ -176,11 +180,7 @@ but they do not change core user behavior.
 | Area | Current limitation | Planned direction |
 |---|---|---|
 | pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs`. | Replace test `include!` usage with normal modules and local imports. |
-| Build/vacuum pipeline | Build and vacuum now share replacement-engine construction, while build-only trigger setup and vacuum-only tombstone accounting remain explicit. | Keep shared helpers limited to common pipeline steps so operation-specific behavior stays readable. |
-| Engine state encapsulation | Production status, build, sync, vacuum, persisted-load, mmap materialization, and resolution-state transitions now route through engine helpers, but some fields remain public while tests and lower-level store setup are being cleaned up. | Continue narrowing field visibility after the remaining internal refactors stop depending on direct store access. |
-| Mmap resolution state | The resolution offset/length now lives in `ResolutionStore::MmapBacked`, while the mmap handle remains engine-owned because node and edge stores borrow the same mapping. | Continue keeping resolution metadata attached to the active resolution backend and avoid reintroducing split offset fields. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
-| Sync row parsing | Sync replay parses each old/new row image once per log entry and passes borrowed JSON values through tenant, filter, reservation, and edge replay helpers. | Keep row-image parsing at the replay boundary as new sync paths are added. |
 
 ## Lower-Priority Optimizations
 
