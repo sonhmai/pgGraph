@@ -73,8 +73,6 @@ pub fn sync_insert(
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
-    engine.materialize_mmap_node_store_for_sync();
-
     // Upsert: if this (table_oid, pk) already exists, update in place
     // instead of creating a duplicate node slot.
     if engine.resolve(table_oid, pk).is_some() {
@@ -82,7 +80,7 @@ pub fn sync_insert(
     }
 
     // Add to NodeStore
-    let node_idx = engine.node_store.add_node(table_oid, pk.to_string());
+    let node_idx = engine.insert_sync_node(table_oid, pk);
     engine.insert_table_membership(table_oid, node_idx);
     if let Some(tenant) = tenant {
         engine.tenanted_table_oids.insert(table_oid);
@@ -117,8 +115,6 @@ pub fn sync_update_tenant(
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
-    engine.materialize_mmap_node_store_for_sync();
-
     // Resolve node index
     let node_idx = engine
         .resolve(table_oid, pk)
@@ -185,8 +181,6 @@ pub fn sync_delete_tenant(
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
-    engine.materialize_mmap_node_store_for_sync();
-
     // Resolve node index
     let node_idx = engine
         .resolve(table_oid, pk)
@@ -195,9 +189,9 @@ pub fn sync_delete_tenant(
             pk: pk.to_string(),
         })?;
 
-    // Tombstone: mark as inactive
-    engine.node_store.deactivate(node_idx);
-    engine.remove_table_membership(table_oid, node_idx);
+    if engine.tombstone_sync_node(table_oid, node_idx) {
+        engine.remove_table_membership(table_oid, node_idx);
+    }
 
     if let Some(old_tenant) = old_tenant {
         if let Some(bitmap) = engine.tenant_membership.get_mut(old_tenant) {
@@ -217,7 +211,7 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
     if engine.is_read_only {
         return Err(engine.read_only_error());
     }
-    engine.materialize_mmap_node_store_for_sync();
+    engine.prepare_sync_node_mutation();
     if !engine.table_membership.contains_key(&table_oid) {
         engine.rebuild_table_membership();
     }
@@ -228,10 +222,7 @@ pub fn sync_truncate(engine: &mut Engine, table_oid: u32) -> GraphResult<u64> {
         .cloned()
         .unwrap_or_default();
     for node_idx in &truncated_nodes {
-        if engine.node_store.is_active(node_idx)
-            && engine.node_store.table_oid(node_idx) == table_oid
-        {
-            engine.node_store.deactivate(node_idx);
+        if engine.tombstone_sync_node(table_oid, node_idx) {
             tombstoned += 1;
         }
     }

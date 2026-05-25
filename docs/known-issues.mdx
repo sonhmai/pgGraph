@@ -88,6 +88,7 @@ remaining sections below are still open work.
 | Structured filter membership and null operators | Structured traversal filters now support `graph.in()`, `graph.not_in()`, `graph.is_null()`, and `graph.is_not_null()` across typed pushdown filters and hydration filters. |
 | Legacy raw filter exposure | The legacy unsigned raw-filter parser no longer compiles in development builds; it remains only under unit tests and the dedicated fuzz target while public traversal uses structured JSONB filters. |
 | GUC enum compatibility | Configuration docs now record the compatibility policy for keeping alias-preserving typed settings as string GUCs while parsing them into Rust enums at the extension boundary. |
+| Mmap sync mutation boundary | Sync node insert, delete, and truncate paths now mutate node storage through engine helpers that materialize mmap-backed arrays before mutation. |
 
 ### Data Correctness and Corruption
 
@@ -176,7 +177,6 @@ but they do not change core user behavior.
 | pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs`. | Replace test `include!` usage with normal modules and local imports. |
 | Build/vacuum pipeline | Build and vacuum now share replacement-engine construction, while build-only trigger setup and vacuum-only tombstone accounting remain explicit. | Keep shared helpers limited to common pipeline steps so operation-specific behavior stays readable. |
 | Engine state encapsulation | Production status, build, sync, vacuum, persisted-load, mmap materialization, and resolution-state transitions now route through engine helpers, but some fields remain public while tests and lower-level store setup are being cleaned up. | Continue narrowing field visibility after the remaining internal refactors stop depending on direct store access. |
-| Mmap mutation API | Sync paths materialize mmap-backed node stores through engine helpers before mutation, but lower-level stores still expose direct mutation primitives. | Keep mmap mutation at the engine boundary and make invalid direct mutation harder to call from production code. |
 | Mmap resolution state | The resolution offset/length now lives in `ResolutionStore::MmapBacked`, while the mmap handle remains engine-owned because node and edge stores borrow the same mapping. | Continue keeping resolution metadata attached to the active resolution backend and avoid reintroducing split offset fields. |
 | Filter op shape | Filter variants carry repeated column target data. | Refactor toward a shared column target plus a condition enum. |
 | Sync row parsing | Sync replay parses each old/new row image once per log entry and passes borrowed JSON values through tenant, filter, reservation, and edge replay helpers. | Keep row-image parsing at the replay boundary as new sync paths are added. |

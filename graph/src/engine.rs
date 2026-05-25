@@ -460,6 +460,27 @@ impl Engine {
         }
     }
 
+    /// Prepare node storage for a sync operation that may mutate node state.
+    pub fn prepare_sync_node_mutation(&mut self) {
+        self.materialize_mmap_node_store_for_sync();
+    }
+
+    /// Insert an active sync node, materializing mmap-backed node arrays first.
+    pub fn insert_sync_node(&mut self, table_oid: u32, pk: &str) -> u32 {
+        self.materialize_mmap_node_store_for_sync();
+        self.node_store.add_node(table_oid, pk.to_string())
+    }
+
+    /// Tombstone an active sync node, materializing mmap-backed arrays first.
+    pub fn tombstone_sync_node(&mut self, table_oid: u32, node_idx: u32) -> bool {
+        self.materialize_mmap_node_store_for_sync();
+        if self.node_store.is_active(node_idx) && self.node_store.table_oid(node_idx) == table_oid {
+            self.node_store.deactivate(node_idx);
+            return true;
+        }
+        false
+    }
+
     #[cfg(test)]
     pub(crate) fn install_mmap_node_store_for_test(&mut self, node_store: NodeStore) {
         debug_assert!(node_store.is_mmap_backed());
