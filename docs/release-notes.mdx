@@ -2,6 +2,32 @@
 
 Release notes are ordered newest first.
 
+## v0.1.3: Structured Filters And Architecture Clarity
+
+`v0.1.3` adds structured traversal filter helpers and clarifies pgGraph's
+architecture tradeoffs before merging the alpha hardening follow-up branch back
+to `main`.
+
+### Highlights
+
+- Added structured traversal filter helpers for membership, text, and null
+  predicates: `graph.in()`, `graph.not_in()`, `graph.contains_text()`,
+  `graph.prefix_text()`, `graph.is_null()`, and `graph.is_not_null()`.
+- Removed the legacy raw-filter parser from production and development paths;
+  structured JSONB filters are now the supported traversal filter boundary.
+- Refactored filter pushdown state so column targets and predicate conditions
+  are represented separately.
+- Encapsulated sync row replay and mmap-backed node materialization behind
+  engine helpers.
+- Clarified architecture positioning around read-only mmap artifacts, SQL/PGQ,
+  and pgGraph's role as a rebuildable graph-index-like execution layer.
+
+### Validation
+
+Focused validation for this branch included local documentation reference checks
+and targeted Rust coverage for the changed filter, sync, and resolution paths.
+Run the full release gate before publishing binary packages for `v0.1.3`.
+
 ## v0.1.2: Alpha Hardening Follow-Up
 
 `v0.1.2` finishes the highest-priority follow-up work from the alpha hardening
