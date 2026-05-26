@@ -212,7 +212,7 @@ overlay buffers until maintenance or vacuum rebuilds the base CSR.
 | Backend-local `Engine` | Matches PostgreSQL process isolation and avoids shared mutable Rust state. |
 | CSR for topology | Compact adjacency slices make traversal cache-friendly and predictable. |
 | Reverse CSR is materialized | Inbound traversal stays O(degree) instead of scanning all forward edges. |
-| mmap for persisted forward arrays | Later backends can start quickly and share physical pages through the OS page cache. |
+| Read-only mmap for persisted forward arrays | Later backends can start quickly and share immutable derived artifact pages through the OS page cache without replacing PostgreSQL's buffer pool. |
 | Bincode metadata is heap-loaded | Filter and registry structures are variable-size Rust data that are easier to validate and use as owned values. |
 | Explicit maintenance | Expensive rebuild work is visible and controllable from SQL. |
 | Circuit breakers everywhere | The extension runs in PostgreSQL backends and must bound memory and traversal work. |

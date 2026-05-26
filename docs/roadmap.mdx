@@ -20,7 +20,7 @@ The current engine already supports the core SQL workflow:
 | Querying | Bounded traversal, shortest paths, weighted shortest paths, path reconstruction, source search, workflow helpers, and connected components. |
 | Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
 | Sync | Trigger-buffered change capture with explicit foreground or background apply. |
-| Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Forward graph arrays and resolution are mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
+| Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
 | Safety | ACL preflight, SQLSTATE mapping, circuit breakers, OOM checks, and panic-to-PostgreSQL-error boundaries. |
 
 ```text
@@ -28,7 +28,7 @@ current stable core
     |
     +-- SQL-first graph queries
     +-- trigger-buffered sync
-    +-- mmap-backed launch artifacts
+    +-- read-only mapped launch artifacts
     +-- release and safety hardening
 ```
 
@@ -63,7 +63,7 @@ flowchart LR
 | Sync operations | Clearer scheduling, monitoring, and failure handling around trigger-buffered sync and background maintenance jobs. |
 | Artifact tooling | More direct inspection and compatibility checks for persisted graph files. |
 | Query ergonomics | More examples around strict traversal specs, typed filters, workflow helpers, and pagination. |
-| Benchmarks | More end-to-end SQL benchmarks that separate PostgreSQL execution, graph traversal, hydration, and client overhead. |
+| Benchmarks | More end-to-end SQL benchmarks that separate PostgreSQL execution, graph traversal, hydration, client overhead, and PostgreSQL SQL/PGQ comparisons as PostgreSQL 19 matures. |
 
 ## Alpha Hardening Status
 

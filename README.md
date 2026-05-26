@@ -158,15 +158,14 @@ More information is available in the pgGraph docs:
 
 ## pgGraph: High-Speed Graph Execution Inside PostgreSQL
 
-pgGraph is not "Postgres plus graph syntax." It is a blazing-fast,
-cache-friendly graph execution layer for data that already lives in your
-ordinary relational tables.
+pgGraph is not "Postgres plus graph syntax." It is a cache-friendly graph
+execution layer for data that already lives in your ordinary relational tables.
 
 The core idea is simple but powerful: keep PostgreSQL as your system of record,
 but build a highly optimized, read-heavy graph runtime from that relational
-metadata. The result is closer to a graph index than a graph database, built
-from Postgres tables, operated with Postgres controls, but traversing
-relationships at memory speed.
+metadata. The result is closer to a rebuildable graph index than a graph
+database: it is built from Postgres tables, operated with Postgres controls,
+and optimized for repeated bounded traversal over known topology.
 
 ### The Tech: Why It's So Fast
 
@@ -179,16 +178,19 @@ structure.
   neighbors are stored as a contiguous array slice. Instead of rediscovering
   relationships via SQL, traversals are executed as raw, graph-native memory
   scans.
-- **A blazing-fast hot loop.** SQL-facing calls resolve coordinates, labels,
+- **A tight traversal loop.** SQL-facing calls resolve coordinates, labels,
   filters, and tenant scopes before entering the traversal loop. Once inside,
   the engine streams CSR neighbors, checking compact `u8` edge-label IDs,
   typed `FilterIndex` values, tenant bitmaps, active bits, and sync overlays.
-- **The OS is the cache (`mmap`).** We do not use a slow, shared Rust heap.
-  Persisted `.pggraph` artifacts are written atomically. When a new Postgres
-  backend spins up, it validates and mmaps the forward graph arrays and
-  resolution index. The graph cache is powered by the OS page cache, letting
-  isolated PostgreSQL backends start quickly without copying the base graph into
-  a shared extension heap.
+- **Read-only artifact mapping.** Persisted `.pggraph` artifacts are written
+  atomically. When a new Postgres backend spins up, it validates the artifact
+  and maps immutable forward graph arrays and the resolution index read-only.
+  The operating system page cache can then share those physical pages across
+  isolated PostgreSQL backends without copying the base graph into each
+  backend's Rust heap. This is not a replacement for PostgreSQL's buffer pool:
+  PostgreSQL remains responsible for table storage, WAL, MVCC, durability, and
+  crash recovery, while pgGraph's artifact is derived state that can be rebuilt
+  from source tables.
 - **Predictable and safe.** Unbounded graph expansion can crash a database.
   pgGraph includes explicit circuit breakers: depth limits, visited-node
   tracking, frontier limits, pagination, and strict OOM/memory safeguards.
@@ -216,16 +218,18 @@ existing schema and accelerate it with SQL functions like `graph.search()` and
 pgGraph to add bounded, high-speed graph traversal to an existing relational
 schema.
 
-#### vs. PostgreSQL 19 SQL/PGQ: Runtime Engine vs. Language Syntax
+#### vs. PostgreSQL 19 SQL/PGQ: Query Surface vs. Specialized Runtime
 
 SQL:2023 and PostgreSQL 19 introduce `CREATE PROPERTY GRAPH`, `GRAPH_TABLE`,
-and standard graph syntax. This is a language interoperability layer that
-rewrites graph pattern queries into ordinary relational queries.
+and standard graph syntax. That is the right long-term query surface for graph
+patterns in PostgreSQL, backed by PostgreSQL's planner and optimizer.
 
-pgGraph is an execution layer. It precomputes graph-native CSR stores and
-memory-mapped artifacts to fundamentally change how the query executes. They
-are complementary: future adapters could map PostgreSQL 19 syntax directly onto
-pgGraph's runtime.
+pgGraph targets a narrower execution niche. It precomputes graph-native CSR
+stores and rebuildable artifacts for workloads that repeatedly traverse the same
+topology with bounded depth, path limits, filters, tenants, and application
+pagination. They are complementary: future adapters could map eligible
+PostgreSQL SQL/PGQ patterns onto pgGraph's runtime, while general SQL/PGQ
+queries continue to use PostgreSQL's relational execution path.
 
 ## Community
 

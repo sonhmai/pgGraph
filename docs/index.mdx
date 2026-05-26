@@ -66,9 +66,10 @@ Star our repo to help us reach more developers, and follow our journey below:
 />
 
 ## How it Works
-pgGraph builds a compact, derived graph index over selected relational tables to 
-drastically accelerate query times. Because Postgres stays the system of record, 
-all standard tables and constraints still apply to application writes.
+pgGraph builds a compact, derived graph index over selected relational tables for
+repeated bounded traversal workloads. Because Postgres stays the system of
+record, all standard tables, constraints, WAL, MVCC, backups, ACLs, and RLS still
+apply to application writes.
 
 <HowItWorksSection />
 

@@ -14,7 +14,7 @@ data into another system.
 | SQL-first applications | The public API is PostgreSQL SQL functions in the `graph` schema |
 | Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
 | Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
-| Fast backend startup | Persisted forward graph arrays and resolution bytes can be mmap-loaded |
+| Fast backend startup | Persisted immutable forward graph arrays and resolution bytes can be mapped read-only and shared through the OS page cache |
 
 ## Not The Target
 
@@ -36,7 +36,7 @@ data into another system.
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
-| mmap sharing | Forward graph arrays and resolution bytes are mmap-backed; reverse CSR and bincode metadata are per-backend heap |
+| mmap sharing | Forward graph arrays and resolution bytes are read-only mmap-backed derived artifact sections; reverse CSR and bincode metadata are per-backend heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
 | Hydration | Hydrated rows come from source tables and require source-table privileges |
@@ -68,6 +68,13 @@ can tolerate scheduled refresh, use periodic build or maintenance jobs.
 
 The persisted `.pggraph` file reduces repeated startup cost, but it does not make
 every structure shared:
+
+<Callout type="info">
+pgGraph uses mmap for immutable, rebuildable graph artifacts, not as a mutable
+database storage engine or PostgreSQL buffer-pool replacement. PostgreSQL remains
+responsible for authoritative table storage, WAL, MVCC, durability, and crash
+recovery.
+</Callout>
 
 | Structure | Sharing behavior |
 |---|---|

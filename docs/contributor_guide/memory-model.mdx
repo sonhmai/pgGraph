@@ -1,10 +1,12 @@
 # Memory Model
 
 The engine is designed around cache-friendly owned arrays during build and
-mmap-backed fixed-width arrays after persistence. PostgreSQL backends do not
-share Rust heap memory. After auto-load, they share the fixed-width persisted
-base graph pages through the operating system page cache, while derived and
-variable-size structures remain per-backend heap allocations.
+read-only mmap-backed fixed-width arrays after persistence. PostgreSQL backends
+do not share Rust heap memory. After auto-load, they can share the immutable
+fixed-width persisted base graph pages through the operating system page cache,
+while derived and variable-size structures remain per-backend heap allocations.
+This mapping is for rebuildable graph artifacts only; PostgreSQL still owns
+authoritative table storage, WAL, MVCC, durability, and crash recovery.
 
 ## Backend Ownership
 
