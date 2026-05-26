@@ -1,0 +1,116 @@
+# Architecture And Tradeoffs
+
+pgGraph is an alpha PostgreSQL extension, and its architecture reflects choices
+that are open to critique. This page explains the main design choices, the
+tradeoffs behind them, and the places where future work may prove a different
+direction is better.
+
+The short version: pgGraph is a derived graph execution layer for existing
+PostgreSQL tables. PostgreSQL remains the source of truth. pgGraph builds a
+rebuildable graph artifact and uses compact in-memory structures to answer
+bounded traversal, path, and relationship queries through SQL.
+
+It is not a new PostgreSQL storage engine, not a replacement for PostgreSQL's
+buffer pool, and not a separate graph database that owns your data.
+
+## Design Philosophy
+
+| Decision | Tradeoff |
+|---|---|
+| Keep source tables authoritative | pgGraph can rebuild from PostgreSQL data, but query speed depends on a derived artifact being fresh enough for the workload. |
+| Use SQL functions as the public API | Applications stay inside PostgreSQL, but pgGraph does not yet expose a standard graph query language directly. |
+| Precompute CSR adjacency | Traversal avoids repeatedly discovering edges through joins, but builds and maintenance become explicit operational steps. |
+| Keep engines backend-local | This matches PostgreSQL's process model and avoids shared mutable Rust state, but reverse CSR, filter indexes, and edge type registries are currently duplicated per backend. |
+| Use read-only mmap for immutable artifacts | Later backends can share physical pages through the OS page cache, but mmap has well-known database-system failure and performance tradeoffs. |
+| Enforce circuit breakers | Traversal is bounded for database safety, but pgGraph is not trying to run unbounded graph analytics in OLTP query paths. |
+
+## Why mmap?
+
+<Callout type="warning">
+Database engineers are right to be suspicious of mmap. The CMU Database Group's
+CIDR 2022 paper
+[Are You Sure You Want to Use MMAP in Your Database Management System?](https://db.cs.cmu.edu/mmap-cidr2022/)
+argues that mmap is not a suitable replacement for a traditional DBMS buffer
+pool. That warning is relevant, and pgGraph should be evaluated against it.
+</Callout>
+
+pgGraph uses mmap for immutable, rebuildable graph artifacts, not as a mutable
+database storage engine or PostgreSQL buffer-pool replacement.
+
+When `graph.persist_on_build = true`, pgGraph writes a `.pggraph` artifact from
+registered PostgreSQL tables. Later backend processes can validate that artifact
+and map fixed-width sections read-only:
+
+- node active bits, table OIDs, primary-key offsets, and primary-key bytes;
+- forward CSR offsets, targets, edge-label IDs, and optional weights;
+- the resolution index used to map source table coordinates to graph node IDs.
+
+The operating system page cache can then share those physical pages across
+isolated PostgreSQL backend processes. That avoids copying the same immutable
+base graph arrays into every backend's Rust heap.
+
+The boundary matters:
+
+- PostgreSQL still owns table storage, WAL, MVCC, indexes, durability, crash
+  recovery, ACLs, RLS, backups, and application writes.
+- The `.pggraph` file is derived state. If it is missing, incompatible, or
+  corrupt, rebuild it from source tables.
+- pgGraph maps artifact sections read-only. Sync overlays and mutable derived
+  state remain backend-local.
+- Reverse CSR, filter indexes, and edge type registry data are still currently
+  backend-local heap structures after load. Whether these should move into
+  mmap-friendly sections is an open question discussed in
+  [Where We May Be Wrong](#where-we-may-be-wrong) below.
+
+That does not make mmap free. It still means pgGraph must account for page
+faults, OS eviction decisions, file integrity, artifact validation, memory
+observability, and platform-specific behavior. The design is a narrow use of
+mmap for immutable derived data, not a claim that mmap is a general-purpose
+database buffer manager.
+
+## Why Not Just SQL/PGQ?
+
+PostgreSQL 19 is expected to introduce SQL/PGQ: `CREATE PROPERTY GRAPH`,
+`GRAPH_TABLE`, and a standard way to express graph patterns inside SQL. SQL/PGQ
+gives PostgreSQL a standards-based graph query surface backed by the planner and
+optimizer — the same infrastructure that makes PostgreSQL's relational queries
+strong.
+
+pgGraph solves a different problem at a different layer. SQL/PGQ expresses graph
+patterns and lets the PostgreSQL optimizer choose how to execute them. pgGraph
+precomputes a CSR adjacency layout from registered tables so that repeated
+bounded traversals over known topology avoid rediscovering relationships through
+relational joins on every query. The tradeoff is that pgGraph requires explicit
+build and maintenance steps to keep that derived structure fresh.
+
+The long-term fit may be complementary:
+
+- SQL/PGQ can become the natural way to express graph queries in PostgreSQL.
+- pgGraph can act as a specialized runtime or graph-index-like structure for the
+  subset of patterns that match its bounded traversal model.
+- General graph patterns should continue to use PostgreSQL's relational planning
+  and execution path when that is the better fit.
+
+## Where We May Be Wrong
+
+pgGraph is young. These are the areas where critique is especially useful:
+
+- Whether read-only mmap remains the right artifact-loading strategy at larger
+  graph sizes and higher backend counts.
+- Whether reverse CSR and filter indexes should move into mmap-friendly sections
+  or a different shared representation.
+- Whether planner integration should become deeper than conservative function
+  `COST` and `ROWS` hints. Possible directions include custom scan nodes that
+  let the PostgreSQL planner push predicates into graph traversal, path-key
+  integration for merge joins over graph results, or statistics-based cost
+  estimation that reflects actual graph topology rather than static row-count
+  estimates.
+- Whether SQL/PGQ should become the main public query surface sooner, with
+  pgGraph acting mostly as a runtime for eligible patterns.
+- Whether operational complexity around build, sync, maintenance, and artifact
+  freshness is acceptable for the workloads pgGraph targets.
+
+We welcome architecture feedback, benchmark results, failure reports, and
+counterexamples. The most useful critiques are specific: workload shape, graph
+size, PostgreSQL version, query pattern, freshness requirement, memory budget,
+and what behavior would make pgGraph safer or easier to operate.

@@ -1,6 +1,7 @@
 export default {
   index: 'Overview',
   architecture: 'Architecture',
+  'architecture-tradeoffs': 'Architecture And Tradeoffs',
   'repository-map': 'Repository Map',
   'engine-internals': 'Engine Internals',
   'memory-model': 'Memory Model',

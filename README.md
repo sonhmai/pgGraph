@@ -218,18 +218,19 @@ existing schema and accelerate it with SQL functions like `graph.search()` and
 pgGraph to add bounded, high-speed graph traversal to an existing relational
 schema.
 
-#### vs. PostgreSQL 19 SQL/PGQ: Query Surface vs. Specialized Runtime
+#### vs. PostgreSQL 19 SQL/PGQ
 
 SQL:2023 and PostgreSQL 19 introduce `CREATE PROPERTY GRAPH`, `GRAPH_TABLE`,
-and standard graph syntax. That is the right long-term query surface for graph
-patterns in PostgreSQL, backed by PostgreSQL's planner and optimizer.
+and standard graph pattern matching backed by PostgreSQL's planner and
+optimizer — the same engine that makes PostgreSQL's relational queries strong.
 
-pgGraph targets a narrower execution niche. It precomputes graph-native CSR
+pgGraph operates at a different layer. SQL/PGQ expresses graph patterns and lets
+the optimizer choose how to execute them. pgGraph precomputes CSR adjacency
 stores and rebuildable artifacts for workloads that repeatedly traverse the same
 topology with bounded depth, path limits, filters, tenants, and application
-pagination. They are complementary: future adapters could map eligible
-PostgreSQL SQL/PGQ patterns onto pgGraph's runtime, while general SQL/PGQ
-queries continue to use PostgreSQL's relational execution path.
+pagination. The two can be complementary: future adapters could map eligible
+SQL/PGQ patterns onto pgGraph's precomputed runtime, while general graph queries
+continue to use PostgreSQL's relational execution path.
 
 ## Community
 
