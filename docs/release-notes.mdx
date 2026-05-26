@@ -4,29 +4,134 @@ Release notes are ordered newest first.
 
 ## v0.1.3: Structured Filters And Architecture Clarity
 
-`v0.1.3` adds structured traversal filter helpers and clarifies pgGraph's
-architecture tradeoffs before merging the alpha hardening follow-up branch back
-to `main`.
+`v0.1.3` adds structured traversal filter helpers, removes the legacy raw-filter
+parser, refactors internal filter and sync state, tightens engine encapsulation,
+and documents pgGraph's architecture tradeoffs. It keeps the `v0.1.2` SQL
+contract and adds no breaking changes.
 
 ### Highlights
 
-- Added structured traversal filter helpers for membership, text, and null
+- Added six structured traversal filter helpers for membership, text, and null
   predicates: `graph.in()`, `graph.not_in()`, `graph.contains_text()`,
   `graph.prefix_text()`, `graph.is_null()`, and `graph.is_not_null()`.
-- Removed the legacy raw-filter parser from production and development paths;
-  structured JSONB filters are now the supported traversal filter boundary.
-- Refactored filter pushdown state so column targets and predicate conditions
-  are represented separately.
-- Encapsulated sync row replay and mmap-backed node materialization behind
-  engine helpers.
-- Clarified architecture positioning around read-only mmap artifacts, SQL/PGQ,
-  and pgGraph's role as a rebuildable graph-index-like execution layer.
+- Removed the legacy raw-filter parser from all paths including development,
+  tests, and fuzzing; structured JSONB filters are now the only supported
+  traversal filter boundary.
+- Refactored `FilterOp` into a `FilterOp { column_idx, condition }` struct with
+  a separate `FilterCondition` enum so column targets and predicate conditions
+  are represented independently.
+- Encapsulated sync row replay behind a typed `SyncRowOperation` helper so node
+  insert, update, delete, and truncate are resolved once and applied in order.
+- Routed mmap-backed node mutations through engine helpers that materialize
+  borrowed arrays before in-place mutation.
+- Narrowed all `Engine` store, sync, resolution, mmap, and status fields from
+  `pub` to `pub(crate)`, establishing the engine as a crate-internal boundary.
+- Added a new architecture tradeoffs documentation page covering pgGraph's
+  design philosophy, read-only mmap positioning, and SQL/PGQ relationship.
+
+### New Features
+
+- `graph.in(column, values)` — membership filter accepting a JSONB array of
+  values. Typed pushdown covers `u32`, `i64`, `bool`, text token, and UUID
+  columns.
+- `graph.not_in(column, values)` — negative membership filter with the same
+  typed pushdown coverage.
+- `graph.contains_text(column, value)` — substring filter for dictionary-encoded
+  text columns. Pushed down against the text dictionary at traversal time.
+- `graph.prefix_text(column, value)` — prefix filter for dictionary-encoded text
+  columns.
+- `graph.is_null(column)` — explicit NULL check filter. Also works through the
+  existing `eq` operator with a NULL value, but provides clearer intent.
+- `graph.is_not_null(column)` — explicit NOT NULL check filter.
+
+All six helpers produce the same structured JSONB format consumed by
+`graph.traverse(filter := ...)`, `graph.all()`, and `graph.any()`.
+
+### Internal Changes
+
+- **Filter pushdown refactor**: `FilterOp` is now a struct holding `column_idx`
+  and a `FilterCondition` enum. All existing pushdown variants (`Eq`, `Neq`,
+  `Gt`, `Between`, `EqI64`, `EqBool`, `EqToken`, `EqUuid`, `IsNull`, etc.)
+  moved into `FilterCondition`, with new membership (`In`, `NotIn`, `InI64`,
+  `NotInI64`, `InBool`, `NotInBool`, `InToken`, `NotInToken`, `InUuid`,
+  `NotInUuid`) and text (`ContainsToken`, `PrefixToken`) variants added.
+- **Hydration filter operators**: `HydrationFilterOperator` gained `In`,
+  `NotIn`, `Contains`, `Prefix`, `IsNull`, and `IsNotNull` variants for
+  source-row recheck of filters that cannot be pushed down.
+- **Structured filter validation**: `validate_structured_operator_shape()` now
+  runs unconditionally for all filters, not only for columns with a resolved
+  column type. Added validation for `contains`/`prefix` (must be text),
+  `in`/`not_in` (must be array), and `is_null`/`is_not_null` (must be null or
+  true).
+- **Legacy raw-filter removal**: Deleted the `parse_condition` fuzz target
+  and its `Cargo.toml` entry. Removed the development-only raw-filter parser
+  and associated unit tests from `filter_index.rs`.
+- **Sync row replay**: Introduced `SyncRowOperation` enum with `Insert`,
+  `Update`, `Delete`, and `Truncate` variants. Each sync log entry is parsed
+  into a typed operation before the engine applies ordered node mutations, edge
+  overlays, tenant updates, and filter index refreshes.
+- **Engine encapsulation**: All `Engine` fields (`node_store`, `edge_store`,
+  `reverse_edge_store`, `filter_index`, `edge_type_registry`, `built`,
+  `sync_status`, `resolution_store`, `resolution_delta`, `edge_buffer`,
+  `is_read_only`, `read_only_reason`, `applied_sync_id`, `needs_vacuum`,
+  `needs_rebuild`, `schema_state`, `table_membership`, `tenant_membership`,
+  `tenanted_table_oids`, etc.) changed from `pub` to `pub(crate)`. Helper
+  structs `ResolutionStore`, `MmapResolutionState`, and `EdgeMutation` fields
+  also narrowed to `pub(crate)`.
+- **Resolution index tests**: Added `resolve()` coverage for `ResolutionIndexBuilder`
+  and `len()` coverage for `ResolutionDeltaIndex`.
+- **Test helper fix**: Restored `ensure_current_graph` visibility for
+  `pg_test` so pgrx SQL integration tests continue to compile after the
+  facade module refactor.
+
+### Documentation
+
+- Added `docs/contributor_guide/architecture-tradeoffs.mdx` documenting pgGraph's
+  design philosophy, mmap tradeoffs, and SQL/PGQ positioning. Linked from the
+  docs overview, contributor guide, and quick-links navigation.
+- Clarified mmap as read-only derived artifact mapping across `build-and-persistence`,
+  `limitations-and-fit`, `roadmap`, `memory-model`, and `index` docs. Added
+  callouts explaining that `.pggraph` files are not PostgreSQL buffer-pool
+  replacements.
+- Updated `querying.mdx` with structured filter examples using `graph.in()`,
+  `graph.is_not_null()`, and related helpers. Added search index guidance for
+  case-insensitive and trigram queries.
+- Updated `schema-registration.mdx` with auto-discovery text property boundaries,
+  manual registration examples, and filter-column registration guidance.
+- Updated `api-reference.mdx` with the new filter helper function entries.
+- Updated `configuration.mdx` with GUC enum compatibility policy for typed
+  string settings with aliases.
+- Updated `quickstart.mdx` with quickstart mode documentation.
+- Updated `known-issues.mdx`: added 13 closed items under P1/P2/P3 and removed
+  all previously tracked P2 rows (auto-discovery text, structured filter
+  operators, legacy raw filters, case-insensitive search, GUC enum behavior)
+  now that structured filters cover text, membership, range, null, and prefix
+  semantics. Consolidated P3 internals to a single remaining pgrx test layout
+  item.
+- Updated `roadmap.mdx` to reflect cleared P2 and P3 backlogs and added SQL/PGQ
+  comparison note under benchmark plans for PostgreSQL 19.
+- Updated `README.md` and `README_zh.md` with version `0.1.3` badges and
+  refreshed project descriptions.
 
 ### Validation
 
 Focused validation for this branch included local documentation reference checks
-and targeted Rust coverage for the changed filter, sync, and resolution paths.
-Run the full release gate before publishing binary packages for `v0.1.3`.
+(`scripts/check_doc_references.py`), targeted Rust unit tests
+(`cargo test --features pg17`), clippy gate
+(`cargo clippy --features pg17 --lib -- -D warnings`), and pgrx pg_test compile
+checks (`cargo test --features pg17,pg_test --lib --no-run`).
+
+Run the full release gate before publishing binary packages for `v0.1.3`:
+
+```bash
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+### Commit Coverage
+
+This release covers 14 commits on the `alpha-hardening-critical-paths`
+branch, from `f88d9cb` (fix: restore pg facade test helpers) through `f3c5cd0`
+(build: bump version to 0.1.3).
 
 ## v0.1.2: Alpha Hardening Follow-Up
 
