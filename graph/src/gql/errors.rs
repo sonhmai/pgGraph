@@ -57,6 +57,16 @@ impl GqlError {
             span,
         }
     }
+
+    /// Create a semantic binding error at `span`.
+    pub(crate) fn bind(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            kind: GqlErrorKind::Bind {
+                message: message.into(),
+            },
+            span,
+        }
+    }
 }
 
 /// Stable frontend error categories used before SQLSTATE mapping exists.
@@ -66,6 +76,8 @@ pub(crate) enum GqlErrorKind {
     Syntax { message: String },
     /// Query text uses valid GQL syntax outside the current supported subset.
     Unsupported { feature: String },
+    /// Query text is syntactically valid but cannot bind to the graph catalog.
+    Bind { message: String },
 }
 
 impl fmt::Display for GqlErrorKind {
@@ -73,6 +85,7 @@ impl fmt::Display for GqlErrorKind {
         match self {
             Self::Syntax { message } => write!(f, "GQL syntax error: {message}"),
             Self::Unsupported { feature } => write!(f, "unsupported GQL feature: {feature}"),
+            Self::Bind { message } => write!(f, "GQL binding error: {message}"),
         }
     }
 }

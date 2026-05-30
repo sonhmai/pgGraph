@@ -393,6 +393,23 @@ Each slice is Red→Green→Refactor with the tests written first.
   snapshot, pgrx SQL test comparing results to an equivalent `graph.traverse()`,
   negative tests (unknown label/type), ACL denial.
 
+Implementation checkpoint:
+- Added `graph/src/query/{catalog_snapshot,semantics,logical_plan,physical_plan,lower,execute,explain}.rs`
+  with pgrx-free binding, logical/physical planning, coordinate-only CSR
+  execution, and a stable one-hop explain string.
+- Added `graph/src/sql_facade/gql.rs` behind the `development` feature. The
+  facade performs enable/freshness checks, requires ACL on both bound tables,
+  maps frontend errors through the existing `GraphError` boundary, and returns
+  coordinate rows as JSONB arrays.
+- Catalog labels are derived from simple unquoted regclass relation names only;
+  duplicate derived labels are rejected as ambiguous until an explicit label
+  mapping exists. Bidirectional registered edges bind both physical directions.
+- Unit coverage now drives binder negatives, lowering, execution filtering, and
+  explain output. A development-feature pgrx test file covers the live
+  `graph.traverse()` comparison and ACL-denial gate; local execution still needs
+  a working `sfw cargo pgrx test --features "pg17 development" gql` run because
+  the wrapper currently returns only its firewall banner.
+
 ### 1C — Predicates, RETURN shapes, hydration
 - `WHERE` (eq/neq/range/null/membership), inline prop maps, `RETURN`
   node/relationship/property, `value.rs` JSONB encoding + `hydrate` flag.

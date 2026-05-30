@@ -30,6 +30,7 @@ mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
+mod query;
 mod quote;
 mod resolution_index;
 mod safety;
@@ -230,4 +231,6 @@ mod tests {
     include!("pg_tests/workflow_relationship_api.rs");
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
+    #[cfg(feature = "development")]
+    include!("pg_tests/gql.rs");
 }
