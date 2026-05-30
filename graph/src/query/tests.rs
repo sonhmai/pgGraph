@@ -364,6 +364,44 @@ fn value_projection_reports_missing_parameters() {
 }
 
 #[test]
+fn value_projection_filters_explicit_null_predicates() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE c.name IS NULL RETURN c.name AS company_name",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let mut hydrated = hydrated_fixture();
+    hydrated.insert(
+        (20, "c1".to_string()),
+        serde_json::json!({"id": "c1", "name": null}),
+    );
+
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert!(projected[0]["company_name"].is_null());
+}
+
+#[test]
+fn value_projection_reports_non_orderable_predicate_types() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WHERE u.name > 42 RETURN u",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let err = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("ordered comparisons"));
+}
+
+#[test]
 fn explain_contains_stable_1b_plan_shape() {
     let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
     let physical = lower(logical);
