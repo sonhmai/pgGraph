@@ -10,8 +10,16 @@ on the existing **immutable CSR** path — no overlay, no writes, no MVCC.
 Scope is the `phase_1` rows of the compatibility matrix only:
 `MATCH` (single pattern), node labels → registered tables, relationship types →
 registered edge labels, directed + undirected relationships, `WHERE` property
-predicates, JSONB parameters, `RETURN` node/property/relationship/path,
+predicates, JSONB parameters, `RETURN` node/property/relationship identity,
 `ORDER BY`/`SKIP`/`LIMIT`, bounded variable-length relationships.
+
+Scope correction: raw path variables and path functions require a stable path
+value model that records every intermediate node and relationship identity, so
+they belong to Phase 3's path-function work. Phase 1 may traverse bounded
+variable-length relationships for endpoint rows, but it must not claim `RETURN
+p`, `nodes(p)`, `relationships(p)`, or `length(p)` support. Relationship source
+row hydration is also deferred until the edge-row identity contract is explicit;
+Phase 1 relationship returns are coordinate-only identities.
 
 ## 1. Module layout (Phase 1 only)
 
@@ -75,7 +83,7 @@ property_ref = var , "." , property ;
 
 return_clause= "RETURN" , [ "DISTINCT"(*phase_3*) ] , return_item ,
                { "," , return_item } ;
-return_item  = ( property_ref | var | path_var | func_call ) , [ "AS" , alias ] ;
+return_item  = ( property_ref | var | func_call ) , [ "AS" , alias ] ;
 
 order_by     = "ORDER" , "BY" , sort_item , { "," , sort_item } ;
 sort_item    = ( property_ref | alias ) , [ "ASC" | "DESC" ] ;
@@ -91,9 +99,8 @@ Phase-1 grammar constraints (enforced at parse or bind time with typed errors):
 
 - Exactly one `MATCH` with one linear pattern (no comma-separated patterns, no
   `OPTIONAL MATCH`, no `WITH` — those are phase_3).
-- `func_call` in `RETURN` is limited to `count`, `nodes`, `relationships`,
-  `length` (the last three only over a declared `path_var`); aggregates beyond
-  `count` are phase_3.
+- `func_call` in `RETURN` is parsed for diagnostics but rejected during Phase 1.
+  Aggregates and path functions (`nodes`, `relationships`, `length`) are Phase 3.
 - Variable-length (`var_len`) **must** carry an explicit upper bound; unbounded
   `*` is a syntax-level rejection (safety limit).
 
@@ -338,18 +345,17 @@ snapshot-test corpus:
 // RETURN v                                                            (hydrate=false)
 {"v": {"_id": {"table":"users","id":"u2"}, "_labels":["users"]}}
 
-// MATCH p = (a:users)-[:follows*1..3]->(b:users) RETURN p             (hydrate=false)
-{"p": {"_path": {
-   "nodes": [{"_id":{"table":"users","id":"u1"},"_labels":["users"]}, ...],
-   "relationships": [{"_type":"follows","_start":{...},"_end":{...}}, ...]
-}}}
+// MATCH (a:users)-[r:follows]->(b:users) RETURN r                    (hydrate=false)
+{"r": {"_type":"follows","_start":{"table":"users","id":"u1"},"_end":{"table":"users","id":"u2"}}}
 
 // RETURN count(v)
 {"count(v)": 12}
 ```
 
 Reserved keys (`_id`,`_labels`,`_type`,`_start`,`_end`,`_path`) are stable
-contract. A source column beginning with `_` is a bind-time rejection.
+contract. A source column beginning with `_` is a bind-time rejection. Path
+values using `_path` are documented here as the reserved end-state shape, but
+Phase 1 does not expose path variables.
 
 ## 9. Error categories (`gql/errors.rs`, pgrx-free)
 
@@ -439,8 +445,9 @@ Implementation checkpoint:
   behavior through the value layer,
   tenant-scoped topology filtering through the session tenant setting, and the
   development pgrx ACL/traverse-parity test path. The broader generated matrix
-  remains before the public exposure gate, including path variables and
-  relationship source-row hydration.
+  remains before the public exposure gate for the Phase 1 row set. Path
+  variables, path functions, and relationship source-row hydration are now
+  explicitly deferred outside the Phase 1 public-exposure gate.
 
 ### 1D — Ordering, limits, variable-length, undirected
 - `ORDER BY`/`SKIP`/`LIMIT` with hard row caps; undirected union+dedup; bounded
