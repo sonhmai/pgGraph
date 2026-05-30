@@ -10,6 +10,7 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         source_table_oid: plan.source.table_oid,
         source_label: plan.source.label,
         rel_type: plan.relationship.rel_type,
+        rel_var: plan.relationship.var,
         direction: plan.relationship.direction,
         hops: plan.relationship.hops,
         target_var: plan.target.var,
@@ -24,6 +25,7 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
             .into_iter()
             .map(|slot| match slot {
                 ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
+                ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
                 ReturnBinding::Property {
                     side,
                     property,

@@ -296,6 +296,9 @@ fn project_row(
                     ),
                 );
             }
+            ReturnSlot::Relationship { name } => {
+                output.insert(name.clone(), relationship_value(row, plan));
+            }
             ReturnSlot::Property {
                 side,
                 property,
@@ -309,6 +312,21 @@ fn project_row(
         }
     }
     serde_json::Value::Object(output)
+}
+
+fn relationship_value(row: &GqlRow, plan: &PhysicalPlan) -> serde_json::Value {
+    serde_json::json!({
+        "_type": &plan.rel_type,
+        "_start": relationship_endpoint(&row.rel_start, plan),
+        "_end": relationship_endpoint(&row.rel_end, plan),
+    })
+}
+
+fn relationship_endpoint(coordinate: &GqlNodeCoordinate, plan: &PhysicalPlan) -> serde_json::Value {
+    serde_json::json!({
+        "table": label_for_table(plan, coordinate.table_oid),
+        "id": &coordinate.node_id,
+    })
 }
 
 fn node_value(
@@ -363,5 +381,13 @@ fn label(plan: &PhysicalPlan, side: BindingSide) -> &str {
     match side {
         BindingSide::Source => &plan.source_label,
         BindingSide::Target => &plan.target_label,
+    }
+}
+
+fn label_for_table(plan: &PhysicalPlan, table_oid: u32) -> &str {
+    if table_oid == plan.source_table_oid {
+        &plan.source_label
+    } else {
+        &plan.target_label
     }
 }

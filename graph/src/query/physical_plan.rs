@@ -16,6 +16,8 @@ pub(crate) struct PhysicalPlan {
     pub(crate) source_label: String,
     /// Relationship type label.
     pub(crate) rel_type: String,
+    /// Optional relationship variable.
+    pub(crate) rel_var: Option<String>,
     /// Traversal direction.
     pub(crate) direction: BoundDirection,
     /// Hop bounds.
@@ -43,6 +45,8 @@ pub(crate) struct PhysicalPlan {
 pub(crate) enum ReturnSlot {
     /// Whole node value.
     Node { side: BindingSide, name: String },
+    /// Whole relationship value.
+    Relationship { name: String },
     /// Node property value.
     Property {
         /// Source or target binding.

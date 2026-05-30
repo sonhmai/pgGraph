@@ -4,7 +4,7 @@ use crate::engine::Engine;
 use crate::safety::{GraphError, GraphResult};
 
 use super::logical_plan::BoundDirection;
-use super::physical_plan::PhysicalPlan;
+use super::physical_plan::{PhysicalPlan, ReturnSlot};
 
 /// Coordinate-only node value returned by Phase 1B.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,10 @@ pub(crate) struct GqlRow {
     pub(crate) source: GqlNodeCoordinate,
     /// Target coordinate.
     pub(crate) target: GqlNodeCoordinate,
+    /// Relationship start coordinate in the registered edge direction.
+    pub(crate) rel_start: GqlNodeCoordinate,
+    /// Relationship end coordinate in the registered edge direction.
+    pub(crate) rel_end: GqlNodeCoordinate,
 }
 
 /// Execute a physical one-hop plan.
@@ -46,7 +50,7 @@ pub(crate) fn execute(
         if !engine.node_store.is_active(source_idx) {
             continue;
         }
-        for target_idx in expand_targets(engine, plan, source_idx, rel_type_id, tenant) {
+        for target in expand_targets(engine, plan, source_idx, rel_type_id, tenant) {
             if rows.len() >= row_cap {
                 if plan.cap_exhaustion_is_error() {
                     return Err(GraphError::GqlExecution {
@@ -55,7 +59,7 @@ pub(crate) fn execute(
                 }
                 return Ok(rows);
             }
-            rows.push(project_row(engine, source_idx, target_idx));
+            rows.push(project_row(engine, source_idx, target));
         }
     }
     Ok(rows)
@@ -92,32 +96,41 @@ fn expand_targets(
     source_idx: u32,
     rel_type_id: u8,
     tenant: Option<&str>,
-) -> Vec<u32> {
+) -> Vec<GqlTarget> {
     let mut current = vec![source_idx];
     let mut results = Vec::new();
-    let mut seen_results = std::collections::HashSet::new();
+    let returns_relationship = plan
+        .returns
+        .iter()
+        .any(|slot| matches!(slot, ReturnSlot::Relationship { .. }));
+    let mut seen_result_nodes = std::collections::HashSet::new();
+    let mut seen_result_relationships = std::collections::HashSet::new();
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
     for depth in 1..=plan.hops.max {
         let mut next = Vec::new();
         let mut seen_next = std::collections::HashSet::new();
         for node_idx in current {
-            for neighbor in neighbors_for_direction(engine, plan.direction, node_idx, rel_type_id) {
-                if !engine.node_store.is_active(neighbor)
-                    || !tenant_allows_node(engine, neighbor, tenant)
+            for target in neighbors_for_direction(engine, plan.direction, node_idx, rel_type_id) {
+                if !engine.node_store.is_active(target.node_idx)
+                    || !tenant_allows_node(engine, target.node_idx, tenant)
                 {
                     continue;
                 }
                 if depth >= plan.hops.min
-                    && target_matches(engine, neighbor, plan.target_table_oid, tenant)
-                    && seen_results.insert(neighbor)
+                    && target_matches(engine, target.node_idx, plan.target_table_oid, tenant)
+                    && if returns_relationship {
+                        seen_result_relationships.insert((target.node_idx, target.orientation))
+                    } else {
+                        seen_result_nodes.insert(target.node_idx)
+                    }
                 {
-                    results.push(neighbor);
+                    results.push(target);
                 }
                 if depth < plan.hops.max
-                    && seen_frontier.insert(neighbor)
-                    && seen_next.insert(neighbor)
+                    && seen_frontier.insert(target.node_idx)
+                    && seen_next.insert(target.node_idx)
                 {
-                    next.push(neighbor);
+                    next.push(target.node_idx);
                 }
             }
         }
@@ -134,36 +147,61 @@ fn neighbors_for_direction(
     direction: BoundDirection,
     node_idx: u32,
     rel_type_id: u8,
-) -> Vec<u32> {
+) -> Vec<GqlTarget> {
     let mut neighbors = Vec::new();
     if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
-        append_matching_neighbors(&engine.edge_store, node_idx, rel_type_id, &mut neighbors);
+        append_matching_neighbors(
+            &engine.edge_store,
+            node_idx,
+            rel_type_id,
+            EdgeOrientation::Forward,
+            &mut neighbors,
+        );
     }
     if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
         append_matching_neighbors(
             &engine.reverse_edge_store,
             node_idx,
             rel_type_id,
+            EdgeOrientation::Reverse,
             &mut neighbors,
         );
     }
-    neighbors.sort_unstable();
+    neighbors.sort_by_key(|target| (target.node_idx, target.orientation));
     neighbors.dedup();
     neighbors
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GqlTarget {
+    node_idx: u32,
+    orientation: EdgeOrientation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EdgeOrientation {
+    Forward,
+    Reverse,
 }
 
 fn append_matching_neighbors(
     store: &crate::edge_store::EdgeStore,
     node_idx: u32,
     rel_type_id: u8,
-    out: &mut Vec<u32>,
+    orientation: EdgeOrientation,
+    out: &mut Vec<GqlTarget>,
 ) {
     let (targets, type_ids) = store.neighbors(node_idx);
     out.extend(
         targets
             .iter()
             .zip(type_ids.iter())
-            .filter_map(|(&target, &type_id)| (type_id == rel_type_id).then_some(target)),
+            .filter_map(|(&target, &type_id)| {
+                (type_id == rel_type_id).then_some(GqlTarget {
+                    node_idx: target,
+                    orientation,
+                })
+            }),
     );
 }
 
@@ -186,10 +224,17 @@ fn tenant_allows_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> b
             .is_some_and(|bitmap| bitmap.contains(node_idx))
 }
 
-fn project_row(engine: &Engine, source_idx: u32, target_idx: u32) -> GqlRow {
+fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GqlRow {
+    let target_idx = target.node_idx;
+    let (rel_start_idx, rel_end_idx) = match target.orientation {
+        EdgeOrientation::Forward => (source_idx, target_idx),
+        EdgeOrientation::Reverse => (target_idx, source_idx),
+    };
     GqlRow {
         source: coordinate(engine, source_idx),
         target: coordinate(engine, target_idx),
+        rel_start: coordinate(engine, rel_start_idx),
+        rel_end: coordinate(engine, rel_end_idx),
     }
 }
 

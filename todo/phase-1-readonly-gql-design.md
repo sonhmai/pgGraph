@@ -434,10 +434,13 @@ Implementation checkpoint:
 - Current coverage includes binder property negatives, predicate filtering,
   explicit null predicates, non-orderable type mismatch errors, hydrated node
   projection, `hydrate=false` coordinate-only node shape plus property returns,
-  missing-parameter behavior through the value layer,
+  single-hop relationship identity projection with registered inbound
+  orientation, variable-length relationship-return rejection, missing-parameter
+  behavior through the value layer,
   tenant-scoped topology filtering through the session tenant setting, and the
   development pgrx ACL/traverse-parity test path. The broader generated matrix
-  remains before the public exposure gate.
+  remains before the public exposure gate, including path variables and
+  relationship source-row hydration.
 
 ### 1D — Ordering, limits, variable-length, undirected
 - `ORDER BY`/`SKIP`/`LIMIT` with hard row caps; undirected union+dedup; bounded

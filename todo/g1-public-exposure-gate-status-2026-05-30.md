@@ -17,6 +17,8 @@ real test and benchmark evidence.
 - Public positioning now says SQL functions are the current public API while
   GQL and SQL/PGQ are planned work:
   `1e57650 docs(gql): align public query language positioning`.
+- Relationship identity projection is implemented for single-hop relationship
+  variables, including inbound orientation preserving registered edge start/end.
 - Static hygiene passed:
   - `rustfmt --edition 2021 --check graph/src/gql/*.rs graph/src/query/*.rs graph/src/sql_facade/gql.rs graph/src/pg_tests/gql.rs graph/src/lib.rs`
   - `git diff --check`
@@ -27,6 +29,9 @@ real test and benchmark evidence.
 
 The G1 gate in `todo/build-sequence.md` requires:
 
+- Completion or explicit re-scoping of the Phase 1 return-shape matrix. Current
+  code covers node/property returns and single-hop relationship identity
+  returns, but not path variables or relationship source-row hydration.
 - Cargo tests for the Phase 1 read-only GQL implementation.
 - pgrx tests for the development `graph.gql()` SQL facade.
 - `bfs_bench` comparison against `pre_gql_mutable_overlay` with zero regression.

@@ -68,6 +68,14 @@ fn binder_rejects_out_of_slice_1b_shapes() {
 }
 
 #[test]
+fn binder_rejects_variable_length_relationship_return() {
+    let ast = parse("MATCH (u:users)-[r:works_at*1..2]->(c:companies) RETURN r").unwrap();
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+}
+
+#[test]
 fn executor_enforces_hard_row_cap_before_projection() {
     let physical = lower(bind_query(
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN u ORDER BY u.name",
@@ -107,12 +115,13 @@ fn executor_enforces_hard_row_cap_before_projection() {
 
 #[test]
 fn lowering_preserves_bound_tables_and_return_slots() {
-    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN c, u");
+    let logical = bind_query("MATCH (u:users)-[r:works_at]->(c:companies) RETURN c, r, u");
     let physical = lower(logical);
 
     assert_eq!(physical.source_table_oid, 10);
     assert_eq!(physical.target_table_oid, 20);
     assert_eq!(physical.rel_type, "works_at");
+    assert_eq!(physical.rel_var.as_deref(), Some("r"));
     assert_eq!(
         physical.returns,
         vec![
@@ -120,12 +129,108 @@ fn lowering_preserves_bound_tables_and_return_slots() {
                 side: super::logical_plan::BindingSide::Target,
                 name: "c".into()
             },
+            ReturnSlot::Relationship { name: "r".into() },
             ReturnSlot::Node {
                 side: super::logical_plan::BindingSide::Source,
                 name: "u".into()
             }
         ]
     );
+}
+
+#[test]
+fn value_projection_returns_relationship_coordinates() {
+    let logical = bind_query("MATCH (u:users)-[r:works_at]->(c:companies) RETURN r");
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    let projected = project_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["r"]["_type"], "works_at");
+    assert_eq!(projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(projected[0]["r"]["_start"]["id"], "u1");
+    assert_eq!(projected[0]["r"]["_end"]["table"], "companies");
+    assert_eq!(projected[0]["r"]["_end"]["id"], "c1");
+}
+
+#[test]
+fn value_projection_returns_inbound_relationship_orientation() {
+    let logical = bind_query("MATCH (c:companies)<-[r:works_at]-(u:users) RETURN r");
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    let projected = project_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["r"]["_type"], "works_at");
+    assert_eq!(projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(projected[0]["r"]["_start"]["id"], "u1");
+    assert_eq!(projected[0]["r"]["_end"]["table"], "companies");
+    assert_eq!(projected[0]["r"]["_end"]["id"], "c1");
+}
+
+#[test]
+fn value_projection_preserves_undirected_opposite_relationships() {
+    let logical = bind_query("MATCH (u:users)-[r:works_at]-(c:companies) RETURN r");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 0,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    let projected = project_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(projected[0]["r"]["_start"]["id"], "u1");
+    assert_eq!(projected[0]["r"]["_end"]["table"], "companies");
+    assert_eq!(projected[0]["r"]["_end"]["id"], "c1");
+    assert_eq!(projected[1]["r"]["_start"]["table"], "companies");
+    assert_eq!(projected[1]["r"]["_start"]["id"], "c1");
+    assert_eq!(projected[1]["r"]["_end"]["table"], "users");
+    assert_eq!(projected[1]["r"]["_end"]["id"], "u1");
 }
 
 #[test]

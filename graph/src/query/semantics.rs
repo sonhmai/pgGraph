@@ -47,11 +47,12 @@ pub(crate) fn bind(
         &source,
         &target,
     )?;
-    let returns = bind_returns(&query.return_.items, &source, &target)?;
+    let returns = bind_returns(&query.return_.items, &source, rel_pat, &target)?;
     let order_by = bind_sort_items(&query.order_by, &returns, &source, &target)?;
     Ok(LogicalPlan {
         source,
         relationship: BoundRel {
+            var: rel_pat.var.as_ref().map(|var| var.text.clone()),
             rel_type: rel_info.rel_type,
             direction: bind_direction(rel_pat.direction),
             hops: bind_hops(rel_pat)?,
@@ -203,6 +204,7 @@ fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode
 fn bind_returns(
     items: &[ReturnItem],
     source: &BoundNode,
+    rel_pat: &RelPat,
     target: &BoundNode,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
@@ -223,6 +225,25 @@ fn bind_returns(
                     .as_ref()
                     .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
             }),
+            ReturnExpr::Var { var, .. }
+                if rel_pat
+                    .var
+                    .as_ref()
+                    .is_some_and(|rel_var| rel_var.text == var.text) =>
+            {
+                if rel_pat.var_len.is_some() {
+                    return Err(GqlError::unsupported(
+                        var.span,
+                        "RETURN relationship variables over variable-length patterns require path support",
+                    ));
+                }
+                Ok(ReturnBinding::Relationship {
+                    name: item
+                        .alias
+                        .as_ref()
+                        .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
+                })
+            }
             ReturnExpr::Var { var, span } => Err(GqlError::bind(
                 *span,
                 format!("unknown return variable `{}`", var.text),

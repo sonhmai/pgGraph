@@ -8,7 +8,9 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
         .returns
         .iter()
         .map(|slot| match slot {
-            ReturnSlot::Node { name, .. } | ReturnSlot::Property { name, .. } => name.as_str(),
+            ReturnSlot::Node { name, .. }
+            | ReturnSlot::Relationship { name }
+            | ReturnSlot::Property { name, .. } => name.as_str(),
         })
         .collect::<Vec<_>>()
         .join(", ");

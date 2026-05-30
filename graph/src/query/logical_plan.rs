@@ -37,6 +37,8 @@ pub(crate) struct BoundNode {
 /// Bound relationship type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundRel {
+    /// Optional GQL relationship variable name.
+    pub(crate) var: Option<String>,
     /// GQL relationship type text.
     pub(crate) rel_type: String,
     /// Traversal direction.
@@ -70,6 +72,8 @@ pub(crate) struct HopBounds {
 pub(crate) enum ReturnBinding {
     /// Whole node variable.
     Node { side: BindingSide, name: String },
+    /// Whole relationship variable.
+    Relationship { name: String },
     /// Node property.
     Property {
         /// Source or target binding.
@@ -85,7 +89,9 @@ impl ReturnBinding {
     /// Return the output column name.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Node { name, .. } | Self::Property { name, .. } => name,
+            Self::Node { name, .. } | Self::Relationship { name } | Self::Property { name, .. } => {
+                name
+            }
         }
     }
 
