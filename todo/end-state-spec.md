@@ -1,4 +1,4 @@
-# End-State Spec: openCypher, GQL, SQL/PGQ, And Mutable Graph Projections
+# End-State Spec: GQL, SQL/PGQ, And Mutable Graph Projections
 
 > Reminder: delete this tracking file before merging `feat/mutable-graph-projections` into `main`.
 
@@ -17,10 +17,10 @@ constraints, WAL, MVCC, ACLs, RLS, backup/restore, and crash recovery.
 
 The completed system provides:
 
-- an openCypher-compatible query surface;
 - a GQL-compatible query surface where feasible;
 - an adapter path for PostgreSQL SQL/PGQ once PostgreSQL exposes stable graph
   query support;
+- optional future openCypher compatibility through the same planner;
 - a shared graph query planner and execution runtime beneath those frontends;
 - selectable graph projection modes for read-heavy and mutable workloads.
 
@@ -54,11 +54,11 @@ SELECT * FROM graph.shortest_path(...);
 SELECT * FROM graph.search(...);
 ```
 
-Users can also query through openCypher:
+Users can also query through GQL:
 
 ```sql
 SELECT *
-FROM graph.cypher(
+FROM graph.gql(
   query := $$MATCH (u:users {id: $id})-[:follows]->(v:users)
              RETURN v.id, v.name
              ORDER BY v.name
@@ -68,10 +68,10 @@ FROM graph.cypher(
 );
 ```
 
-The openCypher call returns JSONB rows initially:
+The GQL call returns JSONB rows initially:
 
 ```sql
-graph.cypher(query text, params jsonb default '{}', hydrate boolean default true)
+graph.gql(query text, params jsonb default '{}', hydrate boolean default true)
 RETURNS TABLE (row jsonb)
 ```
 
@@ -79,17 +79,18 @@ Users can inspect the plan:
 
 ```sql
 SELECT *
-FROM graph.cypher_explain(
+FROM graph.gql_explain(
   query := $$MATCH (u:users)-[:follows]->(v:users) RETURN v$$,
   params := '{}'::jsonb
 );
 ```
 
-The intended GQL surface is parallel after the shared planner is proven:
+Optional future openCypher compatibility may use a parallel surface after the
+GQL/SQL-PGQ planner is proven:
 
 ```sql
 SELECT *
-FROM graph.gql(
+FROM graph.cypher(
   query := $$...$$,
   params := '{}'::jsonb,
   hydrate := true
@@ -104,11 +105,25 @@ responsibility.
 
 ## Query Language Compatibility
 
-The end state aims for a documented openCypher-compatible subset that can grow
-toward broad openCypher coverage. The public contract must always be a
-compatibility matrix, not an unqualified "full Cypher" claim.
+The end state aims for a documented GQL-compatible subset that aligns with
+SQL/PGQ graph pattern matching where possible. The public contract must always
+be a compatibility matrix, not an unqualified "full GQL" claim.
 
-Supported end-state openCypher categories should include:
+The compatibility matrix is part of the product contract. Each row records:
+
+- support status;
+- parser coverage;
+- semantic binding coverage;
+- execution coverage;
+- negative/security coverage;
+- explain/docs coverage;
+- projection-mode constraints.
+
+No GQL feature is advertised as supported until the row is green across those
+dimensions. Unsupported GQL should fail with stable diagnostics rather than
+silently falling back to stale or partial behavior.
+
+Supported end-state GQL categories should include:
 
 - `MATCH`
 - `OPTIONAL MATCH`
@@ -137,21 +152,22 @@ Supported end-state write categories may include:
 - `DELETE`
 - `REMOVE`
 - `DETACH DELETE`
-- carefully constrained `MERGE`
+- carefully constrained merge/upsert semantics if they can be mapped safely to
+  PostgreSQL locking and constraints
 
 Writes are only supported where the planner can prove a mapping to registered
 PostgreSQL source tables and edge tables. Creating new PostgreSQL tables,
-labels, or schema objects from openCypher is out of scope unless a separate DDL
+labels, or schema objects from GQL is out of scope unless a separate DDL
 contract is designed.
 
-GQL support should target standards-aligned graph pattern and graph operation
-semantics where they can be mapped to pgGraph's property graph model. GQL should
-not force the engine to abandon PostgreSQL's table-authoritative model.
+Optional openCypher support should be treated as compatibility, not the primary
+standards path. It should lower into the same IR and should not force the engine
+to abandon PostgreSQL's table-authoritative model.
 
 ## Property Graph Model
 
 The end state has a canonical property graph model shared by SQL APIs,
-openCypher, GQL, and SQL/PGQ adapters.
+GQL, SQL/PGQ adapters, and optional openCypher compatibility.
 
 Core concepts:
 
@@ -172,7 +188,7 @@ Property typing must be explicit:
 - dynamic map/list values require `jsonb`-backed property columns or documented
   rejection;
 - null and missing-property semantics must be documented separately;
-- mixed-type Cypher lists require `jsonb` or rejection in typed-column mode.
+- mixed-type GQL lists require `jsonb` or rejection in typed-column mode.
 
 ## Runtime Modes
 
@@ -222,7 +238,7 @@ from PostgreSQL table changes and backend-local transaction state.
 
 All graph writes target PostgreSQL source tables first.
 
-For openCypher/GQL writes:
+For GQL writes:
 
 ```text
 query text
@@ -352,7 +368,7 @@ reviewed under the repository's existing unsafe/panic boundary rules.
 - read-only state and reason;
 - unsupported algorithm state where applicable.
 
-`graph.cypher_explain()` and eventual `graph.gql_explain()` expose:
+`graph.gql_explain()` and eventual compatibility explain functions expose:
 
 - parse stage;
 - semantic binding summary;
@@ -368,7 +384,9 @@ Public docs no longer say "no new query language" without qualification. They
 explain:
 
 - pgGraph remains PostgreSQL-first;
-- openCypher/GQL support is optional and projection-backed;
+- GQL support is optional and projection-backed;
+- optional openCypher compatibility, if added, is a separate compatibility
+  layer over the same planner;
 - compatibility is a documented subset;
 - PostgreSQL source tables remain authoritative;
 - read-only CSR and mutable overlay modes have different tradeoffs;
@@ -383,6 +401,6 @@ The end state does not include:
 - writable mmap graph storage;
 - graph-native durability outside PostgreSQL;
 - full graph MVCC in Rust;
-- creating arbitrary PostgreSQL schemas through Cypher/GQL DDL;
+- creating arbitrary PostgreSQL schemas through GQL or openCypher DDL;
 - distributed graph execution;
 - a second graph database hidden inside PostgreSQL.

@@ -11,7 +11,7 @@ data into another system.
 |---|---|
 | Local relationship traversal | Bounded BFS/DFS with depth, node, and frontier circuit breakers |
 | Path explanation | Shortest path functions return source table/primary-key coordinates and edge labels |
-| SQL-first applications | The public API is PostgreSQL SQL functions in the `graph` schema |
+| SQL-first applications | The current public API is PostgreSQL SQL functions in the `graph` schema |
 | Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
 | Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
 | Fast backend startup | Persisted immutable forward graph arrays and resolution bytes can be mapped read-only and shared through the OS page cache |
@@ -21,9 +21,10 @@ data into another system.
 | Need | Better fit |
 |---|---|
 | Distributed graph execution across databases | A distributed graph system or application-level federation |
-| Cypher, Gremlin, SPARQL, or GQL compatibility | A database that implements that query language |
+| Immediate GQL or SQL/PGQ compatibility | A database that implements those query languages today |
+| Cypher, Gremlin, or SPARQL compatibility | A database that implements that query language |
 | External graph storage as source of truth | A graph database or graph service |
-| Online mutable graph topology with no rebuild/maintenance phase | A mutable graph store |
+| Online mutable graph topology with no rebuild/maintenance phase today | A mutable graph store |
 | Large global analytics in the OLTP query path | A read replica, batch job, or dedicated analytics engine |
 | Cross-database graph joins | ETL/materialization into one database or a federation layer |
 
@@ -33,6 +34,8 @@ data into another system.
 |---|---|
 | WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
+| GQL and SQL/PGQ | Standards-aligned graph query frontends are planned work, not current public APIs |
+| Projection modes | The current runtime is effectively `csr_readonly`; a future `mutable_overlay` mode is planned but not implemented |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |

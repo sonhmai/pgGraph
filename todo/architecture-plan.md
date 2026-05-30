@@ -1,4 +1,4 @@
-# Architecture Plan: openCypher, GQL, SQL/PGQ, And Mutable Graph Projections
+# Architecture Plan: GQL, SQL/PGQ, And Mutable Graph Projections
 
 > Reminder: delete this tracking file before merging `feat/mutable-graph-projections` into `main`.
 
@@ -22,16 +22,16 @@ The target architecture is:
 
 ```text
 SQL facade
-  graph.cypher(...)
   graph.gql(...)
   existing graph.* SQL functions
   future SQL/PGQ adapter
+  optional future graph.cypher(...)
         |
 query frontend layer
-  openCypher lexer/parser
   GQL lexer/parser
   SQL function request lowering
   SQL/PGQ adapter lowering
+  optional openCypher compatibility lowering
         |
 semantic binding
   graph catalog snapshot
@@ -51,9 +51,10 @@ PostgreSQL source tables remain authoritative
 ```
 
 The architecture deliberately separates language support from runtime
-mutability. Read-only openCypher can run on the current immutable CSR engine.
-Mutable overlay support is valuable to existing SQL APIs even without Cypher.
-Cypher/GQL writes come after both layers are stable.
+mutability. Read-only GQL can run on the current immutable CSR engine. Mutable
+overlay support is valuable to existing SQL APIs even without GQL. GQL writes
+come after both layers are stable. openCypher is optional compatibility after
+the GQL/SQL-PGQ planner is proven.
 
 ## Crate And Module Layout
 
@@ -76,19 +77,12 @@ graph/src/query/
   execute.rs
   explain.rs
 
-graph/src/cypher/
-  mod.rs
-  ast.rs
-  lexer.rs
-  parser.rs
-  semantics.rs
-  lower.rs
-
 graph/src/gql/
   mod.rs
   ast.rs
   lexer.rs
   parser.rs
+  semantics.rs
   lower.rs
 
 graph/src/projection/
@@ -100,9 +94,30 @@ graph/src/projection/
   mutable_adjacency.rs
   compaction.rs
 
-graph/src/sql_facade/cypher.rs
 graph/src/sql_facade/gql.rs
 ```
+
+**Deferred module groups (do NOT create until their phase begins):**
+
+```text
+graph/src/cypher/            # Phase 4 only — optional openCypher compatibility
+  mod.rs
+  ast.rs
+  lexer.rs
+  parser.rs
+  semantics.rs
+  lower.rs
+
+graph/src/sql_facade/cypher.rs   # Phase 4 only
+```
+
+`graph/src/projection/` is created in Phase 2, not Phase 1. The `cypher/`
+modules and `sql_facade/cypher.rs` must not be scaffolded during Phase 1–3
+work: their presence would imply a compatibility commitment the public contract
+has not made yet (see Risk Register and `phase-4-advanced-writes-opencypher-design.md`).
+SQL/PGQ does not get its own frontend module at all — it lowers into the shared
+IR through an adapter once the IR is stable (Phase 3), so it reuses
+`graph/src/query/` rather than adding a parser directory.
 
 Existing modules remain owners of existing storage and behavior:
 
@@ -124,7 +139,7 @@ Internal dependency direction should be:
 sql_facade
   -> cypher/gql/query/projection/engine/catalog/safety
 
-cypher/gql
+gql/cypher
   -> query
 
 query
@@ -145,28 +160,7 @@ independent of PostgreSQL.
 
 ## Public SQL Surface
 
-Initial openCypher API:
-
-```sql
-graph.cypher(
-  query text,
-  params jsonb default '{}',
-  hydrate boolean default true
-)
-RETURNS TABLE (row jsonb)
-```
-
-Plan inspection:
-
-```sql
-graph.cypher_explain(
-  query text,
-  params jsonb default '{}'
-)
-RETURNS TABLE (stage text, detail jsonb)
-```
-
-Future GQL API:
+Initial GQL API:
 
 ```sql
 graph.gql(
@@ -177,6 +171,8 @@ graph.gql(
 RETURNS TABLE (row jsonb)
 ```
 
+Plan inspection:
+
 ```sql
 graph.gql_explain(
   query text,
@@ -185,8 +181,74 @@ graph.gql_explain(
 RETURNS TABLE (stage text, detail jsonb)
 ```
 
-Projection-mode selection should be exposed through build/registration APIs,
-but the exact syntax remains open:
+SQLSTATE additions for GQL syntax, semantic, parameter, unsupported-feature,
+write-on-read-only, and execution errors are designed when this SQL facade is
+implemented, not during parser-only work.
+
+> **Pre-facade gate task (own decision artifact):** *Define the GQL SQLSTATE
+> mapping before exposing `graph.gql()`.* SQLSTATE design is deferred but is a
+> hard release gate, tracked as its own item in
+> `mutable-graph-projections-todo.md` → "Decision Records". The public
+> `graph.gql()` function must not ship until each internal error category has a
+> stable, documented SQLSTATE.
+
+### Canonical JSONB Result Shape (decided)
+
+`graph.gql()` returns one `jsonb` column named `row` per result row. Each row is
+a JSON object whose keys are the `RETURN` aliases (explicit `AS`, else the
+source expression text). Values are encoded by kind:
+
+| GQL value | `hydrate := true` | `hydrate := false` |
+|---|---|---|
+| Node | `{"_id": {"table": "users", "id": "u1"}, "_labels": ["users"], "<col>": <value>, ...}` | `{"_id": {"table": "users", "id": "u1"}, "_labels": ["users"]}` |
+| Relationship | `{"_type": "follows", "_start": {"table":"users","id":"u1"}, "_end": {"table":"users","id":"u2"}, "<col>": <value>, ...}` | `{"_type": "follows", "_start": {...}, "_end": {...}}` |
+| Path | `{"_path": {"nodes": [<node>...], "relationships": [<rel>...]}}` (node/rel encoded per their `hydrate` rule) | same, coordinate-only nodes/rels |
+| Scalar property (`v.name`) | the JSON scalar of the PG value | same (hydration is a node/path concern, scalars are always materialized) |
+| `count`/aggregate | JSON number/array/object | same |
+
+Rules:
+
+- **Node/relationship identity** is always the stable graph coordinate
+  (`{"table", "id"}` using source table name + primary-key text), never the
+  internal dense `u32` index. Multi-column primary keys serialize `id` as a JSON
+  array in key order.
+- **Null vs missing:** a property that exists in the source but is SQL `NULL`
+  serializes as JSON `null`. A property the catalog does not model for that
+  label is a bind-time `UnknownProperty` error, not a silent omission — so
+  "missing property" cannot occur in a successfully-bound query. (When
+  jsonb-backed open property bags arrive in Phase 3, missing-key vs explicit
+  `null` semantics get their own documented rule.)
+- **`hydrate := false`** returns coordinate-only nodes/relationships (no source
+  columns), avoiding the per-row `to_jsonb(src.*)` SPI lookup. Scalars and
+  aggregates are unaffected.
+- The `_id` / `_labels` / `_type` / `_start` / `_end` / `_path` reserved keys
+  are stable contract and snapshot-tested. Source columns named with a leading
+  underscore collide with reserved keys and are a documented bind-time
+  rejection.
+
+See `phase-1-readonly-gql-design.md` for worked examples and the snapshot-test
+corpus.
+
+Optional future openCypher compatibility API:
+
+```sql
+graph.cypher(
+  query text,
+  params jsonb default '{}',
+  hydrate boolean default true
+)
+RETURNS TABLE (row jsonb)
+```
+
+```sql
+graph.cypher_explain(
+  query text,
+  params jsonb default '{}'
+)
+RETURNS TABLE (stage text, detail jsonb)
+```
+
+Projection-mode selection should expose the accepted mode names:
 
 ```sql
 SELECT graph.build(mode := 'csr_readonly');
@@ -195,9 +257,9 @@ SELECT graph.build(mode := 'mutable_overlay');
 
 ## Query Frontends
 
-### openCypher
+### GQL
 
-The openCypher frontend owns:
+The GQL frontend owns:
 
 - tokenization;
 - parsing;
@@ -207,24 +269,54 @@ The openCypher frontend owns:
 
 It does not execute plans and does not know about CSR, overlays, SPI, or pgrx.
 
-The compatibility target should be phrased as "openCypher-compatible subset"
-until a formal compatibility matrix proves broader coverage.
+The compatibility target should be phrased as "GQL-compatible subset aligned
+with SQL/PGQ graph pattern matching" until a formal compatibility matrix proves
+broader coverage.
 
-### GQL
+#### Parser implementation strategy (decided)
 
-The GQL frontend should be added after the shared IR is stable. It owns GQL
-syntax and GQL-specific diagnostics, but lowers into the same logical IR where
-semantics overlap.
+The GQL frontend is a **handwritten lexer + recursive-descent parser** with a
+precedence-climbing (Pratt) sub-parser for `WHERE` expressions. No
+parser-generator (lalrpop/pest/peg) and no external grammar crate.
 
-GQL features that cannot map to the PostgreSQL-authoritative property graph
-model should be rejected during semantic binding with stable diagnostics.
+Justification:
+
+- **Diagnostics and spans are first-class requirements.** Hand-rolled descent
+  gives exact control over byte spans, clause context, and hint text. Generated
+  parsers make stable, friendly diagnostics harder and their output opaque.
+- **Dependency surface must stay minimal and pgrx-free.** Query text is
+  untrusted input; a hand-rolled parser keeps the audited code in-repo with no
+  third-party parsing dependency in the attack surface.
+- **Totality and fuzzing are simpler.** A hand-rolled parser is
+  straightforward to drive to "every input returns a typed error, never
+  panics," and the fuzz target is the parser entry function with no generated
+  intermediate to reason about.
+- **The grammar grows slice by slice.** Phase 1A–1D and later phases each add
+  productions incrementally; recursive descent extends cleanly without
+  regenerating a grammar.
+- **House style.** The engine already favors zero-dependency, auditable code.
+
+The lexer is a separate pass producing tokens with spans; the parser consumes
+tokens and never re-reads raw bytes. See
+`phase-1-readonly-gql-design.md` for the concrete grammar productions, token
+set, and AST.
 
 ### SQL/PGQ
 
-SQL/PGQ support should be treated as an adapter target. pgGraph should not fork
-PostgreSQL's SQL/PGQ implementation. Instead, eligible graph patterns should be
-lowered into the shared IR when PostgreSQL exposes stable extension points or
-when SQL/PGQ graph definitions can be mapped safely to pgGraph projections.
+SQL/PGQ support should be treated as a close standards adapter target. pgGraph
+should not fork PostgreSQL's SQL/PGQ implementation. Instead, eligible graph
+patterns should be lowered into the shared IR when PostgreSQL exposes stable
+extension points or when SQL/PGQ graph definitions can be mapped safely to
+pgGraph projections.
+
+### openCypher Compatibility
+
+openCypher support is optional compatibility after GQL/SQL-PGQ are stable. It
+owns openCypher syntax and diagnostics, but lowers into the same logical IR
+where semantics overlap.
+
+openCypher features that cannot map to the PostgreSQL-authoritative property
+graph model should be rejected during semantic binding with stable diagnostics.
 
 ## Semantic Binding
 
@@ -255,10 +347,81 @@ Catalog binding should produce typed errors:
 No dynamic SQL should be built from user-provided identifiers without catalog
 validation.
 
+### Catalog Snapshot Interface (decided first shape)
+
+The snapshot is an **immutable, pgrx-free value** built once per query from the
+existing catalog read path (`catalog::read::read_catalog`, which is the only
+SPI-touching part). The binder and planner consume the snapshot through a trait
+so they unit-test against a fake. The concrete struct wraps the existing
+`RegisteredTable` / `RegisteredEdge` / `RegisteredFilterColumn` rows plus
+resolved `TableOid`s.
+
+```rust
+/// Immutable, pgrx-free view of registered graph metadata for one query.
+pub trait CatalogSnapshot {
+    /// Resolve a GQL node label to a registered table (and its OID).
+    /// Errors: UnknownLabel, AmbiguousLabel.
+    fn resolve_node_label(&self, label: &str) -> Result<NodeLabelInfo, BindError>;
+
+    /// Resolve a GQL relationship type to a registered edge label.
+    /// Errors: UnknownRelType.
+    fn resolve_rel_type(&self, rel_type: &str) -> Result<RelTypeInfo, BindError>;
+
+    /// Resolve a property name on a bound label to a source column + type.
+    /// Errors: UnknownProperty, UnsupportedPropertyType.
+    fn resolve_property(
+        &self,
+        label: &NodeLabelInfo,
+        property: &str,
+    ) -> Result<PropertyInfo, BindError>;
+
+    /// Tenant column for a label, if the table is tenant-scoped.
+    fn tenant_column(&self, label: &NodeLabelInfo) -> Option<&PropertyInfo>;
+
+    /// Filter-index columns available for fast predicate pushdown on a label.
+    fn filter_columns(&self, label: &NodeLabelInfo) -> &[PropertyInfo];
+
+    /// Catalog fingerprint for plan-cache keying and schema-drift detection.
+    fn fingerprint(&self) -> u64;
+}
+
+pub struct NodeLabelInfo {
+    pub table_name: String,
+    pub table_oid: TableOid,
+    pub primary_key: PrimaryKeySpec, // existing builder type
+    pub tenant_column: Option<PropertyInfo>,
+}
+
+pub struct RelTypeInfo {
+    pub label: String,
+    pub edge_type_id: u8,          // matches edge_store u8 ceiling
+    pub from_table: String,
+    pub to_table: String,
+    pub bidirectional: bool,       // drives undirected-relationship semantics
+    pub weight_column: Option<PropertyInfo>,
+}
+
+pub struct PropertyInfo {
+    pub column_name: String,
+    pub pg_type: PropertyType,     // closed set; mirrors FilterCondition variants
+    pub filter_indexed: bool,
+}
+```
+
+`PropertyType` is a closed enum mirroring the typed-filter set the engine
+already supports (integer/bigint, numeric, boolean, dictionary-encoded text,
+uuid, date, timestamptz, plus `Unsupported`). ACL/RLS are NOT modeled as
+snapshot fields: they are enforced at execution time by reusing
+`acl::check_table_acl(table_oid)` for every touched table and by routing all
+value access through SPI so PostgreSQL RLS applies. The snapshot only carries
+the `TableOid` needed to make that ACL call. See
+`phase-1-readonly-gql-design.md` for the concrete builder and the fake used in
+binder unit tests.
+
 ## Logical IR
 
-The logical IR is the shared representation for openCypher, GQL, existing SQL
-API lowering, and future SQL/PGQ adapters.
+The logical IR is the shared representation for GQL, existing SQL API lowering,
+future SQL/PGQ adapters, and optional openCypher compatibility.
 
 Core logical operators:
 
@@ -326,7 +489,8 @@ Physical planning chooses between:
 - PostgreSQL SPI lookup/search/hydration;
 - rejection with a stable unsupported-feature error.
 
-Planner decisions should be visible through `cypher_explain()` / `gql_explain()`.
+Planner decisions should be visible through `gql_explain()` and optional
+compatibility explain functions.
 
 ## Projection Runtime
 
@@ -412,7 +576,7 @@ TxGraphDelta
   resolution_updates
 ```
 
-Cypher/GQL writes execute PostgreSQL SPI writes first. If PostgreSQL accepts the
+GQL writes execute PostgreSQL SPI writes first. If PostgreSQL accepts the
 write, pgGraph records transaction-local deltas for read-your-own-writes.
 
 Transaction callbacks:
@@ -455,7 +619,7 @@ PostgreSQL freshness markers before use.
 
 ## Locking And Isolation
 
-Cypher/GQL writes must use PostgreSQL's locking and transaction semantics:
+GQL writes must use PostgreSQL's locking and transaction semantics:
 
 - write PostgreSQL source rows first;
 - use parameterized SPI;
@@ -498,7 +662,7 @@ Add or extend GUCs for:
 - max query text length;
 - max AST nodes;
 - max variables/patterns;
-- max Cypher/GQL returned rows;
+- max GQL returned rows;
 - max hydrated rows;
 - max transaction delta nodes;
 - max transaction delta edges;
@@ -555,6 +719,12 @@ Required controls:
 Testing follows the repository's existing ladder and the rust-planning test
 strategy.
 
+GQL compatibility is tracked by an explicit matrix. A feature is not
+"supported" until parser, semantic, execution, negative, explain, and docs
+coverage all exist for that row. The matrix lives in
+`todo/mutable-graph-projections-todo.md` while this branch is active and should
+later move into public compatibility docs when the SQL facade exists.
+
 Unit tests:
 
 - lexer;
@@ -577,15 +747,15 @@ Property tests:
 
 Fuzz tests:
 
-- openCypher parser totality;
-- GQL parser totality when added;
+- GQL parser totality;
+- openCypher parser totality if compatibility is added;
 - unsupported-shape diagnostics;
 - expression parser edge cases.
 
 pgrx SQL tests:
 
-- read-only openCypher success cases;
-- read-only openCypher unsupported writes;
+- read-only GQL success cases;
+- read-only GQL unsupported writes;
 - mutable projection read-your-own-writes;
 - rollback discards deltas;
 - concurrent sessions do not see uncommitted deltas;
@@ -608,8 +778,48 @@ Benchmark gates:
 
 - existing CSR traversal must not regress materially;
 - overlay-aware algorithms must report overhead on clean and dirty graphs;
-- openCypher equivalent queries should be compared with existing SQL APIs;
+- GQL equivalent queries should be compared with existing SQL APIs;
 - compaction thresholds should be measured on representative graphs.
+
+Generated GQL test dimensions:
+
+- direction: outbound, inbound, undirected;
+- label and relationship-type resolution: explicit, omitted, unknown,
+  ambiguous;
+- predicates: equality, inequality, range, null, missing property, membership;
+- return shapes: node, relationship, property, path, count, aggregate, map;
+- limits: none, zero, small positive, large over-limit;
+- tenant visibility: unscoped, scoped allowed, scoped denied;
+- projection state: clean CSR, dirty overlay, stale projection;
+- hydration: hydrated JSONB rows and coordinate-only rows.
+
+Stable graph fixtures:
+
+- chain;
+- branch;
+- cycle;
+- disconnected components;
+- multi-table labels;
+- multi-edge-type graph;
+- weighted graph;
+- tenant-scoped graph;
+- Phase 2 overlay/sync graph with inserts, deletes, tombstones, and replayed
+  out-of-band SQL writes.
+
+Pre-code performance baselines:
+
+- unit and pgrx SQL suites are recorded in
+  `todo/regression-baseline-2026-05-29.md`;
+- Criterion `bfs_bench` baseline is saved as `pre_gql_mutable_overlay`;
+- SQL-facing Panama and LDBC sandbox reports are recorded by report path and
+  summary;
+- heavy memory scripts are recorded, including build RSS and the Linux-only PSS
+  script behavior on this macOS host.
+
+Every implementation phase should update the baseline comparison before
+claiming completion, especially around CSR traversal, overlay traversal,
+filter-index traversal, graph construction, SQL-facing query latency, and
+memory footprint.
 
 ## Documentation Plan
 
@@ -636,7 +846,8 @@ Run docs drift checks before calling any public milestone complete.
 
 | Risk | Mitigation |
 |---|---|
-| "Full Cypher" implies Neo4j compatibility | Publish an openCypher-compatible subset matrix |
+| "Full GQL" implies complete standard coverage | Publish a GQL-compatible subset matrix |
+| Later openCypher support implies Neo4j compatibility | Publish a separate compatibility matrix |
 | Mutable overlay returns stale answers | Centralize neighbor abstraction and reject unsupported dirty algorithms |
 | Query text introduces SQL injection | Catalog validation plus parameterized SPI only |
 | Overlay memory grows without bound | GUC limits, compaction thresholds, read-only fallback |
@@ -648,14 +859,31 @@ Run docs drift checks before calling any public milestone complete.
 
 ## Implementation Readiness Checklist
 
-- Public compatibility target chosen.
-- Current non-goal docs reconciled.
-- Critical pre-launch safety/correctness items resolved or explicitly deferred.
-- Parser design accepted.
-- Query IR accepted.
-- Projection-mode API accepted.
-- Overlay neighbor abstraction accepted.
-- SQLSTATE taxonomy accepted.
-- GUC additions accepted.
-- Test ladder accepted.
-- Benchmark gates accepted.
+Status as of 2026-05-30. Per-phase detail lives in the phase design docs
+(`phase-1-readonly-gql-design.md` … `phase-4-advanced-writes-opencypher-design.md`).
+
+- [x] Public compatibility target chosen — GQL-compatible subset; matrix-gated.
+- [ ] Current non-goal docs reconciled — tracked as Phase 1A PR work
+      (`lib.rs` "No new query language", `docs/index.mdx`, `architecture.mdx`).
+- [x] Critical pre-launch safety/correctness items named — see
+      `mutable-graph-projections-todo.md` Phase 1 step 3; only known-issues P0
+      (per-backend memory accounting) and P2 (edge-type `u8` ceiling) remain,
+      and neither gates Phase 1.
+- [x] Parser design accepted — handwritten lexer + recursive descent + Pratt
+      `WHERE` parser (see Parser Implementation Strategy above).
+- [x] Query IR accepted (shape) — concrete logical/physical types defined in
+      `phase-1-readonly-gql-design.md`; frontend-neutral so SQL/PGQ adapts later.
+- [x] Projection-mode API accepted — `csr_readonly` / `mutable_overlay`.
+- [ ] Overlay neighbor abstraction accepted — `NeighborSource` shape proposed;
+      finalized in Phase 2 (`phase-2-mutable-overlay-writes-design.md`).
+- [ ] SQLSTATE taxonomy accepted — deferred to the pre-facade gate task; must be
+      done before public `graph.gql()`.
+- [x] GUC additions accepted (list) — see Configuration; defaults preserve
+      current read-only behavior.
+- [x] Test ladder accepted — see Test Architecture + per-phase docs.
+- [x] Benchmark gates accepted — baselines current as of 2026-05-29 at HEAD
+      `0574e6b` (still HEAD on 2026-05-30); mmap PSS pending a Linux host.
+
+**Phase 1A is clear to start coding.** The remaining unchecked items
+(docs reconciliation, SQLSTATE taxonomy, overlay abstraction) gate the *public*
+`graph.gql()` exposure and Phase 2 respectively, not the start of parser/AST work.

@@ -1,10 +1,10 @@
-# Working TODO: Cypher And Mutable Graph Projections
+# Working TODO: GQL And Mutable Graph Projections
 
 > Reminder: delete this tracking file before merging `feat/mutable-graph-projections` into `main`.
 
 ## Goal
 
-Explore Cypher/GQL/SQL-PGQ support and mutable graph projections without
+Explore GQL/SQL-PGQ support and mutable graph projections without
 breaking pgGraph's current PostgreSQL-first contract.
 
 The long-term direction is to let users choose the graph runtime shape when
@@ -19,31 +19,32 @@ PostgreSQL source tables remain authoritative. The mutable graph layer should
 feel close to native graph speed while avoiding unbounded RAM growth or a second
 durable source of truth.
 
-## Existing Contract Conflicts
+## Contract Reconciliation
 
-This branch intentionally proposes work that conflicts with current public
-positioning. These must be resolved before any public Cypher/GQL/SQL-PGQ API is
-merged:
+This branch intentionally changes pgGraph's future positioning from "no graph
+query language" to "GQL/SQL-PGQ planned, PostgreSQL-first, compatibility matrix
+required." The roadmap and limitations docs have been adjusted on this branch,
+but the rest of the public and source-level contract must still be reconciled
+before any public GQL/SQL-PGQ API is merged:
 
-- `docs/roadmap.mdx` currently lists Cypher, Gremlin, SPARQL, and GQL as
-  non-goals.
-- `docs/user_guide/limitations-and-fit.mdx` points users needing Cypher,
-  Gremlin, SPARQL, or GQL compatibility to another database.
 - `docs/user_guide/index.mdx` says pgGraph does not introduce a new graph query
   language.
 - `docs/contributor_guide/architecture.mdx` says SQL is the public API.
 - `graph/src/lib.rs` says "No new query language."
+- API reference docs should not mention `graph.gql()` until the SQL function
+  exists.
 
-The existing private `.agents/private/cypher-support-plan.md` is the baseline
-for Cypher parser/planner work. This TODO extends that plan with a possible
-future write-capable mutable projection path, but the two documents must be
-reconciled before implementation starts.
+The existing private `.agents/private/cypher-support-plan.md` is no longer the
+primary implementation plan. It remains useful research for parser/planner
+shape, JSONB row output, safety limits, and frontend-neutral IR design. The new
+primary target is GQL-first with SQL/PGQ alignment and optional future
+openCypher compatibility.
 
 ## Scope Gates
 
-- Do not expose public Cypher functions until the compatibility contract and
+- Do not expose public GQL functions until the compatibility contract and
   docs positioning are updated together.
-- Do not add Cypher writes until read-only Cypher has a parser, semantic binder,
+- Do not add GQL writes until read-only GQL has a parser, semantic binder,
   logical plan, physical plan, SQL facade, tests, and docs.
 - Do not add mutable projection writes until transaction-local overlays,
   rollback behavior, out-of-band SQL sync, and memory-limit behavior are proven.
@@ -53,16 +54,26 @@ reconciled before implementation starts.
 
 ## Architecture Decisions
 
-- Cypher writes target PostgreSQL source tables first. Projections react to
+- Compatibility target: GQL-compatible subset first, aligned with SQL/PGQ graph
+  pattern matching where possible.
+- Public API target: `graph.gql(query, params, hydrate)` returning JSONB rows,
+  with `graph.gql_explain(query, params)` for diagnostics once the SQL facade
+  exists.
+- Public docs strategy: update roadmap and limitations wording now; add API
+  reference docs only when SQL functions exist.
+- Projection mode names: `csr_readonly` and `mutable_overlay`.
+- GQL writes target PostgreSQL source tables first. Projections react to
   PostgreSQL state and must not become a second durable source of truth.
 - Mutable projection writes are transaction-scoped. A transaction must read its
-  own Cypher writes and rollback must discard projection deltas.
-- The first public Cypher milestone should remain read-only and follow
-  `.agents/private/cypher-support-plan.md`.
-- The first write-capable Cypher milestone is intentionally narrow:
-  - reads: `MATCH (n)-[r]->(m) WHERE ... RETURN ...`
-  - writes: `CREATE (n:Label {props})`, `MATCH (n) SET n.prop = val`, and
-    `MATCH (n)-[r]->(m) DELETE r`
+  own GQL writes and rollback must discard projection deltas.
+- SQLSTATE additions are deferred until the GQL SQL facade lands.
+- The first public graph-language milestone should be read-only GQL, not
+  openCypher. It should prioritize graph pattern matching semantics that align
+  with SQL/PGQ.
+- The first write-capable GQL milestone is intentionally narrow:
+  - reads: a single bounded graph pattern with `WHERE` and `RETURN`;
+  - writes: insert a node mapped to a registered source table, update a mapped
+    property, and delete a mapped edge row.
 - Defer `MERGE`, cascading deletes, complex path-pattern mutations, broad
   function coverage, and full variable-length write semantics until the
   transaction and projection architecture is proven.
@@ -80,26 +91,25 @@ reconciled before implementation starts.
   tables plus committed sync state rather than trusting a custom durable store.
 - Fast mutable snapshots may be considered later, but only if validated against
   PostgreSQL LSN and replayed forward safely after restart.
-- Introduce a shared planner layer. Cypher, existing SQL functions, future GQL,
-  and future SQL/PGQ adapters should compile into common logical and physical
-  graph operators.
-- MVP Cypher `CREATE (n:Label ...)` may only create rows for labels that map to
-  registered source tables. Creating new labels/tables from Cypher is out of
-  scope.
+- Introduce a shared planner layer. GQL, existing SQL functions, SQL/PGQ
+  adapters, and optional future openCypher compatibility should compile into
+  common logical and physical graph operators.
+- MVP GQL node inserts may only create rows for labels that map to registered
+  source tables. Creating new labels/tables from GQL is out of scope.
 - Do not make CSR mutable. The committed base graph stays immutable CSR so it
   remains compact, cache-friendly, mmap-shareable, and easy to validate.
 - Arenas/slabs are candidates for mutation deltas or a future fully resident
   mutable projection mode, not for the committed CSR base.
-- Cypher and mutability are orthogonal. Read-only Cypher should ship on the
-  existing immutable CSR path before mutable projection writes.
+- GQL and mutability are orthogonal. Read-only GQL should ship on the existing
+  immutable CSR path before mutable projection writes.
 
 ## Design Checkpoints
 
 - Define the public meaning of a graph projection mode.
-- Define the public Cypher surface and how it maps to PostgreSQL tables,
+- Define the public GQL surface and how it maps to PostgreSQL tables,
   graph catalog metadata, and projection runtimes.
-- Decide exactly which Cypher reads are legal on read-only CSR projections and
-  which Cypher writes require mutable projections.
+- Decide exactly which GQL reads are legal on read-only CSR projections and
+  which GQL writes require mutable projections.
 - Preserve a clear user choice at graph build time: read-only CSR speed vs
   mutable read/write graph layer.
 - Preserve PostgreSQL MVCC, ACL, RLS, durability, and recovery boundaries.
@@ -112,7 +122,7 @@ reconciled before implementation starts.
 - Bound memory growth with tombstone compaction, delta thresholds, maintenance
   rebuilds, and read-only fallback states.
 - Document consistency guarantees for readers during projection writes.
-- Define Cypher-to-PostgreSQL type mapping, especially dynamic properties,
+- Define GQL-to-PostgreSQL type mapping, especially dynamic properties,
   lists, mixed lists, maps, nulls, and missing properties.
 - Define how existing SQL APIs behave on mutable projections. Avoid silently
   degrading `graph.traverse()` users from CSR-speed behavior to a slower runtime
@@ -122,7 +132,7 @@ reconciled before implementation starts.
   behave for each projection mode.
 - Define GUCs for projection mode defaults, mutable enablement, transaction
   delta limits, compaction thresholds, and memory caps.
-- Define SQLSTATE policy for Cypher syntax, unsupported feature, semantic,
+- Define SQLSTATE policy for GQL syntax, unsupported feature, semantic,
   parameter, type mismatch, schema violation, write-on-read-only, and memory
   limit errors.
 
@@ -247,7 +257,7 @@ interacts with the current sync path.
 - Edge label registry: dynamic edge creation must respect compact edge type ID
   limits and registered edge labels. Edge `type_id` is currently a `u8`
   (`edge_store.rs`), so there is a hard ceiling of 256 distinct edge types;
-  dynamic edge-type creation from Cypher must account for this limit.
+  dynamic edge-type creation from GQL must account for this limit.
 - Reverse CSR (`reverse_edge_store`): the reverse adjacency is currently a
   derived structure rebuilt from the forward CSR per backend
   (`EdgeStore::reversed`). Edge creates/deletes must update or invalidate both
@@ -259,7 +269,7 @@ interacts with the current sync path.
   owned-memory load/build behavior and clear `graph.load()` semantics.
 - Delta adjacency: transaction-local overlays can start with simple maps and
   small vectors. Arena/slab blocks are a later implementation choice for larger
-  mutable regions, not a prerequisite for Cypher writes.
+  mutable regions, not a prerequisite for GQL writes.
 - Algorithms: overlay-aware execution must cover traversal, shortest path,
   weighted shortest path, connected components, search/traversal hybrids, and
   aggregation where supported. Today the overlay gap is large, not marginal:
@@ -271,6 +281,10 @@ interacts with the current sync path.
 
 ## Blind Spots To Resolve
 
+> Several of these are now resolved as **Decision Records** (DR-1…DR-5) in the
+> "Resolved Decisions" section below. The remainder stay here as Phase-2 design
+> inputs to address inside `phase-2-mutable-overlay-writes-design.md`.
+
 - Per-backend vs shared committed projection. The engine is backend-local
   today; deciding whether the mutable committed model stays per-backend
   (sync-log catch-up) or becomes shared-memory changes the locking, memory, and
@@ -278,11 +292,11 @@ interacts with the current sync path.
 - Graph MVCC and concurrent transaction visibility.
 - Out-of-band SQL mutations against registered source tables.
 - Memory-limit behavior for large transactions and large mutation deltas.
-- Whether mutable projection over-limit errors abort only the Cypher statement
+- Whether mutable projection over-limit errors abort only the GQL statement
   or the whole transaction.
 - Whether any spill-to-disk path is allowed, and if so whether it is temporary
   and non-authoritative.
-- Cypher dynamic property typing vs PostgreSQL's typed columns.
+- GQL dynamic property typing vs PostgreSQL's typed columns.
 - Locking strategy for `CREATE`, `SET`, and `DELETE` over source rows and
   edges.
 - Interaction with the existing build lock protocol, source table locks, and
@@ -295,30 +309,92 @@ interacts with the current sync path.
 
 ## Phased Dependency Plan
 
-1. Reconcile product/docs contract.
-2. Reconcile this TODO with `.agents/private/cypher-support-plan.md`.
-3. Finish or explicitly defer critical pre-launch safety/correctness items.
-4. Track A: add private Cypher parser/AST and fuzz tests.
-5. Track A: add catalog binding and shared logical graph IR.
-6. Track A: add physical operators for read-only Cypher over existing
-   primitives.
-7. Track A: expose read-only `graph.cypher()` / `graph.cypher_explain()` only
-   after docs,
+### Phase 1: Read-Only GQL
+
+Full design: `phase-1-readonly-gql-design.md`.
+
+1. Reconcile product/docs contract (Phase 1A PR work): `graph/src/lib.rs` line 5
+   "No new query language", `docs/user_guide/index.mdx`,
+   `docs/contributor_guide/architecture.mdx`.
+2. Treat `.agents/private/cypher-support-plan.md` as background research, not
+   the primary plan.
+3. Confirm critical pre-launch safety/correctness items. **Named items** (from
+   `docs/known-issues.mdx`): the Data Correctness, SQL Contract, SQL Safety,
+   Persistence, Sync, and Internal-Construction categories are all cleared
+   ("No currently tracked next-update items"). The only remaining tracked items
+   are **P0** (per-backend `pggraph.memory_limit_mb` accounting / no
+   cluster-wide guard) and **P2** (edge-type `u8` 255-type ceiling). Decision:
+   **neither gates Phase 1** — read-only GQL registers no new edge types and
+   adds only bounded per-query memory, not new persistent per-backend
+   structures. The edge-type ceiling is carried forward as a **Phase 2**
+   write-path input (dynamic edge creation must respect it).
+4. Add private GQL parser/AST and fuzz tests.
+5. Add catalog binding (`CatalogSnapshot`) and shared logical graph IR.
+6. Add physical operators for read-only GQL over existing primitives.
+7. Expose read-only `graph.gql()` / `graph.gql_explain()` only after docs,
    SQLSTATEs, ACL/RLS, tenant scope, and tests are complete.
-8. Track B: define one overlay-aware neighbor abstraction and route
-   `path_finder`, `connected_components`, and other graph algorithms through it
-   or explicitly reject dirty mutable projections.
-9. Track B: design mutable projection storage and transaction-local delta
-   overlays, starting with simple maps/vectors and evaluating arena/slab blocks
-   only for larger long-lived deltas.
-10. Track C: add narrow Cypher writes targeting PostgreSQL first, then projection
-    update/invalidation.
-11. Add GQL and SQL/PGQ parser/adapters once the shared IR is stable.
+
+**Phase 1 sub-slices** (each is an independently mergeable, TDD-sized PR; the
+public `graph.gql()` function ships only when 1A–1D + SQLSTATE + docs
+reconciliation are all green — it may live behind `#[cfg(feature = "development")]`
+earlier, matching the existing `BuildResult` pattern):
+
+- **1A — Frontend foundation:** docs/contract reconciliation; handwritten lexer
+  + recursive-descent parser + AST with spans; parser totality + fuzz target.
+  No binding, no execution. Output: a parsed AST for the Phase-1 grammar subset
+  and typed syntax errors.
+- **1B — Bind + plan + execute a single directed `MATCH`:** `CatalogSnapshot`
+  trait + concrete impl + fake; semantic binder; logical IR; physical lowering
+  to one `ExpandOutCsr`/`ExpandInCsr` over existing primitives;
+  `graph.gql_explain()`; coordinate-only output (no hydration, no `WHERE`).
+  First end-to-end vertical slice.
+- **1C — Predicates, RETURN shapes, hydration:** `WHERE` predicates
+  (eq/neq/range/null/membership) mapped onto the typed filter set; `RETURN`
+  node/relationship/property; the canonical JSONB result shape with
+  `hydrate := true|false`; ACL/RLS/tenant enforcement at execution.
+- **1D — Ordering, limits, var-length:** `ORDER BY`, `SKIP`, `LIMIT` (hard row
+  caps); undirected relationships (duplicate/identity rules); bounded
+  variable-length relationships with explicit max bounds.
+
+Phase 1 must not be marked complete until every claimed supported GQL feature
+has coverage at all required layers: parser, semantic binding, logical plan,
+physical execution, negative diagnostics, and docs/status matrix entry.
+
+### Phase 2: Mutable Overlay And GQL Writes
+
+1. Define one overlay-aware neighbor abstraction and route `path_finder`,
+   `connected_components`, and other graph algorithms through it or explicitly
+   reject dirty mutable projections.
+2. Design mutable projection storage and transaction-local delta overlays,
+   starting with simple maps/vectors and evaluating arena/slab blocks only for
+   larger long-lived deltas.
+3. Add narrow GQL writes targeting PostgreSQL first, then projection
+   update/invalidation.
+
+Phase 2 must prove read-your-own-writes, rollback discard, concurrent
+isolation, out-of-band SQL sync catch-up, and dirty-overlay algorithm behavior.
+Writes remain deliberately narrow until locking, transaction callback,
+SQLSTATE, tenant, and type-mapping decisions are implemented.
+
+### Phase 3: Advanced Read GQL And SQL/PGQ Adapter
+
+1. Add multi-stage read query support such as `OPTIONAL MATCH`, `WITH`,
+   `DISTINCT`, aggregates, and path functions once Phase 1 proves the shared
+   read planner.
+2. Add SQL/PGQ adapters once the shared IR is stable.
+
+### Phase 4: Advanced GQL Writes And Optional Compatibility
+
+1. Add advanced write semantics such as `REMOVE`, `DETACH DELETE`, and `MERGE`
+   only after Phase 2 proves PostgreSQL-first writes, row locking,
+   transaction-local overlays, and sync replay.
+2. Add optional openCypher compatibility only after GQL/SQL-PGQ direction is
+   stable.
 
 ## Implementation Tracks
 
-- Cypher parser and planner integration
-- Cypher SQL function/API surface
+- GQL parser and planner integration
+- GQL SQL function/API surface
 - Shared logical graph IR
 - Shared physical graph operators such as index scan, expand-out, expand-in,
   filter, project, hash join, update property, create node, and delete edge
@@ -337,14 +413,14 @@ interacts with the current sync path.
   tracking
 - Memory accounting and read-only fallback states
 - OOM and transaction abort policy
-- Cypher/PostgreSQL type mapping policy
+- GQL/PostgreSQL type mapping policy
 - Mutable `ResolutionIndex`, `FilterIndex`, `NodeStore`, tenant bitmap, and
   edge label registry interactions
 - Existing SQL API behavior on mutable projections
 - `graph.status()`, `graph.sync_health()`, `graph.reset()`, `graph.load()`,
   `graph.auto_load`, `graph.vacuum()`, and `graph.maintenance()` behavior
 - GUCs and SQLSTATE mapping
-- Tests for Cypher reads, Cypher writes, graph writes, stale reads, rebuilds,
+- Tests for GQL reads, GQL writes, graph writes, stale reads, rebuilds,
   rollback, concurrent transactions, out-of-band SQL writes, and crash/reload
   behavior
 - Benchmarks against current SQL APIs, CSR traversal, and representative native
@@ -353,34 +429,274 @@ interacts with the current sync path.
 
 ## Test Plan
 
+Treat the GQL support surface as a compatibility matrix, not a slogan. Every
+supported row in the matrix needs:
+
+- parser tests;
+- semantic/planner tests;
+- execution tests comparing `graph.gql()` results against existing SQL API
+  results where an equivalent SQL API exists;
+- negative/security tests;
+- explain-output coverage through `graph.gql_explain()`;
+- docs/status coverage before the feature is called supported.
+
+Test layers:
+
 - Unit tests for lexer, parser, AST spans, semantic binding, logical plans,
-  physical lowering, type mapping, and projection formatting.
-- Fuzz tests for Cypher parser totality and unsupported-shape diagnostics.
+  physical lowering, type mapping, projection formatting, and typed error
+  conversion.
+- Snapshot tests for stable `graph.gql_explain()` output and parser/planner
+  diagnostics.
+- Generated combinational tests over direction, labels, relationship types,
+  predicates, return shape, limits, tenant scope, hydration, and unsupported
+  writes.
+- Fuzz tests for GQL parser totality, expression parser totality, and
+  unsupported-shape diagnostics. Random input must return a typed error, never
+  panic.
 - Proptests for mutable overlay invariants, active-node visibility,
-  resolution/filter index consistency, and edge insert/delete reduction.
-- pgrx SQL tests for read-only Cypher, write rejection on read-only
-  projections, narrow write support on mutable projections, ACL/RLS, tenant
-  scope, rollback, read-your-own-writes, concurrent sessions, and out-of-band
-  SQL sync.
+  resolution/filter index consistency, edge insert/delete reduction, and
+  compaction equivalence between CSR+overlay and rebuilt CSR.
+- pgrx SQL tests for read-only GQL, write rejection on read-only projections,
+  narrow write support on mutable projections, ACL/RLS, tenant scope, rollback,
+  read-your-own-writes, concurrent sessions, out-of-band SQL sync, and
+  SQLSTATE stability.
 - Heavy tests for crash/reload, maintenance/vacuum interaction, memory-limit
-  behavior, status/health row shapes, and function metadata drift.
+  behavior, status/health row shapes, function metadata drift, backup/restore,
+  and release gates.
 - Benchmark gates to ensure read-only CSR traversal does not regress when the
   shared planner and mutable projection code are added.
 - Docs/API drift checks for every public SQL signature, GUC, SQLSTATE, row
   shape, and behavior change.
 
-## Open Questions
+Stable fixture graphs:
 
-- What syntax should select projection mode during build or registration?
-- What row locks are required for Cypher `SET` and `DELETE` to match
-  PostgreSQL isolation semantics?
-- How much type flexibility should the MVP allow before requiring `jsonb`
-  property columns?
-- Should GQL and SQL/PGQ be separate parser frontends from day one, or tracked
-  as adapter milestones after the shared IR stabilizes?
-- Should the proposed `graph.cypher(query, params, hydrate)` API from
-  `.agents/private/cypher-support-plan.md` remain the public API, or should
-  mutable writes require separate typed entry points?
-- How should the project phrase compatibility: Cypher-inspired subset,
-  openCypher subset, eventual comprehensive Cypher, GQL subset, or SQL/PGQ
-  accelerator?
+- simple chain;
+- branching graph;
+- cycle;
+- disconnected graph;
+- multi-label/table graph;
+- multi-edge-type graph;
+- weighted graph;
+- tenant-scoped graph;
+- graph with deleted/synced overlay rows after Phase 2 starts.
+
+Generated matrix dimensions:
+
+- direction: outbound, inbound, undirected;
+- node label: explicit, omitted, unknown, ambiguous;
+- relationship type: explicit, omitted, unknown;
+- predicate: equality, inequality, range, null, missing property, membership;
+- return shape: node, property, relationship, path, count, aggregate, map;
+- limit shape: none, small positive, zero, large over-limit;
+- tenant shape: unscoped, scoped allowed, scoped denied;
+- projection shape: clean CSR, dirty overlay, stale projection;
+- hydration shape: hydrated rows, graph coordinates only.
+
+Phase gates:
+
+- Phase 1: read-only GQL parses, binds, plans, executes, explains, and rejects
+  writes without requiring mutable overlay support.
+- Phase 2: GQL writes update PostgreSQL first, then transaction-local overlay
+  state; rollback discards deltas; concurrent sessions do not see uncommitted
+  changes; committed visibility flows through sync-log replay.
+
+## GQL Compatibility Matrix
+
+Status values: `phase_1`, `phase_2`, `phase_3`, `phase_4`, `out_of_scope`,
+`unknown`.
+
+| GQL feature area | Target status | Parser | Semantics | Execution | Negative tests | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| `MATCH` single graph pattern | phase_1 | required | required | required | required | First useful read surface. |
+| Node labels mapped to registered source tables | phase_1 | required | required | required | required | Unknown/ambiguous labels must fail. |
+| Relationship types mapped to registered edge labels | phase_1 | required | required | required | required | Unknown types must fail. |
+| Directed outbound/inbound relationships | phase_1 | required | required | required | required | Must map to forward/reverse execution. |
+| Undirected relationships | phase_1 | required | required | required | required | Requires duplicate/identity rules. |
+| `WHERE` property predicates | phase_1 | required | required | required | required | Start with eq/neq/range/null/membership. |
+| Parameters through JSONB | phase_1 | required | required | required | required | Missing/wrong type errors required. |
+| `RETURN` node/property/relationship/path | phase_1 | required | required | required | required | JSONB row shape must be stable. |
+| `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | required | required | required | required | Hard row limits still apply. |
+| Bounded variable-length relationships | phase_1 | required | required | required | required | Require explicit max bounds. |
+| `OPTIONAL MATCH` | phase_3 | required | required | required | required | Needs null-extension semantics. |
+| `WITH` | phase_3 | required | required | required | required | Needed for multi-stage queries. |
+| `DISTINCT` | phase_3 | required | required | required | required | Memory limits required. |
+| Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | required | required | required | required | Start with `count` if staged. |
+| Path functions: `nodes`, `relationships`, `length` | phase_3 | required | required | required | required | Path value model must be stable. |
+| `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
+| `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |
+| `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |
+| `REMOVE` property/label | phase_4 | required | required | required | required | Needs null/missing semantics. |
+| `DETACH DELETE` | phase_4 | required | required | required | required | Requires cascade policy. |
+| `MERGE` | phase_4 | required | required | required | required | Requires read-before-write locking semantics. |
+| GQL DDL/schema creation | out_of_scope | optional | required | reject | required | Do not create arbitrary tables from GQL. |
+
+## Pre-Code Baselines
+
+Baseline results are tracked in `todo/regression-baseline-2026-05-29.md`.
+Before coding starts, compare against:
+
+- `cargo test --features pg17`
+- `cargo pgrx test pg17`
+- `cargo bench --features pg17 --bench bfs_bench -- --save-baseline pre_gql_mutable_overlay`
+- `sandbox/run_benchmarks.sh panama --yes`
+- `sandbox/run_benchmarks.sh ldbc --yes`
+- `graph/tests/heavy/measure_build_rss.sh`
+- `graph/tests/heavy/measure_mmap_pss.sh` on Linux only
+
+Do not begin graph-language or mutable-overlay implementation without either
+refreshing these baselines or explicitly recording why a baseline could not be
+captured on the current host.
+
+Policy note: `sfw` is only required for dependency-changing package-manager
+operations such as install, fetch, add, and update. Direct `cargo` is allowed for
+build, test, format, and benchmark commands.
+
+**Freshness (2026-05-30):** the baselines were captured 2026-05-29 at commit
+`0574e6b`, which is still `HEAD`, so they are current for Phase 1A start. The
+mmap PSS script is the only outstanding baseline (Linux-only; this is a macOS
+host) and must be captured on Linux before any claim about shared
+page-cache cost — it does not gate Phase 1.
+
+## Resolved Decisions (formerly Open Questions)
+
+These were the four open questions plus the design points Codex flagged. Each is
+now decided with justification. Phase-2-specific decisions are also captured as
+"Decision Records" below so they are not lost between phases.
+
+### Q1. Row locks for GQL updates/deletes (Phase 2)
+
+**Decision:** GQL writes are issued as ordinary parameterized SPI
+`INSERT`/`UPDATE`/`DELETE` against the registered source tables and inherit
+PostgreSQL's standard row locking automatically. The narrow Phase 2 write set
+(insert one mapped node, update one mapped property, delete one mapped edge row)
+is exactly one DML statement per write with **no read-modify-write in Rust**, so
+no explicit `SELECT ... FOR UPDATE` is required beyond what the DML already
+takes. **Justification:** PostgreSQL already implements correct row locking and
+MVCC; the lowest-risk path is to not reinvent it and to keep Phase 2 writes to
+single statements. Read-before-write semantics (`MERGE`/upsert) are the only
+case needing explicit `FOR UPDATE` / `ON CONFLICT`, and they are deliberately
+deferred to Phase 4.
+
+### Q2. Type flexibility before requiring `jsonb` (Phase 1 read / Phase 2 write)
+
+**Decision:** The MVP supports only the closed set of scalar PostgreSQL types
+the engine's typed `FilterCondition` set and catalog already model — integer /
+bigint / numeric, boolean, dictionary-encoded text, uuid, date, timestamptz, and
+SQL `NULL`. GQL scalar literals and JSONB parameters map onto these. Mixed-type
+lists, maps, and open/dynamic property bags require a `jsonb` source column and
+are deferred to Phase 3. A GQL predicate or `RETURN` targeting a non-modeled
+type is a typed `UnsupportedFeature`/`UnsupportedPropertyType` rejection, never a
+silent coercion. **Justification:** the engine already has a closed,
+well-tested typed-filter set with fast filter-index pushdown; aligning GQL types
+to it avoids inventing a parallel type system and keeps execution on the fast
+path. JSONB-backed dynamic properties are a deliberate Phase 3 expansion.
+
+### Q3. SQL/PGQ frontend timing
+
+**Decision:** SQL/PGQ is an **adapter milestone (Phase 3), not a day-one
+frontend.** Day one ships only the GQL frontend. The IR boundary is, however,
+designed **frontend-neutral from day one** so SQL/PGQ lowering can be added
+without reshaping the IR, and SQL/PGQ gets **no parser directory** — it lowers
+into `graph/src/query/` through an adapter. **Justification:** building two
+frontends before either executes doubles parser/fuzz surface and risks shaping
+the IR around a speculative second consumer; PostgreSQL's own SQL/PGQ support is
+still maturing, so the adapter target is a moving spec. Keep the IR neutral but
+do not write the SQL/PGQ parser yet.
+
+### Q4. openCypher positioning
+
+**Decision:** **Not promised until GQL/SQL-PGQ are stable.** When added (Phase
+4) it is a **separate function (`graph.cypher()`) with a separate compatibility
+matrix**, lowering into the same IR. The `graph/src/cypher/` and
+`sql_facade/cypher.rs` modules are **removed from the initial layout and must
+not be scaffolded before Phase 4.** **Justification:** scaffolding Cypher early,
+or promising it, implies Neo4j-shaped compatibility we cannot yet honor and
+invites "is this Neo4j?" confusion. Deferring keeps the public surface honest;
+see `phase-4-advanced-writes-opencypher-design.md`.
+
+### Q5. Parser implementation strategy
+
+**Decision:** handwritten lexer + recursive-descent parser + Pratt `WHERE`
+expression parser; no generator, no external parser crate. Recorded in
+`architecture-plan.md` → "Parser Implementation Strategy". **Justification:**
+precise spans/diagnostics, minimal pgrx-free dependency surface for untrusted
+input, simple totality + fuzzing, incremental grammar growth, house style.
+
+## Decision Records (promoted from Blind Spots — required before coding the relevant phase)
+
+### DR-1. Per-backend vs shared committed projection — **DECIDED: per-backend** (gates Phase 2)
+
+Keep the existing backend-local engine + durable sync-log catch-up model. A
+shared committed projection would require major new shared-memory infrastructure
+(shared CSR, cross-backend invalidation, cross-backend locking) and is explicitly
+out of scope. Transaction-local overlays layer on top of the per-backend model.
+**Justification:** matches today's runtime; lowest correctness/memory risk;
+PostgreSQL remains the cross-backend source of truth via the sync log. See
+"Graph MVCC Direction" above.
+
+### DR-2. Memory-limit / over-limit behavior — **DECIDED: statement-scoped abort, no spill** (gates Phase 2)
+
+Exceeding any transaction-delta limit (delta nodes/edges/properties or overlay
+memory) aborts the **current GQL statement** with a typed memory-limit error and
+leaves the surrounding transaction alive so the app can `ROLLBACK` or retry with
+a smaller write. The failed statement's backend-local overlay deltas are
+discarded (always safe — the overlay is cache, not a source of truth). If SPI
+writes for the statement were already issued before the limit tripped, the
+statement error propagates and the user must roll back; the overlay is never
+left inconsistent with committed PostgreSQL state. **No spill-to-disk** for
+overlay state, ever (consistent with the non-goal of any durable graph store).
+**Justification:** statement-level abort mirrors PostgreSQL's own `work_mem`-style
+behavior, maximizes app recovery latitude, and avoids killing unrelated work in
+a multi-statement transaction.
+
+### DR-3. Existing SQL API behavior on dirty mutable projections — **DECIDED per API** (gates Phase 2)
+
+No existing SQL API may silently return stale topology on a dirty overlay.
+Per-API:
+
+| API (file) | Phase 2 behavior |
+|---|---|
+| `graph.traverse()` / BFS (`bfs.rs`) | **Overlay-aware** (already consumes deltas). |
+| Aggregation (`sql_aggregation.rs`) | **Overlay-aware** (already consumes deltas). |
+| `graph.shortest_path()` / weighted (`path_finder.rs`) | **Reject dirty overlay** with stable SQLSTATE until routed through `NeighborSource`. |
+| `graph.connected_components()` (`connected_components.rs`) | **Reject dirty overlay** until routed through `NeighborSource`. |
+| `graph.search()` / `traverse_search` (`sql_search.rs`) | **Reject dirty overlay** until routed through `NeighborSource`. |
+
+`graph.status()` / `graph.sync_health()` must expose the dirty flag and the
+read-only/rejection reason. **Justification:** correctness over convenience;
+reject-loudly beats silent staleness; the two already-overlay-aware paths show
+the target end state, the rest are routed through the shared neighbor
+abstraction incrementally.
+
+### DR-4. ACL / RLS / tenant enforcement — **DECIDED: execution-time via existing paths** (gates Phase 1C)
+
+ACL is enforced by calling `acl::check_table_acl(table_oid)` for every touched
+source table; RLS is preserved by routing all value access and hydration through
+SPI so PostgreSQL applies row security; tenant scope reuses the existing tenant
+column + bitmap path. These are **not** modeled as catalog-snapshot fields — the
+snapshot only carries the `TableOid` needed to make the ACL call.
+**Justification:** reuse the audited enforcement paths rather than
+re-implementing authorization in the graph layer.
+
+### DR-5. SQLSTATE taxonomy — **DECIDED: typed GQL facade SQLSTATEs** (gates public `graph.gql()`)
+
+Read-only GQL maps frontend and execution failures to stable `GraphError`
+variants at the SQL facade boundary:
+
+| Category | SQLSTATE | Variant |
+|---|---:|---|
+| Syntax | `PG013` | `GqlSyntax` |
+| Unsupported feature | `PG014` | `GqlUnsupported` |
+| Semantic/bind | `PG015` | `GqlSemantic` |
+| Parameter | `PG016` | `GqlParameter` |
+| Execution/cardinality | `PG017` | `GqlExecution` |
+| Access denial | `PG002` | `AclDenied` |
+| Write on read-only projection | `PG012` | `ReadOnly` |
+| Memory limit | `PG001` | `Oom` |
+| Internal | `XX000` | `Internal` |
+
+Type-mismatch and schema-violation cases in the current read-only subset are
+reported through semantic or execution categories, depending on whether they
+are detected during binding or row evaluation. Future write-specific schema
+violations may add narrower SQLSTATEs only if callers need to distinguish them
+programmatically.

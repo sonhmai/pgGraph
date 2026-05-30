@@ -415,9 +415,10 @@ Implementation checkpoint:
   mapping exists. Bidirectional registered edges bind both physical directions.
 - Unit coverage now drives binder negatives, lowering, execution filtering, and
   explain output. A development-feature pgrx test file covers the live
-  `graph.traverse()` comparison and ACL-denial gate; local execution still needs
-  a working `sfw cargo pgrx test --features "pg17 development" gql` run because
-  the wrapper currently returns only its firewall banner.
+  `graph.traverse()` comparison and ACL-denial gate; local execution passed via
+  direct `cargo pgrx test --features "pg17 development" gql` after the
+  2026-05-31 policy clarification that `sfw` is only for package-changing
+  operations.
 
 ### 1C — Predicates, RETURN shapes, hydration
 - `WHERE` (eq/neq/range/null/membership), inline prop maps, `RETURN`

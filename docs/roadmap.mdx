@@ -7,8 +7,9 @@ not a dated release commitment.
 
 pgGraph's roadmap keeps one boundary fixed: PostgreSQL remains the source of
 truth. New features should make graph-shaped SQL workloads easier to operate
-inside PostgreSQL, without turning pgGraph into a separate graph database or a
-second query language.
+inside PostgreSQL, without turning pgGraph into a separate graph database.
+Future graph-language work should be standards-aligned, optional, and backed by
+the same PostgreSQL-authoritative projection model as the SQL function APIs.
 
 ## Current Baseline
 
@@ -142,7 +143,8 @@ work, but are not current behavior.
 |---|---|---|
 | WAL-driven sync | `graph.sync_mode = 'wal'` is reserved and rejected when selected. | Logical replication based sync for deployments that should avoid trigger-buffer volume. |
 | COPY build scanner | `graph.build_scan_mode = 'copy'` is reserved and rejected when selected. | A server-side COPY scanner once it can preserve the same validation, error, and memory guarantees as the current SPI path. |
-| Online mutable graph segments | Not part of the current query path. | Investigate append or delta structures that reduce rebuild pressure without weakening traversal correctness. |
+| GQL and SQL/PGQ frontends | Not part of the current public API. | Investigate a GQL-compatible query frontend and SQL/PGQ adapter path over a shared graph planner. API reference docs should be added only when SQL functions exist. |
+| Online mutable graph overlays | Not part of the current query path. | Investigate a `mutable_overlay` projection mode built as deltas over the immutable CSR base. Keep `csr_readonly` as the fast read-mostly mode and do not mutate CSR in place. |
 | pgVector embedding cache | Node embeddings are not part of the graph artifact or traversal hot path. | Investigate a sidecar or persisted embedding cache keyed by internal node IDs so semantic-guided search can rank candidates without source-table lookups inside the search loop. |
 | Full A* path search | Not current behavior. Existing shortest paths use bidirectional BFS and weighted paths use Dijkstra. | Consider as a specialized semantic-guided search mode only when the heuristic has an explicit admissibility contract. |
 | Additional graph analytics | Connected components exist today; PageRank, Louvain, betweenness, and similar global algorithms are not built in. | Consider companion analytics paths where they fit PostgreSQL operations and do not slow the hot traversal path. |
@@ -155,7 +157,8 @@ pgGraph is not trying to become:
 | Non-goal | Reason |
 |---|---|
 | A replacement storage engine | PostgreSQL tables, indexes, constraints, ACLs, and RLS remain the system of record. |
-| A Cypher, Gremlin, SPARQL, or GQL implementation | The public interface is SQL functions in the `graph` schema. |
+| A separate graph database hidden inside PostgreSQL | Graph-language support, if added, must compile to PostgreSQL-authoritative graph projections rather than creating a second durable store. |
+| Broad Cypher, Gremlin, or SPARQL compatibility | The standards direction is GQL and SQL/PGQ first. Other graph-language compatibility should be considered only as a later compatibility layer. |
 | A distributed graph database | The current architecture is local to one PostgreSQL database. |
 | A global analytics engine in the OLTP query path | Expensive whole-graph algorithms need different scheduling and resource controls than bounded traversal. |
 

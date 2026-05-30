@@ -1,0 +1,78 @@
+# Phase 4 Design: Advanced GQL Writes And Optional openCypher Compatibility
+
+> Reminder: delete this tracking file before merging `feat/mutable-graph-projections` into `main`.
+
+Phase 4 adds advanced write semantics once Phase 2 has proven PostgreSQL-first
+writes, and adds **optional** openCypher compatibility (Q4) only after the
+GQL/SQL-PGQ direction is stable.
+
+## 0. Entry conditions
+
+- Phase 2: PostgreSQL-first writes, row locking, tx-local overlays, rollback
+  discard, sync replay all proven.
+- Phase 3 advanced reads stable.
+- `graph/src/cypher/` and `sql_facade/cypher.rs` do **not** exist yet — created
+  here, never before (Q4).
+
+## 1. Advanced write grammar (matrix `phase_4` rows)
+
+```ebnf
+write_clause = ... | remove_clause | detach_delete | merge_clause ;
+remove_clause= "REMOVE" , property_ref ;                       (* or label *)
+detach_delete= "DETACH" , "DELETE" , var ;                     (* node var *)
+merge_clause = "MERGE" , node_pat , [ "ON" , "CREATE" , set_clause ]
+                                  , [ "ON" , "MATCH" , set_clause ] ;
+```
+
+Tokens: `Remove`, `Detach`, `Merge`, `On`. Each must map to registered source/
+edge tables; creating arbitrary schema objects from GQL stays out of scope.
+
+## 2. IR + execution
+
+Logical: `RemoveProperty`, `DetachDeleteNode`, `Merge`. Physical reuses
+`SpiUpdateProperty`/`SpiDeleteEdge` plus a new `SpiUpsertNode` for `MERGE`.
+
+- **`REMOVE`** sets the mapped column to `NULL` (typed columns) or drops a jsonb
+  key (Phase-3 jsonb rules); needs the null/missing semantics from Phase 3.
+- **`DETACH DELETE`** requires an explicit **cascade policy**: enumerate incident
+  edges (forward + reverse), tombstone them, then tombstone the node — all
+  PostgreSQL-first via SPI in one statement group, with documented ordering.
+- **`MERGE`** is the one genuinely read-before-write path: lower to
+  `SELECT ... FOR UPDATE` then conditional insert, or `INSERT ... ON CONFLICT`,
+  so two sessions racing the same key serialize correctly. This is precisely why
+  it was deferred past Phase 2's single-statement model.
+
+## 3. Optional openCypher compatibility (slice 4D)
+
+If added:
+
+- **Separate function** `graph.cypher(query, params, hydrate)` +
+  `graph.cypher_explain(...)`; never folded into `graph.gql()`.
+- **Separate compatibility matrix**; explicitly *not* a Neo4j claim.
+- New code only in `graph/src/cypher/` (lexer/parser/ast/semantics/lower) +
+  `sql_facade/cypher.rs`; lowers into the **same logical IR** as GQL.
+- openCypher features that cannot map to the PostgreSQL-authoritative model are
+  rejected during semantic binding with stable diagnostics.
+
+Positioning is compatibility, not the primary standards path; docs keep
+GQL/SQL-PGQ primary.
+
+## 4. PR slices (TDD order)
+
+- **4A — `REMOVE`.** Property/label; null/missing per Phase 3. Tests: typed +
+  jsonb cases, idempotency.
+- **4B — `DETACH DELETE`.** Cascade policy. Tests: incident-edge enumeration,
+  ordering, reverse consistency, partial-failure rollback.
+- **4C — `MERGE`.** Locking. Tests: two-session race on same key, ON CREATE / ON
+  MATCH branches, constraint interaction.
+- **4D — openCypher frontend (optional).** `cypher/` modules + `graph.cypher()`.
+  Tests: parser totality fuzzing, rejection corpus for unmappable features,
+  SQLSTATE stability across both function surfaces, shared-IR equivalence with
+  the GQL form of the same query.
+
+## 5. Risk controls (Risk Register)
+
+- "openCypher implies Neo4j compatibility" → separate honest matrix; never
+  advertise unqualified Cypher support.
+- Advanced writes widen the attack surface → catalog-validated, parameterized
+  SPI, ACL/RLS/tenant-checked, PostgreSQL-first, like Phase 2.

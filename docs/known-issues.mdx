@@ -85,10 +85,9 @@ metadata for high-coverage result conversion.
 These are the highest-priority public follow-ups because they affect operators
 running larger graphs or higher sync volume.
 
-<Callout type="info">
-No currently tracked P0 items remain after persistence status phases and
-interrupt checks were added while preserving synchronous durability.
-</Callout>
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Cluster-wide memory accounting | `pggraph.memory_limit_mb` is enforced **per backend**, not across the instance. Each connection that builds or loads the graph keeps its own per-backend heap copy of the reverse CSR, filter index, edge-type registry, and any mutation overlays (the forward CSR, node base arrays, and resolution index are mmap-shared via the OS page cache). Aggregate Rust heap therefore scales with concurrent backend count, and a high connection count can multiply private RSS well beyond a single backend's limit. The per-backend memory model is documented in `docs/contributor_guide/memory-model.mdx`, but the engine exposes no cluster-wide total or guard. | Add an instance-level memory estimate/visibility surface and document sizing guidance (per-backend heap × expected concurrent graph-using backends). Evaluate whether more derived structures can be mmap-shared instead of rebuilt per backend. |
 
 ## P1: Query Performance Follow-Ups
 
@@ -106,11 +105,9 @@ were completed.
 These items clarify behavior or broaden the API. They are planned, but should
 not block use of the current documented SQL surface.
 
-<Callout type="info">
-No currently tracked P2 rows remain after structured traversal filters gained
-text substring and prefix predicates alongside equality, membership, range, and
-null checks.
-</Callout>
+| Area | Current limitation | Planned direction |
+|---|---|---|
+| Edge-type cardinality limit | Edge type IDs are stored as a `u8` in the CSR, so a single graph supports at most **255 distinct edge types** (index 0 is the untyped slot). Registering the 256th type fails cleanly with `GraphError::EdgeTypeLimit` rather than corrupting data, but the ceiling is not currently called out in user-facing docs and can surprise graphs with many dynamic edge labels. | Document the limit in the build/registration reference, and decide whether to widen the edge type ID width if real workloads need more than 255 edge types. |
 
 ## P3: Internals and Maintainability
 

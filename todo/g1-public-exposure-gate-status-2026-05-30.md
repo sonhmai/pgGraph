@@ -2,9 +2,9 @@
 
 ## Status
 
-Blocked on required Cargo-backed verification. Do not flip `graph.gql()` or
-`graph.gql_explain()` out of `development` until this file is superseded by
-real test and benchmark evidence.
+Closed by benchmark regression. Do not flip `graph.gql()` or
+`graph.gql_explain()` out of `development` until a later run satisfies the
+zero-regression `bfs_bench` gate.
 
 ## Completed Evidence
 
@@ -28,40 +28,51 @@ real test and benchmark evidence.
   - `git diff --check`
 - Standalone non-Cargo SQLSTATE/ACL boundary passed:
   - `DBNAME=pggraph_boundary_g1 graph/tests/heavy/run_sqlstate_acl_boundary.sh`
+- Direct Cargo verification passed after the 2026-05-31 `sfw` policy
+  clarification:
+  - `cargo test --features "pg17 development" query::`
+    - `28 passed; 0 failed; 303 filtered out`
+  - `cargo pgrx test --features "pg17 development" gql`
+    - `18 passed; 0 failed; 421 filtered out`
+  - `cargo fmt --check`
+  - `git diff --check`
+
+## Cargo Verification Policy
+
+The user clarified on 2026-05-31 that `sfw` is only required for package
+installation, fetch, update, and other dependency-changing operations. Direct
+Cargo is allowed for ordinary build, test, format, and benchmark commands.
 
 ## Missing Evidence
 
-The remaining G1 gate in `todo/build-sequence.md` requires:
+The remaining G1 gate in `todo/build-sequence.md` requires a `bfs_bench`
+comparison against `pre_gql_mutable_overlay` with zero regression.
 
-- Cargo tests for the Phase 1 read-only GQL implementation.
-- pgrx tests for the development `graph.gql()` SQL facade.
-- `bfs_bench` comparison against `pre_gql_mutable_overlay` with zero regression.
-
-The required wrapper currently returns only:
-
-```text
-Protected by Socket Firewall
-```
-
-for commands such as:
+The 2026-05-31 direct Cargo comparison was:
 
 ```sh
-sfw cargo test --features "pg17 development" query::
-sfw cargo pgrx test --features "pg17 development" gql
-sfw cargo bench --features pg17 --bench bfs_bench -- --baseline pre_gql_mutable_overlay
+cargo bench --features pg17 --bench bfs_bench -- --baseline pre_gql_mutable_overlay
 ```
 
-That output is not valid test or benchmark evidence. A direct `cargo test`
-bypass was rejected because the repository instructions require `sfw` unless the
-user explicitly approves bypassing it.
+Result: exit code `0`, but Criterion reported multiple statistically
+significant regressions. Representative rows:
+
+| Benchmark | Median/estimate | Change vs `pre_gql_mutable_overlay` | Criterion result |
+|---|---:|---:|---|
+| `bfs_traverse/d1_supernode/10k` | `2.0747 us` | `+7.1094%` | Performance has regressed |
+| `bfs_traverse/d3_supernode/10k` | `62.257 us` | `+5.7855%` | Performance has regressed |
+| `bfs_traverse/d3_leaf/10k` | `6.6976 us` | `+4.0042%` | Performance has regressed |
+| `bfs_traverse/d1_supernode/100k` | `8.6323 us` | `+2.4086%` | Performance has regressed |
+| `bfs_traverse/d5_supernode/100k` | `1.6795 ms` | `+2.0782%` | Performance has regressed |
+| `bfs_traverse/d3_supernode/500k` | `125.28 us` | `+3.8378%` | Performance has regressed |
+| `graph_construction/build/100k` | `21.465 ms` | `+3.5110%` | Performance has regressed |
+| `bfs_overlay_paths/sparse_overlay_d3` | `90.304 us` | `+3.0220%` | Performance has regressed |
 
 ## Next Action
 
-Get one of these before proceeding past G1:
-
-1. an environment where `sfw cargo ...` runs Cargo and produces real output; or
-2. explicit user approval to bypass `sfw` for the required Cargo verification
-   commands.
+Investigate or re-baseline the engine-level benchmark regression before
+proceeding past G1. Phase 2 must not begin while this zero-regression gate is
+red.
 
 After valid verification exists, record the results in
 `todo/regression-baseline-2026-05-29.md` or a replacement baseline note, then
