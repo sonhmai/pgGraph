@@ -23,6 +23,9 @@
   <a href="https://www.postgresql.org/">
     <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
   </a>
+  <a href="https://ghcr.io/evokoa/pggraph">
+    <img src="https://img.shields.io/badge/Docker-ghcr.io%2Fevokoa%2Fpggraph-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker image">
+  </a>
 </p>
 
 <p align="center">
@@ -90,11 +93,42 @@ query language.
 
 ## Quickstart
 
-The fastest way to try pgGraph is the included quickstart script.
+The fastest way to try pgGraph is to pull the pre-built Docker image — no
+build step needed.
 
-It starts a disposable Docker-backed PostgreSQL database, installs pgGraph,
-creates two normal PostgreSQL tables, discovers the foreign key relationship,
-builds the graph, and runs example queries.
+The image is multi-arch (`linux/amd64` and `linux/arm64`) and works on macOS,
+Linux, and Windows via Docker Desktop.
+
+```bash
+docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker run -d --rm \
+  --name pggraph \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  ghcr.io/evokoa/pggraph:0.1.4
+```
+
+The default database is `graph` with `pg_cron` and a maintenance job
+pre-configured.
+
+Verify the extensions are loaded (uses `psql` inside the container, so you
+don't need a local PostgreSQL client):
+
+```bash
+docker exec pggraph psql -U postgres -d graph \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('graph', 'pg_cron');"
+```
+
+If you have `psql` installed locally you can also connect directly:
+
+```bash
+psql -h localhost -U postgres -d graph
+```
+
+To build from source or run the full interactive demo instead, use the included
+quickstart script. It starts a disposable Docker-backed PostgreSQL database,
+installs pgGraph, creates two normal PostgreSQL tables, discovers the foreign
+key relationship, builds the graph, and runs example queries.
 
 You need Docker or Docker Desktop installed and running:
 

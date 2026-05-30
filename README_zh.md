@@ -23,6 +23,9 @@
   <a href="https://www.postgresql.org/">
     <img src="https://img.shields.io/badge/PostgreSQL-14--18-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
   </a>
+  <a href="https://ghcr.io/evokoa/pggraph">
+    <img src="https://img.shields.io/badge/Docker-ghcr.io%2Fevokoa%2Fpggraph-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker image">
+  </a>
 </p>
 
 <p align="center">
@@ -82,8 +85,36 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 
 ## 快速开始
 
-想要快速体验 pgGraph，最简单的方法是运行提供的快速启动脚本。
+想要快速体验 pgGraph，最简单的方法是拉取预构建的 Docker 镜像——无需编译。
 
+该镜像为多架构镜像（`linux/amd64` 和 `linux/arm64`），可在 macOS、Linux 和
+Windows（通过 Docker Desktop）上运行。
+
+```bash
+docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker run -d --rm \
+  --name pggraph \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  ghcr.io/evokoa/pggraph:0.1.4
+```
+
+默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
+
+验证扩展是否已加载（使用容器内的 `psql`，无需本地安装 PostgreSQL 客户端）：
+
+```bash
+docker exec pggraph psql -U postgres -d graph \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('graph', 'pg_cron');"
+```
+
+如果你已在本地安装了 `psql`，也可以直接连接：
+
+```bash
+psql -h localhost -U postgres -d graph
+```
+
+如果你想从源码构建或运行完整的交互式演示，可以使用提供的快速启动脚本。
 它会启动一个一次性的、基于 Docker 的 PostgreSQL 数据库，安装 pgGraph，创建两个普通 PostgreSQL 表，发现外键关系，构建图，并运行示例查询。
 
 你需要安装并运行 Docker 或 Docker Desktop：
