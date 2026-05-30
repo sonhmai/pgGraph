@@ -2,17 +2,20 @@
 
 use crate::gql::ast::{
     CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern, RelPat,
-    ReturnExpr, ReturnItem,
+    ReturnExpr, ReturnItem, SortItem, SortKey,
 };
 use crate::gql::errors::{GqlError, Span};
 
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
-    BindingSide, BoundCmpOp, BoundNode, BoundRel, LogicalPlan, Predicate, ReturnBinding, ValueExpr,
+    BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, HopBounds, LogicalPlan,
+    Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
+use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
 const MAX_BOUND_PREDICATE_DEPTH: usize = 512;
 const MAX_BOUND_PREDICATE_COUNT: usize = 512;
+const MAX_BOUND_HOPS: u32 = 64;
 
 /// Bind parsed GQL into a logical plan.
 ///
@@ -25,6 +28,7 @@ pub(crate) fn bind(
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalPlan, GqlError> {
     reject_later_clauses(query)?;
+    validate_row_window(query)?;
     let (source_pat, rel_pat, target_pat) = single_outbound_hop(&query.match_)?;
     let source = bind_node(source_pat, catalog)?;
     let target = bind_node(target_pat, catalog)?;
@@ -34,12 +38,7 @@ pub(crate) fn bind(
             "anonymous relationship types require a later phase",
         )
     })?;
-    let rel = catalog.resolve_rel_type(
-        &rel_type.text,
-        source.table_oid,
-        target.table_oid,
-        rel_type.span,
-    )?;
+    let rel_info = resolve_relationship(catalog, rel_pat, rel_type, &source, &target)?;
     let predicate = bind_predicates(
         query.where_.as_ref(),
         source_pat,
@@ -49,15 +48,73 @@ pub(crate) fn bind(
         &target,
     )?;
     let returns = bind_returns(&query.return_.items, &source, &target)?;
+    let order_by = bind_sort_items(&query.order_by, &returns, &source, &target)?;
     Ok(LogicalPlan {
         source,
         relationship: BoundRel {
-            rel_type: rel.rel_type,
+            rel_type: rel_info.rel_type,
+            direction: bind_direction(rel_pat.direction),
+            hops: bind_hops(rel_pat)?,
         },
         target,
         returns,
         predicate,
+        order_by,
+        skip: query.skip,
+        limit: query.limit,
     })
+}
+
+fn validate_row_window(query: &crate::gql::ast::Query) -> Result<(), GqlError> {
+    let Some(limit) = query.limit else {
+        return Ok(());
+    };
+    let window = query.skip.unwrap_or(0).saturating_add(limit);
+    if window > MAX_GQL_RESULT_ROWS as u64 {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            format!("GQL row window cannot exceed {MAX_GQL_RESULT_ROWS}"),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_relationship(
+    catalog: &impl CatalogSnapshot,
+    rel_pat: &RelPat,
+    rel_type: &crate::gql::ast::Ident,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<super::catalog_snapshot::RelTypeInfo, GqlError> {
+    match rel_pat.direction {
+        Direction::Out => catalog.resolve_rel_type(
+            &rel_type.text,
+            source.table_oid,
+            target.table_oid,
+            rel_type.span,
+        ),
+        Direction::In => catalog.resolve_rel_type(
+            &rel_type.text,
+            target.table_oid,
+            source.table_oid,
+            rel_type.span,
+        ),
+        Direction::Undirected => catalog
+            .resolve_rel_type(
+                &rel_type.text,
+                source.table_oid,
+                target.table_oid,
+                rel_type.span,
+            )
+            .or_else(|_| {
+                catalog.resolve_rel_type(
+                    &rel_type.text,
+                    target.table_oid,
+                    source.table_oid,
+                    rel_type.span,
+                )
+            }),
+    }
 }
 
 fn reject_later_clauses(query: &crate::gql::ast::Query) -> Result<(), GqlError> {
@@ -65,24 +122,6 @@ fn reject_later_clauses(query: &crate::gql::ast::Query) -> Result<(), GqlError> 
         return Err(GqlError::unsupported(
             query.return_.span,
             "RETURN DISTINCT is implemented in a later phase",
-        ));
-    }
-    if !query.order_by.is_empty() {
-        return Err(GqlError::unsupported(
-            query.order_by[0].span,
-            "ORDER BY is implemented in a later read phase",
-        ));
-    }
-    if query.skip.is_some() {
-        return Err(GqlError::unsupported(
-            query.return_.span,
-            "SKIP is implemented in a later read phase",
-        ));
-    }
-    if query.limit.is_some() {
-        return Err(GqlError::unsupported(
-            query.return_.span,
-            "LIMIT is implemented in a later read phase",
         ));
     }
     Ok(())
@@ -96,18 +135,6 @@ fn single_outbound_hop(match_: &MatchClause) -> Result<(&NodePat, &RelPat, &Node
             "Phase 1B supports exactly one relationship in MATCH",
         ));
     };
-    if rel.direction != Direction::Out {
-        return Err(GqlError::unsupported(
-            rel.span,
-            "Phase 1B supports only outbound directed relationships",
-        ));
-    }
-    if rel.var_len.is_some() {
-        return Err(GqlError::unsupported(
-            rel.var_len.map_or(rel.span, |var_len| var_len.span),
-            "variable-length relationships are implemented in a later read phase",
-        ));
-    }
     if !rel.props.is_empty() {
         return Err(GqlError::unsupported(
             rel.span,
@@ -115,6 +142,36 @@ fn single_outbound_hop(match_: &MatchClause) -> Result<(&NodePat, &RelPat, &Node
         ));
     }
     Ok((start, rel, target))
+}
+
+fn bind_direction(direction: Direction) -> BoundDirection {
+    match direction {
+        Direction::Out => BoundDirection::Out,
+        Direction::In => BoundDirection::In,
+        Direction::Undirected => BoundDirection::Undirected,
+    }
+}
+
+fn bind_hops(rel: &RelPat) -> Result<HopBounds, GqlError> {
+    let hops = rel
+        .var_len
+        .map_or(HopBounds { min: 1, max: 1 }, |var_len| HopBounds {
+            min: var_len.min,
+            max: var_len.max,
+        });
+    if hops.min == 0 {
+        return Err(GqlError::unsupported(
+            rel.var_len.map_or(rel.span, |var_len| var_len.span),
+            "zero-hop variable-length relationships are not implemented yet",
+        ));
+    }
+    if hops.max > MAX_BOUND_HOPS {
+        return Err(GqlError::unsupported(
+            rel.var_len.map_or(rel.span, |var_len| var_len.span),
+            format!("variable-length upper bound cannot exceed {MAX_BOUND_HOPS}"),
+        ));
+    }
+    Ok(hops)
 }
 
 fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode, GqlError> {
@@ -201,6 +258,55 @@ fn bind_returns(
         bindings.push(binding);
     }
     Ok(bindings)
+}
+
+fn bind_sort_items(
+    items: &[SortItem],
+    returns: &[ReturnBinding],
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<Vec<SortBinding>, GqlError> {
+    items
+        .iter()
+        .map(|item| {
+            let key = match &item.key {
+                SortKey::Alias { alias, .. } => {
+                    if returns
+                        .iter()
+                        .any(|binding| binding.name() == alias.text && binding.is_property())
+                    {
+                        SortBindingKey::ReturnName(alias.text.clone())
+                    } else if returns.iter().any(|binding| binding.name() == alias.text) {
+                        return Err(GqlError::unsupported(
+                            alias.span,
+                            "ORDER BY aliases must refer to scalar property returns",
+                        ));
+                    } else {
+                        return Err(GqlError::bind(
+                            alias.span,
+                            format!("unknown ORDER BY alias `{}`", alias.text),
+                        ));
+                    }
+                }
+                SortKey::Property {
+                    var,
+                    property,
+                    span: _,
+                } => {
+                    let side = binding_side(&var.text, source, target, var.span)?;
+                    validate_property(side, &property.text, source, target, property.span)?;
+                    SortBindingKey::Property {
+                        side,
+                        property: property.text.clone(),
+                    }
+                }
+            };
+            Ok(SortBinding {
+                key,
+                desc: item.desc,
+            })
+        })
+        .collect()
 }
 
 fn bind_predicates(

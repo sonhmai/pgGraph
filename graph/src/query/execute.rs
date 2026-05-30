@@ -3,6 +3,7 @@
 use crate::engine::Engine;
 use crate::safety::{GraphError, GraphResult};
 
+use super::logical_plan::BoundDirection;
 use super::physical_plan::PhysicalPlan;
 
 /// Coordinate-only node value returned by Phase 1B.
@@ -35,15 +36,21 @@ pub(crate) fn execute(engine: &Engine, plan: &PhysicalPlan) -> GraphResult<Vec<G
     }
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
     let mut rows = Vec::new();
+    let row_cap = plan.execution_row_cap();
     for source_idx in source_nodes(engine, plan.source_table_oid) {
         if !engine.node_store.is_active(source_idx) {
             continue;
         }
-        let (targets, type_ids) = engine.edge_store.neighbors(source_idx);
-        for (&target_idx, &type_id) in targets.iter().zip(type_ids.iter()) {
-            if type_id == rel_type_id && target_matches(engine, target_idx, plan.target_table_oid) {
-                rows.push(project_row(engine, source_idx, target_idx));
+        for target_idx in expand_targets(engine, plan, source_idx, rel_type_id) {
+            if rows.len() >= row_cap {
+                if plan.cap_exhaustion_is_error() {
+                    return Err(GraphError::InvalidFilter {
+                        reason: format!("GQL result row cap exceeded ({row_cap})"),
+                    });
+                }
+                return Ok(rows);
             }
+            rows.push(project_row(engine, source_idx, target_idx));
         }
     }
     Ok(rows)
@@ -67,6 +74,84 @@ fn source_nodes(engine: &Engine, table_oid: u32) -> Vec<u32> {
     (0..engine.node_store.node_count())
         .filter(|&idx| engine.node_store.table_oid(idx) == table_oid)
         .collect()
+}
+
+fn expand_targets(
+    engine: &Engine,
+    plan: &PhysicalPlan,
+    source_idx: u32,
+    rel_type_id: u8,
+) -> Vec<u32> {
+    let mut current = vec![source_idx];
+    let mut results = Vec::new();
+    let mut seen_results = std::collections::HashSet::new();
+    let mut seen_frontier = std::collections::HashSet::from([source_idx]);
+    for depth in 1..=plan.hops.max {
+        let mut next = Vec::new();
+        let mut seen_next = std::collections::HashSet::new();
+        for node_idx in current {
+            for neighbor in neighbors_for_direction(engine, plan.direction, node_idx, rel_type_id) {
+                if !engine.node_store.is_active(neighbor) {
+                    continue;
+                }
+                if depth >= plan.hops.min
+                    && target_matches(engine, neighbor, plan.target_table_oid)
+                    && seen_results.insert(neighbor)
+                {
+                    results.push(neighbor);
+                }
+                if depth < plan.hops.max
+                    && seen_frontier.insert(neighbor)
+                    && seen_next.insert(neighbor)
+                {
+                    next.push(neighbor);
+                }
+            }
+        }
+        current = next;
+        if current.is_empty() {
+            break;
+        }
+    }
+    results
+}
+
+fn neighbors_for_direction(
+    engine: &Engine,
+    direction: BoundDirection,
+    node_idx: u32,
+    rel_type_id: u8,
+) -> Vec<u32> {
+    let mut neighbors = Vec::new();
+    if matches!(direction, BoundDirection::Out | BoundDirection::Undirected) {
+        append_matching_neighbors(&engine.edge_store, node_idx, rel_type_id, &mut neighbors);
+    }
+    if matches!(direction, BoundDirection::In | BoundDirection::Undirected) {
+        append_matching_neighbors(
+            &engine.reverse_edge_store,
+            node_idx,
+            rel_type_id,
+            &mut neighbors,
+        );
+    }
+    neighbors.sort_unstable();
+    neighbors.dedup();
+    neighbors
+}
+
+fn append_matching_neighbors(
+    store: &crate::edge_store::EdgeStore,
+    node_idx: u32,
+    rel_type_id: u8,
+    out: &mut Vec<u32>,
+) {
+    let (targets, type_ids) = store.neighbors(node_idx);
+    out.extend(
+        targets
+            .iter()
+            .zip(type_ids.iter())
+            .filter_map(|(&target, &type_id)| (type_id == rel_type_id).then_some(target)),
+    );
 }
 
 fn target_matches(engine: &Engine, target_idx: u32, table_oid: u32) -> bool {

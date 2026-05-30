@@ -442,6 +442,18 @@ Implementation checkpoint:
   1A–1D + DR-5 SQLSTATE + docs positioning + compatibility-matrix rows are all
   green.
 
+Implementation checkpoint:
+- Bound and lowered `ORDER BY`, `SKIP`, `LIMIT`, inbound relationships,
+  undirected relationships, and bounded variable-length relationships.
+- Execution now expands over forward/reverse CSR as requested, deduplicates
+  undirected neighbor candidates, tracks a cycle-safe frontier, and rejects
+  zero-hop bounds until identity-row semantics are implemented.
+- The executor enforces `MAX_GQL_RESULT_ROWS` before hydration/projection.
+  Oversized `LIMIT` or `SKIP + LIMIT` windows are rejected during binding, while
+  in-cap un-ordered limits can stop collection early.
+- `ORDER BY` aliases are limited to scalar property returns; property sort keys
+  remain supported directly.
+
 ## 11. Benchmark gate
 
 Re-run `bfs_bench` against the `pre_gql_mutable_overlay` baseline after 1B and

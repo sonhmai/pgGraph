@@ -13,6 +13,12 @@ pub(crate) struct LogicalPlan {
     pub(crate) returns: Vec<ReturnBinding>,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
+    /// Sort keys in requested order.
+    pub(crate) order_by: Vec<SortBinding>,
+    /// Number of rows to skip after ordering.
+    pub(crate) skip: Option<u64>,
+    /// Maximum rows to return.
+    pub(crate) limit: Option<u64>,
 }
 
 /// Bound node variable and table.
@@ -33,6 +39,30 @@ pub(crate) struct BoundNode {
 pub(crate) struct BoundRel {
     /// GQL relationship type text.
     pub(crate) rel_type: String,
+    /// Traversal direction.
+    pub(crate) direction: BoundDirection,
+    /// Hop bounds.
+    pub(crate) hops: HopBounds,
+}
+
+/// Bound relationship direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundDirection {
+    /// Source to target.
+    Out,
+    /// Target to source.
+    In,
+    /// Either direction.
+    Undirected,
+}
+
+/// Bound hop count range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HopBounds {
+    /// Minimum hop count.
+    pub(crate) min: u32,
+    /// Maximum hop count.
+    pub(crate) max: u32,
 }
 
 /// Bound `RETURN` variable.
@@ -58,6 +88,34 @@ impl ReturnBinding {
             Self::Node { name, .. } | Self::Property { name, .. } => name,
         }
     }
+
+    /// Return whether this binding projects a scalar property value.
+    pub(crate) fn is_property(&self) -> bool {
+        matches!(self, Self::Property { .. })
+    }
+}
+
+/// Bound sort key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SortBinding {
+    /// Value to sort by.
+    pub(crate) key: SortBindingKey,
+    /// Sort descending when true.
+    pub(crate) desc: bool,
+}
+
+/// Bound sort value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SortBindingKey {
+    /// Sort by a return column name.
+    ReturnName(String),
+    /// Sort by a node property.
+    Property {
+        /// Source or target binding.
+        side: BindingSide,
+        /// Source property name.
+        property: String,
+    },
 }
 
 /// Which side of the one-hop match a value references.

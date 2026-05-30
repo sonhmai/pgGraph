@@ -13,10 +13,12 @@ pub(crate) fn explain(plan: &PhysicalPlan) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "OneHopExpand(source={}:{}, rel={}, target={}:{}, return=[{}])",
+        "Expand(source={}:{}, rel={}, hops={}..{}, target={}:{}, return=[{}])",
         plan.source_var,
         plan.source_table_oid,
         plan.rel_type,
+        plan.hops.min,
+        plan.hops.max,
         plan.target_var,
         plan.target_table_oid,
         returns

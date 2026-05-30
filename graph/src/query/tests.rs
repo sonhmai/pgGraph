@@ -49,10 +49,13 @@ fn binder_rejects_unknown_label_and_relationship_type() {
 #[test]
 fn binder_rejects_out_of_slice_1b_shapes() {
     for query in [
-        "MATCH (u:users)<-[:works_at]-(c:companies) RETURN u",
-        "MATCH (u:users)-[:works_at*1..2]->(c:companies) RETURN u",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN count(u)",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN DISTINCT u",
+        "MATCH (u:users)-[:works_at*0..1]->(c:companies) RETURN u",
+        "MATCH (u:users)-[:works_at*1..65]->(c:companies) RETURN u",
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u ORDER BY u",
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u LIMIT 10001",
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u SKIP 9999 LIMIT 10",
     ] {
         let ast = parse(query).unwrap();
         let err = bind(&ast, &fake_catalog()).unwrap_err();
@@ -61,6 +64,43 @@ fn binder_rejects_out_of_slice_1b_shapes() {
             "{query}"
         );
     }
+}
+
+#[test]
+fn executor_enforces_hard_row_cap_before_projection() {
+    let physical = lower(bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) RETURN u ORDER BY u.name",
+    ));
+    let mut engine = Engine::new();
+    for idx in 0..10_002 {
+        let user_pk = format!("u{idx}");
+        let company_pk = format!("c{idx}");
+        let user = engine.node_store.add_node(10, user_pk.clone());
+        let company = engine.node_store.add_node(20, company_pk.clone());
+        engine.resolution_insert(10, &user_pk, user);
+        engine.resolution_insert(20, &company_pk, company);
+        engine.insert_table_membership(10, user);
+        engine.insert_table_membership(20, company);
+    }
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        (0..10_002)
+            .map(|idx| RawEdge {
+                source: idx * 2,
+                target: idx * 2 + 1,
+                type_id: works_at,
+                weight: None,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+
+    let err = execute(&engine, &physical).unwrap_err();
+
+    assert!(err.to_string().contains("row cap"));
 }
 
 #[test]
@@ -260,8 +300,43 @@ fn explain_contains_stable_1b_plan_shape() {
 
     assert_eq!(
         explain(&physical),
-        "OneHopExpand(source=u:10, rel=works_at, target=c:20, return=[u, c])"
+        "Expand(source=u:10, rel=works_at, hops=1..1, target=c:20, return=[u, c])"
     );
+}
+
+#[test]
+fn executor_supports_inbound_undirected_and_bounded_var_length() {
+    let inbound = lower(bind_query(
+        "MATCH (c:companies)<-[:works_at]-(u:users) RETURN c, u",
+    ));
+    let undirected = lower(bind_query(
+        "MATCH (u:users)-[:works_at]-(c:companies) RETURN u, c",
+    ));
+    let var_len = lower(bind_query(
+        "MATCH (u:users)-[:works_at*1..2]->(c:companies) RETURN u, c",
+    ));
+    let engine = engine_fixture();
+
+    assert_eq!(execute(&engine, &inbound).unwrap().len(), 2);
+    assert_eq!(execute(&engine, &undirected).unwrap().len(), 2);
+    assert_eq!(execute(&engine, &var_len).unwrap().len(), 2);
+}
+
+#[test]
+fn projection_orders_skips_and_limits_rows() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN u.name AS employee ORDER BY employee DESC SKIP 1 LIMIT 1",
+    );
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical).unwrap();
+    let hydrated = hydrated_fixture();
+
+    let projected = project_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["employee"], "Ada");
 }
 
 fn hydrated_fixture() -> HydratedRows {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::safety::{GraphError, GraphResult};
 
 use super::execute::{GqlNodeCoordinate, GqlRow};
-use super::logical_plan::{BindingSide, BoundCmpOp, Predicate, ValueExpr};
+use super::logical_plan::{BindingSide, BoundCmpOp, Predicate, SortBindingKey, ValueExpr};
 use super::physical_plan::{PhysicalPlan, ReturnSlot};
 
 /// Hydrated source rows keyed by graph coordinate.
@@ -30,20 +30,95 @@ pub(crate) fn project_rows(
     let mut projected = Vec::new();
     for row in rows {
         if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
-            projected.push(project_row(&row, plan, hydrated, hydrate_nodes));
+            projected.push(ProjectedRow {
+                row: project_row(&row, plan, hydrated, hydrate_nodes),
+                sort_values: sort_values(&row, plan, hydrated, params)?,
+            });
         }
     }
-    Ok(projected)
+    if !plan.order_by.is_empty() {
+        projected.sort_by(compare_projected_rows);
+    }
+    let skip = usize::try_from(plan.skip.unwrap_or(0)).unwrap_or(usize::MAX);
+    let limit = plan
+        .limit
+        .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+        .unwrap_or(usize::MAX);
+    Ok(projected
+        .into_iter()
+        .skip(skip)
+        .take(limit)
+        .map(|row| row.row)
+        .collect())
 }
 
 /// Return whether this plan requires SQL row hydration.
 pub(crate) fn requires_hydration(plan: &PhysicalPlan, hydrate_nodes: bool) -> bool {
     hydrate_nodes
         || plan.predicate.is_some()
+        || !plan.order_by.is_empty()
         || plan
             .returns
             .iter()
             .any(|slot| matches!(slot, ReturnSlot::Property { .. }))
+}
+
+#[derive(Debug)]
+struct ProjectedRow {
+    row: serde_json::Value,
+    sort_values: Vec<SortValue>,
+}
+
+#[derive(Debug)]
+struct SortValue {
+    value: serde_json::Value,
+    desc: bool,
+}
+
+fn compare_projected_rows(left: &ProjectedRow, right: &ProjectedRow) -> std::cmp::Ordering {
+    for (left, right) in left.sort_values.iter().zip(right.sort_values.iter()) {
+        let ordering = total_json_order(&left.value, &right.value);
+        if !ordering.is_eq() {
+            return if left.desc {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn sort_values(
+    row: &GqlRow,
+    plan: &PhysicalPlan,
+    hydrated: &HydratedRows,
+    params: &QueryParams,
+) -> GraphResult<Vec<SortValue>> {
+    plan.order_by
+        .iter()
+        .map(|sort| {
+            let value = match &sort.key {
+                SortBindingKey::ReturnName(name) => project_row(row, plan, hydrated, true)
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                SortBindingKey::Property { side, property } => eval_value(
+                    &ValueExpr::Property {
+                        side: *side,
+                        property: property.clone(),
+                    },
+                    row,
+                    hydrated,
+                    params,
+                )?,
+            };
+            Ok(SortValue {
+                value,
+                desc: sort.desc,
+            })
+        })
+        .collect()
 }
 
 fn predicate_matches(
@@ -141,6 +216,26 @@ fn ordered(lhs: &serde_json::Value, rhs: &serde_json::Value) -> GraphResult<std:
         (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) => order_numbers(lhs, rhs),
         (serde_json::Value::String(lhs), serde_json::Value::String(rhs)) => Ok(lhs.cmp(rhs)),
         _ => Err(non_orderable()),
+    }
+}
+
+fn total_json_order(lhs: &serde_json::Value, rhs: &serde_json::Value) -> std::cmp::Ordering {
+    match ordered(lhs, rhs) {
+        Ok(ordering) => ordering,
+        Err(_) => json_rank(lhs)
+            .cmp(&json_rank(rhs))
+            .then_with(|| lhs.to_string().cmp(&rhs.to_string())),
+    }
+}
+
+fn json_rank(value: &serde_json::Value) -> u8 {
+    match value {
+        serde_json::Value::Null => 0,
+        serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(_) => 2,
+        serde_json::Value::String(_) => 3,
+        serde_json::Value::Array(_) => 4,
+        serde_json::Value::Object(_) => 5,
     }
 }
 

@@ -10,10 +10,15 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         source_table_oid: plan.source.table_oid,
         source_label: plan.source.label,
         rel_type: plan.relationship.rel_type,
+        direction: plan.relationship.direction,
+        hops: plan.relationship.hops,
         target_var: plan.target.var,
         target_table_oid: plan.target.table_oid,
         target_label: plan.target.label,
         predicate: plan.predicate,
+        order_by: plan.order_by,
+        skip: plan.skip,
+        limit: plan.limit,
         returns: plan
             .returns
             .into_iter()
