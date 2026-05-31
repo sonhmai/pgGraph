@@ -68,13 +68,13 @@ openCypher compatibility.
 - The first public graph-language milestone should be read-only GQL, not
   openCypher. It should prioritize graph pattern matching semantics that align
   with SQL/PGQ.
-- The first write-capable GQL milestone is intentionally narrow:
-  - reads: a single bounded graph pattern with `WHERE` and `RETURN`;
-  - writes: insert a node mapped to a registered source table, update a mapped
-    property, and delete a mapped edge row.
-- Defer `MERGE`, cascading deletes, complex path-pattern mutations, broad
-  function coverage, and full variable-length write semantics until the
-  transaction and projection architecture is proven.
+- The write-capable GQL surface remains intentionally narrow: single-node
+  mapped `CREATE`, single-node mapped property `SET`/`REMOVE`, single-edge
+  mapped `DELETE`, single-node `DETACH DELETE` over registered edge-row
+  relationships, and single-node mapped `MERGE`.
+- Defer broader cascading policies, complex path-pattern mutations, broad
+  function coverage, relationship creation, and full variable-length write
+  semantics until they have their own PostgreSQL-first safety design.
 - Projection freshness should keep the existing sync-log freshness model and may
   augment it with PostgreSQL-native positions such as `source_lsn`,
   `projection_lsn`, and transaction identifiers. The current model tracks
@@ -514,11 +514,11 @@ Phase gates:
 - Phase 1: read-only GQL parses, binds, plans, executes, explains, and rejects
   writes without requiring mutable overlay support.
 - Phase 2: GQL writes update PostgreSQL first, then transaction-local overlay
-  state. Public mapped `CREATE`, `SET`, `DELETE`, `REMOVE`, `DETACH DELETE`,
-  and `MERGE` coverage plus heavy transaction lifecycle tests prove rollback
-  discard, commit cleanup, concurrent backend isolation, query-time sync
-  catch-up for source-table writes, memory-limit aborts, and crash/reload
-  behavior for uncommitted transaction overlays.
+  state. Public mapped write coverage plus transaction-delta heavy tests cover
+  the shared lifecycle guarantees: rollback discard, commit cleanup, concurrent
+  backend isolation, query-time sync catch-up for source-table writes,
+  memory-limit aborts, and crash/reload behavior for uncommitted transaction
+  overlays.
 
 ## GQL Compatibility Matrix
 
