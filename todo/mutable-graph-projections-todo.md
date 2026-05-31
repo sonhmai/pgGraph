@@ -559,8 +559,9 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 
 ## Pre-Code Baselines
 
-Baseline results are tracked in `todo/regression-baseline-2026-05-29.md`.
-Before coding starts, compare against:
+Historical pre-implementation baseline results are tracked in
+`todo/regression-baseline-2026-05-29.md`. They are preserved for regression
+comparison against the branch starting point:
 
 - `cargo test --features pg17`
 - `cargo pgrx test pg17`
@@ -570,19 +571,20 @@ Before coding starts, compare against:
 - `graph/tests/heavy/measure_build_rss.sh`
 - `graph/tests/heavy/measure_mmap_pss.sh` on Linux only
 
-Do not begin graph-language or mutable-overlay implementation without either
-refreshing these baselines or explicitly recording why a baseline could not be
-captured on the current host.
+The implementation phases are now complete for the current pgGraph scope, so
+new changes should use focused tests plus the broader release or benchmark gate
+that matches the changed surface.
 
 Policy note: `sfw` is only required for dependency-changing package-manager
 operations such as install, fetch, add, and update. Direct `cargo` is allowed for
 build, test, format, and benchmark commands.
 
-**Freshness (2026-05-30):** the baselines were captured 2026-05-29 at commit
-`0574e6b`, which is still `HEAD`, so they are current for Phase 1A start. The
-mmap PSS script is the only outstanding baseline (Linux-only; this is a macOS
-host) and must be captured on Linux before any claim about shared
-page-cache cost — it does not gate Phase 1.
+**Freshness:** the baselines were captured 2026-05-29 at commit `0574e6b`
+before the GQL, SQL/PGQ adapter, openCypher compatibility, and mutable-overlay
+implementation commits. The G1 benchmark gate was rerun on this host with no
+Criterion regression rows; see `g1-public-exposure-gate-status-2026-05-30.md`.
+The mmap PSS script remains Linux-only and should be run on Linux before making
+cross-backend shared page-cache cost claims.
 
 ## Resolved Decisions (formerly Open Questions)
 

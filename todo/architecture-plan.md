@@ -880,9 +880,9 @@ Status as of 2026-06-01. Per-phase detail lives in the phase design docs
 - [x] GUC additions accepted (list) — see Configuration; defaults preserve
       current read-only behavior.
 - [x] Test ladder accepted — see Test Architecture + per-phase docs.
-- [x] Benchmark gates accepted — baselines current as of 2026-05-29 at HEAD
-      `0574e6b`; G1 was rechecked under `caffeinate` with no Criterion
-      regression rows.
+- [x] Benchmark gates accepted — the historical pre-implementation baselines
+      were captured 2026-05-29 at `0574e6b`; G1 was rechecked under
+      `caffeinate` with no Criterion regression rows.
 
 The ordered phase implementation is closed for the current pgGraph scope. Future
 work such as public SQL/PGQ exposure remains gated on PostgreSQL graph-pattern
