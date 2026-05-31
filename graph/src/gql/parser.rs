@@ -12,13 +12,20 @@ use super::lexer::{tokenize, TokKind, Token};
 
 const MAX_PREFIX_NOT: usize = 512;
 
+type RelDetail = (
+    Option<Ident>,
+    Option<Ident>,
+    Option<VarLen>,
+    Vec<(Ident, Operand)>,
+);
+
 /// Parse a GQL read query into an AST.
 ///
 /// # Errors
 ///
 /// Returns [`GqlError`] when the input is not valid syntax for the supported
 /// subset or uses a clause reserved for a later compatibility phase.
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn parse(input: &str) -> Result<Query, GqlError> {
     Parser::new(input)?.parse_query()
 }
@@ -506,17 +513,7 @@ impl Parser {
         })
     }
 
-    fn parse_optional_rel_detail(
-        &mut self,
-    ) -> Result<
-        (
-            Option<Ident>,
-            Option<Ident>,
-            Option<VarLen>,
-            Vec<(Ident, Operand)>,
-        ),
-        GqlError,
-    > {
+    fn parse_optional_rel_detail(&mut self) -> Result<RelDetail, GqlError> {
         if self.consume(TokKind::LBracket).is_none() {
             return Ok((None, None, None, Vec::new()));
         }

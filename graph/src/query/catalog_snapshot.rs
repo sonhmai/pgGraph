@@ -311,6 +311,25 @@ pub(crate) struct FakeCatalog {
     rels: Vec<RelTypeInfo>,
 }
 
+/// Test-only relationship mapping specification.
+#[cfg(test)]
+pub(crate) struct MappedEdgeSpec<'a> {
+    /// Relationship type name.
+    pub(crate) rel_type: &'a str,
+    /// Source node table OID.
+    pub(crate) from_table_oid: u32,
+    /// Target node table OID.
+    pub(crate) to_table_oid: u32,
+    /// Edge row table OID.
+    pub(crate) edge_table_oid: u32,
+    /// Source-key column in the edge row table.
+    pub(crate) source_column: &'a str,
+    /// Target-key column in the edge row table.
+    pub(crate) target_column: &'a str,
+    /// Whether the registration is bidirectional.
+    pub(crate) bidirectional: bool,
+}
+
 #[cfg(test)]
 impl FakeCatalog {
     /// Create an empty fake catalog.
@@ -383,27 +402,18 @@ impl FakeCatalog {
     }
 
     /// Add a directed relationship type backed by a mapped edge row table.
-    pub(crate) fn with_mapped_edge(
-        mut self,
-        rel_type: &str,
-        from_table_oid: u32,
-        to_table_oid: u32,
-        edge_table_oid: u32,
-        source_column: &str,
-        target_column: &str,
-        bidirectional: bool,
-    ) -> Self {
+    pub(crate) fn with_mapped_edge(mut self, spec: MappedEdgeSpec<'_>) -> Self {
         self.rels.push(RelTypeInfo {
-            rel_type: rel_type.to_string(),
-            from_table_oid,
-            to_table_oid,
+            rel_type: spec.rel_type.to_string(),
+            from_table_oid: spec.from_table_oid,
+            to_table_oid: spec.to_table_oid,
             edge_mapping: Some(EdgeMappingInfo {
-                edge_table_oid,
-                source_table_oid: from_table_oid,
-                target_table_oid: to_table_oid,
-                source_column: source_column.to_string(),
-                target_column: target_column.to_string(),
-                bidirectional,
+                edge_table_oid: spec.edge_table_oid,
+                source_table_oid: spec.from_table_oid,
+                target_table_oid: spec.to_table_oid,
+                source_column: spec.source_column.to_string(),
+                target_column: spec.target_column.to_string(),
+                bidirectional: spec.bidirectional,
             }),
         });
         self

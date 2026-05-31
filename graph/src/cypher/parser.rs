@@ -16,21 +16,24 @@ pub(crate) fn parse_statement(input: &str) -> Result<CypherStatement, GqlError> 
     }
     let statement = crate::gql::parse_statement(input)?;
     let span = statement_span(&statement);
-    Ok(CypherStatement::Compatible { statement, span })
+    Ok(CypherStatement::Compatible {
+        statement: Box::new(statement),
+        span,
+    })
 }
 
 fn unsupported_feature(input: &str) -> Option<(String, Span)> {
     let words = super::lexer::words(input);
     let first = words.first()?;
-    match first.keyword {
-        Some(
-            kind @ (super::lexer::CypherKeyword::Call
-            | super::lexer::CypherKeyword::Foreach
-            | super::lexer::CypherKeyword::Load
-            | super::lexer::CypherKeyword::Start
-            | super::lexer::CypherKeyword::Unwind),
-        ) => return Some((kind.feature_name().to_string(), first.span)),
-        _ => {}
+    if let Some(
+        kind @ (super::lexer::CypherKeyword::Call
+        | super::lexer::CypherKeyword::Foreach
+        | super::lexer::CypherKeyword::Load
+        | super::lexer::CypherKeyword::Start
+        | super::lexer::CypherKeyword::Unwind),
+    ) = first.keyword
+    {
+        return Some((kind.feature_name().to_string(), first.span));
     }
 
     if let Some((_, token)) = words.iter().enumerate().find(|(index, token)| {

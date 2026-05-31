@@ -472,12 +472,10 @@ fn execute_delete_edge(
             ),
         });
     };
-    let matched = matched_edge_ids(row);
+    let matched = matched_edge_ids(row)?;
     let deleted = delete_mapped_edge_row(plan, &matched.source_id, &matched.target_id)?;
     record_deleted_edge_delta(plan, &deleted.source_id, &deleted.target_id)?;
-    Ok(crate::query::value::project_rows(
-        matches, &read_plan, &hydrated, params, hydrate,
-    )?)
+    crate::query::value::project_rows(matches, &read_plan, &hydrated, params, hydrate)
 }
 
 fn delete_edge_read_plan(
@@ -510,19 +508,23 @@ struct MatchedEdgeIds {
     target_id: String,
 }
 
-fn matched_edge_ids(row: &crate::query::execute::GqlRow) -> MatchedEdgeIds {
+fn matched_edge_ids(row: &crate::query::execute::GqlRow) -> safety::GraphResult<MatchedEdgeIds> {
     let rel_start = row
         .rel_start
         .as_ref()
-        .expect("DELETE read plan always returns matched relationships");
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: "GQL DELETE matched a row without relationship endpoints".to_string(),
+        })?;
     let rel_end = row
         .rel_end
         .as_ref()
-        .expect("DELETE read plan always returns matched relationships");
-    MatchedEdgeIds {
+        .ok_or_else(|| safety::GraphError::GqlExecution {
+            reason: "GQL DELETE matched a row without relationship endpoints".to_string(),
+        })?;
+    Ok(MatchedEdgeIds {
         source_id: rel_start.node_id.clone(),
         target_id: rel_end.node_id.clone(),
-    }
+    })
 }
 
 struct CreatedNode {
@@ -1682,7 +1684,7 @@ fn create_values_json(
     if let Some(tenant_column) = &insert_shape.tenant_column {
         let tenant_scope = tenant_scope.unwrap_or_default();
         match values.get(tenant_column) {
-            Some(serde_json::Value::String(value)) if value == &tenant_scope => {}
+            Some(serde_json::Value::String(value)) if value == tenant_scope => {}
             Some(_) => {
                 return Err(safety::GraphError::InvalidFilter {
                     reason: format!(

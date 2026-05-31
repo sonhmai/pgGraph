@@ -1114,12 +1114,12 @@ fn bind_path_function(
     span: Span,
     scope: &BindingScope,
 ) -> Result<ScopedBinding, GqlError> {
-    if path_func(&name.text).is_none() {
+    let Some(func) = path_func(&name.text) else {
         return Err(GqlError::unsupported(
             span,
             "RETURN functions are implemented in a later read phase",
         ));
-    }
+    };
     let [arg] = args else {
         return Err(GqlError::bind(
             span,
@@ -1130,9 +1130,7 @@ fn bind_path_function(
         ));
     };
     match scope.get(&arg.text) {
-        Some(ScopedBinding::Relationship { .. }) => Ok(ScopedBinding::PathFunction(
-            path_func(&name.text).expect("checked path function"),
-        )),
+        Some(ScopedBinding::Relationship { .. }) => Ok(ScopedBinding::PathFunction(func)),
         Some(_) => Err(GqlError::bind(
             arg.span,
             format!(

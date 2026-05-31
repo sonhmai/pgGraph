@@ -58,7 +58,7 @@ pub(crate) enum CypherStatement {
     /// Statement that maps into the shared GQL AST and IR.
     Compatible {
         /// Parsed overlapping GQL statement.
-        statement: crate::gql::ast::Statement,
+        statement: Box<crate::gql::ast::Statement>,
         /// Full statement span.
         span: Span,
     },

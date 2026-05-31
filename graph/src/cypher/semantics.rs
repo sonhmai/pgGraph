@@ -16,7 +16,7 @@ pub(crate) fn bind_statement(
 ) -> Result<LogicalStatement, GqlError> {
     match statement {
         super::ast::CypherStatement::Compatible { statement, .. } => {
-            crate::query::semantics::bind_statement(statement, catalog)
+            crate::query::semantics::bind_statement(statement.as_ref(), catalog)
         }
         super::ast::CypherStatement::Unsupported { feature, span } => Err(GqlError::unsupported(
             *span,

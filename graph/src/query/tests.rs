@@ -1,4 +1,4 @@
-use super::catalog_snapshot::FakeCatalog;
+use super::catalog_snapshot::{FakeCatalog, MappedEdgeSpec};
 use super::execute::{execute, execute_node_scan, GqlNodeCoordinate, GqlNodeRow};
 use super::explain::explain;
 use super::lower::{lower, lower_statement};
@@ -38,7 +38,15 @@ fn fake_catalog() -> FakeCatalog {
         )
         .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
-        .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false)
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "friend",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+        })
 }
 
 fn bind_query(query: &str) -> super::logical_plan::LogicalPlan {
@@ -191,7 +199,15 @@ fn binder_accepts_delete_for_mapped_edge_row() {
 fn binder_accepts_detach_delete_for_node_with_mapped_incident_edges() {
     let catalog = FakeCatalog::new()
         .with_writable_label("users", 10, ["id", "name"], ["name"])
-        .with_mapped_edge("friend", 10, 10, 30, "user_id", "friend_id", false);
+        .with_mapped_edge(MappedEdgeSpec {
+            rel_type: "friend",
+            from_table_oid: 10,
+            to_table_oid: 10,
+            edge_table_oid: 30,
+            source_column: "user_id",
+            target_column: "friend_id",
+            bidirectional: false,
+        });
     let ast =
         crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) DETACH DELETE u RETURN u.name")
             .unwrap();

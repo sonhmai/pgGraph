@@ -921,10 +921,7 @@ fn compare_values(lhs: &EvalValue, op: BoundCmpOp, rhs: Option<&EvalValue>) -> G
     }
 }
 
-fn required_rhs<'a>(
-    op: BoundCmpOp,
-    rhs: Option<&'a EvalValue>,
-) -> GraphResult<&'a serde_json::Value> {
+fn required_rhs(op: BoundCmpOp, rhs: Option<&EvalValue>) -> GraphResult<&serde_json::Value> {
     let value = rhs.ok_or_else(|| GraphError::GqlExecution {
         reason: format!("GQL comparison {op:?} requires a right-hand side"),
     })?;

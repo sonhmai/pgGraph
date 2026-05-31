@@ -9,7 +9,7 @@ pub(crate) mod errors;
 pub(crate) mod lexer;
 pub(crate) mod parser;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) use parser::parse;
 pub(crate) use parser::parse_statement;
 
