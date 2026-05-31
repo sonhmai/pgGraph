@@ -3,8 +3,8 @@
 //! `graph` is a PostgreSQL extension written in Rust (via pgrx) that lets you
 //! query your existing relational tables as a graph. No external services.
 //! No ETL pipelines. No separate graph database. The current public API is
-//! PostgreSQL SQL functions, including a read-only GQL-compatible subset
-//! exposed through `graph.gql()`.
+//! PostgreSQL SQL functions, including a GQL-compatible subset exposed through
+//! `graph.gql()`.
 //!
 //! See: `docs/user_guide/index.mdx` and `docs/contributor_guide/index.mdx`
 

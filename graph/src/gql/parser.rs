@@ -1,22 +1,34 @@
 //! Recursive-descent parser for the supported GQL subset.
 
 use super::ast::{
-    CmpOp, Direction, Expr, Ident, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
-    Query, RelPat, ReturnClause, ReturnExpr, ReturnItem, SortItem, SortKey, VarLen,
+    CmpOp, CreateClause, CreateQuery, Direction, Expr, Ident, Literal, LiteralValue, MatchClause,
+    NodePat, Operand, Pattern, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem, SortItem,
+    SortKey, Statement, VarLen,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
 
 const MAX_PREFIX_NOT: usize = 512;
 
-/// Parse a read-only GQL query into an AST.
+/// Parse a GQL read query into an AST.
 ///
 /// # Errors
 ///
 /// Returns [`GqlError`] when the input is not valid syntax for the supported
 /// subset or uses a clause reserved for a later compatibility phase.
+#[cfg(test)]
 pub(crate) fn parse(input: &str) -> Result<Query, GqlError> {
     Parser::new(input)?.parse_query()
+}
+
+/// Parse a supported GQL statement into an AST.
+///
+/// # Errors
+///
+/// Returns [`GqlError`] when the input is not valid syntax for the supported
+/// subset or uses a clause reserved for a later compatibility phase.
+pub(crate) fn parse_statement(input: &str) -> Result<Statement, GqlError> {
+    Parser::new(input)?.parse_statement()
 }
 
 struct Parser {
@@ -30,6 +42,13 @@ impl Parser {
             tokens: tokenize(input)?,
             pos: 0,
         })
+    }
+
+    fn parse_statement(&mut self) -> Result<Statement, GqlError> {
+        match self.peek() {
+            TokKind::Create => self.parse_create_query().map(Statement::Create),
+            _ => self.parse_query().map(Statement::Read),
+        }
     }
 
     fn parse_query(&mut self) -> Result<Query, GqlError> {
@@ -68,6 +87,32 @@ impl Parser {
             skip,
             limit,
             span: Span::new(start, end),
+        })
+    }
+
+    fn parse_create_query(&mut self) -> Result<CreateQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let create = self.parse_create_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(CreateQuery {
+            create,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_create_clause(&mut self) -> Result<CreateClause, GqlError> {
+        let start = self
+            .expect(TokKind::Create, "expected CREATE clause")?
+            .span
+            .start as usize;
+        let node = self.parse_node_pat()?;
+        Ok(CreateClause {
+            span: Span::new(start, node.span.end as usize),
+            node,
         })
     }
 

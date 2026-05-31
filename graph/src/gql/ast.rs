@@ -1,6 +1,15 @@
-//! Abstract syntax tree for the supported read-only GQL subset.
+//! Abstract syntax tree for the supported GQL subset.
 
 use super::errors::Span;
+
+/// Parsed GQL statement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Statement {
+    /// Read-only `MATCH ... RETURN` query.
+    Read(Query),
+    /// `CREATE` node write query.
+    Create(CreateQuery),
+}
 
 /// Parsed GQL query.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +27,26 @@ pub(crate) struct Query {
     /// Optional `LIMIT` row bound.
     pub(crate) limit: Option<u64>,
     /// Full query span.
+    pub(crate) span: Span,
+}
+
+/// Parsed `CREATE` node query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateQuery {
+    /// Created node clause.
+    pub(crate) create: CreateClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
+/// `CREATE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateClause {
+    /// Node to create.
+    pub(crate) node: NodePat,
+    /// Clause span.
     pub(crate) span: Span,
 }
 

@@ -19,8 +19,8 @@ pub(crate) struct AddedNode {
     pub(crate) table_oid: u32,
     /// Source table primary key.
     pub(crate) primary_key: String,
-    /// Assigned graph node index.
-    pub(crate) node_idx: u32,
+    /// Assigned graph node index when the topology has materialized this row.
+    pub(crate) node_idx: Option<u32>,
 }
 
 /// Transaction-local edge created by a graph write.
@@ -113,7 +113,7 @@ impl TxGraphDelta {
         self.added_nodes.push(AddedNode {
             table_oid,
             primary_key: primary_key.to_string(),
-            node_idx,
+            node_idx: Some(node_idx),
         });
     }
 
@@ -121,6 +121,26 @@ impl TxGraphDelta {
     fn add_edge_for_test(&mut self, source: u32, edge: DeltaEdge) {
         self.added_edges.entry(source).or_default().push(edge);
     }
+}
+
+/// Record a transaction-local node insertion.
+pub(crate) fn record_added_node(table_oid: u32, primary_key: &str) -> GraphResult<()> {
+    ensure_write_allowed()?;
+    TX_DELTA.with(|delta| {
+        let mut borrowed = delta.borrow_mut();
+        let delta = borrowed.get_or_insert_with(TxGraphDelta::default);
+        delta.added_nodes.push(AddedNode {
+            table_oid,
+            primary_key: primary_key.to_string(),
+            node_idx: None,
+        });
+    });
+    Ok(())
+}
+
+/// Validate that the current transaction can accept a graph write delta.
+pub(crate) fn ensure_write_allowed() -> GraphResult<()> {
+    reject_if_subtransaction()
 }
 
 /// Record a transaction-local edge insertion.

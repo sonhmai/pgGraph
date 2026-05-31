@@ -231,3 +231,221 @@ fn gql_hides_transaction_delta_edge_delete() {
 
     assert_eq!(base_edge_count, 0);
 }
+
+#[pg_test]
+fn gql_create_node_requires_mutable_overlay_projection() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_capture_helper();
+
+    let (denied, source_count) = Spi::connect(|client| {
+        let denied = client
+            .select(
+                &format!(
+                    "SELECT public.graph_test_sql_raises({})",
+                    super::sql_literal(
+                        "SELECT * FROM graph.gql(
+                'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: ''Cara'', age: 29}) RETURN u'
+             )"
+                    )
+                ),
+                None,
+                &[],
+            )
+            .expect("create error capture query failed")
+            .first()
+            .get::<bool>(1)
+            .expect("create error capture read failed")
+            .unwrap_or(false);
+        let source_count = client
+            .select(
+                "SELECT count(*)::bigint FROM public.graph_test_users_pgtest WHERE id = 'u3'",
+                None,
+                &[],
+            )
+            .expect("source count query failed")
+            .first()
+            .get::<i64>(1)
+            .expect("source count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((denied, source_count))
+    })
+    .expect("readonly create verification failed");
+
+    assert!(denied);
+    assert_eq!(source_count, 0);
+}
+
+#[pg_test]
+fn gql_create_node_inserts_mapped_row_and_records_delta() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (created_id, created_name, source_count, tx_added_nodes) = Spi::connect(|client| {
+        let created = client
+            .select(
+                "SELECT
+                    row #>> '{u,_id,id}',
+                    row #>> '{u,name}'
+                 FROM graph.gql(
+                    'CREATE (u:graph_test_users_pgtest {id: ''u3'', name: $name, age: 29}) RETURN u',
+                    params := '{\"name\":\"Cara\"}'::jsonb
+                 )",
+                None,
+                &[],
+            )
+            .expect("gql create failed")
+            .first();
+        let source_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_test_users_pgtest
+                 WHERE id = 'u3' AND name = 'Cara' AND age = 29",
+                None,
+                &[],
+            )
+            .expect("source row count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("source row count read failed")
+            .unwrap_or_default();
+        let tx_added_nodes = client
+            .select("SELECT tx_delta_added_nodes FROM graph.status()", None, &[])
+            .expect("status query failed")
+            .first()
+            .get::<i32>(1)
+            .expect("tx added node count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            created
+                .get::<String>(1)
+                .expect("created id read failed")
+                .unwrap_or_default(),
+            created
+                .get::<String>(2)
+                .expect("created name read failed")
+                .unwrap_or_default(),
+            source_count,
+            tx_added_nodes,
+        ))
+    })
+    .expect("create verification failed");
+
+    assert_eq!(created_id, "u3");
+    assert_eq!(created_name, "Cara");
+    assert_eq!(source_count, 1);
+    assert_eq!(tx_added_nodes, 1);
+}
+
+#[pg_test]
+fn gql_create_node_applies_session_tenant_scope() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.enforce_tenant_scope = on").expect("enable tenant enforcement failed");
+    Spi::run("SET graph.tenant_setting = 'app.graph_gql_create_tenant'")
+        .expect("set tenant setting failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_create_tenant_pgtest CASCADE")
+        .expect("drop tenant create table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_create_tenant_pgtest (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create tenant create table failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_gql_create_tenant_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add tenant create table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable tenant graph failed");
+    Spi::run("SET app.graph_gql_create_tenant = 'tenant-a'").expect("set tenant-a failed");
+
+    let (created_id, created_tenant, source_tenant) = Spi::connect(|client| {
+        let created = client
+            .select(
+                "SELECT
+                    row #>> '{u,_id,id}',
+                    row #>> '{u,tenant_id}'
+                 FROM graph.gql(
+                    'CREATE (u:graph_gql_create_tenant_pgtest {id: ''a3'', name: ''Leaf A''}) RETURN u'
+                 )",
+                None,
+                &[],
+            )
+            .expect("tenant gql create failed")
+            .first();
+        let source_tenant = client
+            .select(
+                "SELECT tenant_id
+                 FROM public.graph_gql_create_tenant_pgtest
+                 WHERE id = 'a3'",
+                None,
+                &[],
+            )
+            .expect("source tenant query failed")
+            .first()
+            .get::<String>(1)
+            .expect("source tenant read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((
+            created
+                .get::<String>(1)
+                .expect("created id read failed")
+                .unwrap_or_default(),
+            created
+                .get::<String>(2)
+                .expect("created tenant read failed")
+                .unwrap_or_default(),
+            source_tenant,
+        ))
+    })
+    .expect("tenant create verification failed");
+
+    Spi::run("RESET app.graph_gql_create_tenant").expect("reset tenant-a failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
+    Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+
+    assert_eq!(created_id, "a3");
+    assert_eq!(created_tenant, "tenant-a");
+    assert_eq!(source_tenant, "tenant-a");
+}
+
+#[pg_test]
+fn gql_create_node_rejects_unregistered_label() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    build_friendship_fixture_graph();
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("rebuild mutable graph failed");
+    create_error_capture_helper();
+
+    let denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'CREATE (m:graph_missing_pgtest {id: ''m1'', name: ''Missing''}) RETURN m'
+             )"
+        )
+    ))
+    .expect("unregistered label error capture query failed")
+    .unwrap_or(false);
+
+    assert!(denied);
+}

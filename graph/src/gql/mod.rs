@@ -9,11 +9,15 @@ pub(crate) mod errors;
 pub(crate) mod lexer;
 pub(crate) mod parser;
 
+#[cfg(test)]
 pub(crate) use parser::parse;
+pub(crate) use parser::parse_statement;
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{CmpOp, Direction, Expr, Literal, LiteralValue, Operand, ReturnExpr, SortKey};
+    use super::ast::{
+        CmpOp, Direction, Expr, Literal, LiteralValue, Operand, ReturnExpr, SortKey, Statement,
+    };
     use super::errors::GqlErrorKind;
     use super::parse;
 
@@ -99,6 +103,20 @@ mod tests {
 
         assert!(matches!(&item.expr, ReturnExpr::Func { .. }));
         assert_eq!(item.alias_text(), Some("total"));
+    }
+
+    #[test]
+    fn parses_create_node_statement() {
+        let parsed = super::parse_statement("CREATE (u:users {id: 'u3', name: $name}) RETURN u")
+            .expect("statement should parse");
+        let Statement::Create(create) = parsed else {
+            panic!("statement should be a create query");
+        };
+
+        assert_eq!(create.create.node.var_text(), Some("u"));
+        assert_eq!(create.create.node.label_text(), Some("users"));
+        assert_eq!(create.create.node.props.len(), 2);
+        assert_eq!(create.return_.items.len(), 1);
     }
 
     #[test]

@@ -22,10 +22,10 @@ durable source of truth.
 ## Contract Reconciliation
 
 This branch intentionally changes pgGraph's future positioning from "no graph
-query language" to "read-only GQL subset now, broader GQL/SQL-PGQ planned,
+query language" to "GQL subset now, broader GQL/SQL-PGQ planned,
 PostgreSQL-first, compatibility matrix required." Public docs and source-level
-crate docs now describe `graph.gql()` as a documented read-only subset, not a
-full GQL, SQL/PGQ, Cypher, Gremlin, or SPARQL compatibility promise.
+crate docs now describe `graph.gql()` as a documented subset, not a full GQL,
+SQL/PGQ, Cypher, Gremlin, or SPARQL compatibility promise.
 
 Before expanding the public graph-language surface further, keep public docs,
 SQL signatures, SQLSTATE rows, and this compatibility matrix in the same
@@ -62,8 +62,9 @@ openCypher compatibility.
   PostgreSQL state and must not become a second durable source of truth.
 - Mutable projection writes are transaction-scoped. A transaction must read its
   own GQL writes and rollback must discard projection deltas.
-- SQLSTATE additions for the read-only GQL facade are implemented; new write
-  categories still need explicit mapping before any GQL write API ships.
+- SQLSTATE additions for the GQL facade are implemented for syntax,
+  unsupported-feature, semantic, parameter, execution, and write-on-read-only
+  paths; broaden them only when new write categories need distinct handling.
 - The first public graph-language milestone should be read-only GQL, not
   openCypher. It should prioritize graph pattern matching semantics that align
   with SQL/PGQ.
@@ -131,8 +132,9 @@ openCypher compatibility.
   delta limits, compaction thresholds, and memory caps. Phase 2B has added
   `graph.default_projection_mode`, `graph.mutable_enabled`, queued-build mode
   persistence, the transaction-delta lifecycle skeleton, and internal
-  transaction-local edge overlay reads; delta limits, compaction thresholds, and
-  overlay memory caps remain for later Phase 2 slices.
+  transaction-local edge overlay reads, and public GQL node-create deltas;
+  delta limits, compaction thresholds, and overlay memory caps remain for later
+  Phase 2 slices.
 - Define SQLSTATE policy for GQL syntax, unsupported feature, semantic,
   parameter, type mismatch, schema violation, write-on-read-only, and memory
   limit errors.

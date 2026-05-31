@@ -46,18 +46,27 @@ unweighted paths/components route through overlay neighbors, weighted paths
 reject dirty edge overlays with `PG018`, and the clean-overlay benchmark is
 within noise of the pre-2A baseline.
 
-Status note, 2026-05-31: 2B infrastructure has started. Projection-mode GUCs,
+Status note, 2026-05-31: 2B is closed. Projection-mode GUCs,
 `graph.build(mode := ...)`, queued-build mode persistence, status/sync-health
-mode columns, the transaction-delta callback skeleton, and internal
-transaction-local edge overlay reads are in place. Read-only GQL pattern
-expansion now consumes the same overlay-aware neighbor path, with SQL-visible
-coverage for internal transaction edge inserts and deletes. The
-`tx_delta_lifecycle.sh` heavy script now proves commit cleanup, rollback
-discard, concurrent backend isolation, and trigger-sync catch-up for the
-internal transaction edge overlay path. `tx_delta_crash_recovery.sh` proves
+mode columns, transaction-delta callbacks, and internal transaction-local edge
+overlay reads are in place. Read-only GQL pattern expansion consumes the same
+overlay-aware neighbor path, with SQL-visible coverage for internal transaction
+edge inserts and deletes. `tx_delta_lifecycle.sh` proves commit cleanup,
+rollback discard, concurrent backend isolation, and trigger-sync catch-up for
+the internal transaction edge overlay path. `tx_delta_crash_recovery.sh` proves
 uncommitted transaction edge overlays are ignored after postmaster crash/reload
-while the persisted base graph reloads. The 2B write-proof gates remain open
-until mapped writes record deltas through the public write path.
+while the persisted base graph reloads. Public mapped `CREATE` now records node
+deltas through the public GQL write path.
+
+Status note, 2026-05-31: 2C has started. Public `graph.gql()` accepts
+single-node mapped `CREATE` on `mutable_overlay`, performs a PostgreSQL-first
+`INSERT ... RETURNING`, returns the inserted row, rejects `csr_readonly`, and
+records a transaction-local added-node delta. SQL-visible coverage includes
+read-only projection rejection, session-tenant insertion, and
+unregistered-label rejection. Remaining 2C work: explicit rollback/RLS tests,
+clarify node-delta visibility for subsequent topology reads, and decide whether
+isolated node visibility needs a node-only `MATCH` read slice or should wait
+for edge `CREATE`.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 

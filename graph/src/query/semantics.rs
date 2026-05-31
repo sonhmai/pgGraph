@@ -1,4 +1,4 @@
-//! Semantic binding for the read-only GQL subset.
+//! Semantic binding for the supported GQL subset.
 
 use crate::gql::ast::{
     CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern, RelPat,
@@ -8,7 +8,8 @@ use crate::gql::errors::{GqlError, Span};
 
 use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
-    BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, HopBounds, LogicalPlan,
+    BindingSide, BoundCmpOp, BoundDirection, BoundNode, BoundRel, CreateProperty,
+    CreateReturnBinding, CreateValue, HopBounds, LogicalCreateNode, LogicalPlan, LogicalStatement,
     Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
@@ -64,6 +65,154 @@ pub(crate) fn bind(
         skip: query.skip,
         limit: query.limit,
     })
+}
+
+/// Bind a parsed GQL statement into a logical statement.
+///
+/// # Errors
+///
+/// Returns [`GqlError`] when the statement uses valid syntax outside the
+/// current execution slice or when labels/properties cannot resolve in the
+/// catalog.
+pub(crate) fn bind_statement(
+    statement: &crate::gql::ast::Statement,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalStatement, GqlError> {
+    match statement {
+        crate::gql::ast::Statement::Read(query) => bind(query, catalog).map(LogicalStatement::Read),
+        crate::gql::ast::Statement::Create(query) => {
+            bind_create_node(query, catalog).map(LogicalStatement::CreateNode)
+        }
+    }
+}
+
+fn bind_create_node(
+    query: &crate::gql::ast::CreateQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalCreateNode, GqlError> {
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT is implemented in a later phase",
+        ));
+    }
+    let node = bind_node(&query.create.node, catalog)?;
+    if query.create.node.props.is_empty() {
+        return Err(GqlError::unsupported(
+            query.create.node.span,
+            "CREATE requires a property map for mapped node writes",
+        ));
+    }
+    let properties = bind_create_properties(&query.create.node, &node)?;
+    let returns = bind_create_returns(&query.return_.items, &node)?;
+    Ok(LogicalCreateNode {
+        node,
+        properties,
+        returns,
+    })
+}
+
+fn bind_create_properties(
+    node_pat: &NodePat,
+    node: &BoundNode,
+) -> Result<Vec<CreateProperty>, GqlError> {
+    let mut seen = std::collections::HashSet::with_capacity(node_pat.props.len());
+    let mut properties = Vec::with_capacity(node_pat.props.len());
+    for (key, value) in &node_pat.props {
+        if !node.properties.contains(&key.text) {
+            return Err(GqlError::bind(
+                key.span,
+                format!("unknown property `{}`", key.text),
+            ));
+        }
+        if !seen.insert(key.text.as_str()) {
+            return Err(GqlError::bind(
+                key.span,
+                format!("duplicate CREATE property `{}`", key.text),
+            ));
+        }
+        let value = match value {
+            Operand::Literal(Literal::Value { value, .. }) => CreateValue::Literal(value.clone()),
+            Operand::Param { name, .. } => CreateValue::Param(name.text.clone()),
+            Operand::List { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "CREATE property lists are implemented in a later write phase",
+                ));
+            }
+            Operand::Property { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "CREATE property references require MATCH writes from a later phase",
+                ));
+            }
+        };
+        properties.push(CreateProperty {
+            property: key.text.clone(),
+            value,
+        });
+    }
+    Ok(properties)
+}
+
+fn bind_create_returns(
+    items: &[ReturnItem],
+    node: &BoundNode,
+) -> Result<Vec<CreateReturnBinding>, GqlError> {
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut bindings = Vec::with_capacity(items.len());
+    for item in items {
+        let binding = match &item.expr {
+            ReturnExpr::Var { var, .. } if var.text == node.var => CreateReturnBinding::Node {
+                name: item
+                    .alias
+                    .as_ref()
+                    .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
+            },
+            ReturnExpr::Property { var, property, .. } if var.text == node.var => {
+                validate_property(
+                    BindingSide::Source,
+                    &property.text,
+                    node,
+                    node,
+                    property.span,
+                )?;
+                CreateReturnBinding::Property {
+                    property: property.text.clone(),
+                    name: item
+                        .alias
+                        .as_ref()
+                        .map_or_else(|| property.text.clone(), |alias| alias.text.clone()),
+                }
+            }
+            ReturnExpr::Var { var, span } => {
+                return Err(GqlError::bind(
+                    *span,
+                    format!("unknown return variable `{}`", var.text),
+                ));
+            }
+            ReturnExpr::Property { var, span, .. } => {
+                return Err(GqlError::bind(
+                    *span,
+                    format!("unknown return variable `{}`", var.text),
+                ));
+            }
+            ReturnExpr::Func { span, .. } => {
+                return Err(GqlError::unsupported(
+                    *span,
+                    "RETURN functions over CREATE are implemented in a later phase",
+                ));
+            }
+        };
+        if !seen.insert(binding.name().to_string()) {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{}`", binding.name()),
+            ));
+        }
+        bindings.push(binding);
+    }
+    Ok(bindings)
 }
 
 fn validate_row_window(query: &crate::gql::ast::Query) -> Result<(), GqlError> {

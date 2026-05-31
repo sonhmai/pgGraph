@@ -71,8 +71,8 @@ RETURNS TABLE (
 Reports backend-local engine state and current catalog/sync validity. When
 `read_only` is true, `read_only_reason` is `memory_limit`,
 `edge_buffer_full`, or another typed reason. `projection_mode` is
-`csr_readonly` or `mutable_overlay`; transaction-delta columns are zero/false
-until mutable graph writes are enabled by later release slices.
+`csr_readonly` or `mutable_overlay`; transaction-delta columns report
+backend-local GQL write overlays for the current transaction.
 
 ### `graph.sync_health()`
 
@@ -455,9 +455,9 @@ graph.gql(
 RETURNS TABLE (row jsonb)
 ```
 
-Executes the documented read-only GQL-compatible subset over the active graph.
-Each output row is a JSONB object keyed by the `RETURN` aliases or expressions.
-Node labels resolve to registered table names, relationship types resolve to
+Executes the documented GQL-compatible subset over the active graph. Each
+output row is a JSONB object keyed by the `RETURN` aliases or expressions. Node
+labels resolve to registered table names, relationship types resolve to
 registered edge labels, and `$parameters` are read from the `params` JSON
 object.
 
@@ -465,8 +465,15 @@ Supported return values are node values, scalar properties, and coordinate-only
 single-hop relationship identities. With `hydrate := true`, node values include
 source rows when PostgreSQL ACL and RLS allow them. With `hydrate := false`,
 node values are coordinates only. Relationship source-row hydration, raw path
-values, aggregates, `OPTIONAL MATCH`, `WITH`, and writes are not part of this
-release's GQL subset.
+values, aggregates, `OPTIONAL MATCH`, and `WITH` are not part of this release's
+GQL subset.
+
+`CREATE (n:label {properties}) RETURN ...` is supported for a single node whose
+label maps to a registered source table. It requires a `mutable_overlay`
+projection and inserts the PostgreSQL source row first, so table privileges,
+constraints, triggers, RLS, and MVCC remain authoritative. `CREATE` is rejected
+on `csr_readonly`. Relationship creation, `SET`, `DELETE`, `MERGE`, and
+multi-row writes are not part of this release's GQL subset.
 
 ### `graph.gql_explain()`
 

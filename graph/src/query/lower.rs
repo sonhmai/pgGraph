@@ -1,7 +1,23 @@
 //! Lowering from logical GQL plans to executable physical plans.
 
-use super::logical_plan::{LogicalPlan, ReturnBinding};
-use super::physical_plan::{PhysicalPlan, ReturnSlot};
+use super::logical_plan::{
+    CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalPlan, LogicalStatement,
+    ReturnBinding,
+};
+use super::physical_plan::{
+    CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalPlan,
+    PhysicalStatement, ReturnSlot,
+};
+
+/// Lower a bound logical statement into an executable physical statement.
+pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement {
+    match statement {
+        LogicalStatement::Read(plan) => PhysicalStatement::Read(lower(plan)),
+        LogicalStatement::CreateNode(plan) => {
+            PhysicalStatement::CreateNode(lower_create_node(plan))
+        }
+    }
+}
 
 /// Lower a bound logical plan into the executable Phase 1B physical plan.
 pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
@@ -37,5 +53,48 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
                 },
             })
             .collect(),
+    }
+}
+
+fn lower_create_node(plan: LogicalCreateNode) -> PhysicalCreateNode {
+    PhysicalCreateNode {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        properties: plan
+            .properties
+            .into_iter()
+            .map(|property| CreatePropertySlot {
+                property: property.property,
+                value: match property.value {
+                    CreateValue::Literal(value) => {
+                        CreateValueSlot::Literal(literal_value_json(value))
+                    }
+                    CreateValue::Param(name) => CreateValueSlot::Param(name),
+                },
+            })
+            .collect(),
+        returns: plan
+            .returns
+            .into_iter()
+            .map(|slot| match slot {
+                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
+                CreateReturnBinding::Property { property, name } => {
+                    CreateReturnSlot::Property { property, name }
+                }
+            })
+            .collect(),
+    }
+}
+
+fn literal_value_json(value: crate::gql::ast::LiteralValue) -> serde_json::Value {
+    match value {
+        crate::gql::ast::LiteralValue::Str(value) => serde_json::Value::String(value),
+        crate::gql::ast::LiteralValue::Int(value) => serde_json::Value::from(value),
+        crate::gql::ast::LiteralValue::Float(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        crate::gql::ast::LiteralValue::Bool(value) => serde_json::Value::Bool(value),
+        crate::gql::ast::LiteralValue::Null => serde_json::Value::Null,
     }
 }

@@ -1,4 +1,4 @@
-//! Stable explain strings for read-only GQL inspection.
+//! Stable explain strings for read-oriented GQL inspection.
 
 use super::physical_plan::{PhysicalPlan, ReturnSlot};
 

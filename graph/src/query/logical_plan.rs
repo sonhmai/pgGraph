@@ -1,4 +1,15 @@
-//! Logical plan produced by GQL semantic binding.
+//! Logical plans produced by GQL semantic binding.
+
+use crate::gql::ast::LiteralValue;
+
+/// Bound logical statement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LogicalStatement {
+    /// Read-only query.
+    Read(LogicalPlan),
+    /// Node creation write.
+    CreateNode(LogicalCreateNode),
+}
 
 /// Bound read-only logical query.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +30,53 @@ pub(crate) struct LogicalPlan {
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.
     pub(crate) limit: Option<u64>,
+}
+
+/// Bound node creation.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalCreateNode {
+    /// Created node binding.
+    pub(crate) node: BoundNode,
+    /// Property values to insert into PostgreSQL.
+    pub(crate) properties: Vec<CreateProperty>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound property value for a write.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateProperty {
+    /// Source table column name.
+    pub(crate) property: String,
+    /// Value expression.
+    pub(crate) value: CreateValue,
+}
+
+/// Bound write value.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CreateValue {
+    /// Literal scalar.
+    Literal(LiteralValue),
+    /// Query parameter by name.
+    Param(String),
+}
+
+/// Return slot for `CREATE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreateReturnBinding {
+    /// Whole created node variable.
+    Node { name: String },
+    /// Created node property.
+    Property { property: String, name: String },
+}
+
+impl CreateReturnBinding {
+    /// Return the output column name.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Node { name } | Self::Property { name, .. } => name,
+        }
+    }
 }
 
 /// Bound node variable and table.

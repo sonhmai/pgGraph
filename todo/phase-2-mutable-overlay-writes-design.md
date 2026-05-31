@@ -115,8 +115,8 @@ mark-stale; upgrade if benchmarks demand).
   persisted base graph still reloads.
 - Exposed projection mode and empty transaction-delta counters through
   `graph.status()` and `graph.sync_health()`.
-- Remaining 2B work before write slices: route actual GQL write deltas into
-  `TxGraphDelta` through the public write path.
+- Routed public GQL node `CREATE` into `TxGraphDelta` as an added-node delta
+  after PostgreSQL accepts the mapped source-table insert.
 
 ## 4. Transaction callbacks (slice 2B) — NEW infrastructure
 
@@ -213,7 +213,9 @@ scales with churn, not graph size.
   catch-up via sync log; crash/reload rebuilds (doesn't trust) overlay.
 - **2C — `CREATE` mapped node.** SPI-first insert + delta. Tests:
   read-your-own-writes, ACL/RLS/tenant, unregistered-label rejection, edge-type
-  ceiling.
+  ceiling. Current slice supports the public SPI-first insert/result/delta path;
+  remaining tests and node-topology visibility decisions are tracked in
+  `build-sequence.md`.
 - **2D — `SET` mapped property.** Tests: typed-column only, type-mismatch
   rejection, filter-index delta visibility.
 - **2E — `DELETE` mapped edge.** Tests: tombstone reduces neighbors, no cascade,

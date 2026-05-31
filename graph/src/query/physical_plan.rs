@@ -1,9 +1,18 @@
-//! Physical plans executable against engine topology stores.
+//! Physical plans executable against engine topology stores or PostgreSQL SPI.
 
 use super::logical_plan::{BindingSide, BoundDirection, HopBounds, Predicate, SortBinding};
 
 /// Maximum GQL matches collected before sorting/projection.
 pub(crate) const MAX_GQL_RESULT_ROWS: usize = 10_000;
+
+/// Physical GQL statement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PhysicalStatement {
+    /// Read-only topology query.
+    Read(PhysicalPlan),
+    /// PostgreSQL-backed node creation.
+    CreateNode(PhysicalCreateNode),
+}
 
 /// Single-hop physical plan for Phase 1B.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +47,48 @@ pub(crate) struct PhysicalPlan {
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.
     pub(crate) limit: Option<u64>,
+}
+
+/// Physical node creation plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalCreateNode {
+    /// Created node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Property values to insert into PostgreSQL.
+    pub(crate) properties: Vec<CreatePropertySlot>,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical property value for a write.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreatePropertySlot {
+    /// Source table column name.
+    pub(crate) property: String,
+    /// Value expression.
+    pub(crate) value: CreateValueSlot,
+}
+
+/// Physical write value.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CreateValueSlot {
+    /// Literal scalar.
+    Literal(serde_json::Value),
+    /// Query parameter by name.
+    Param(String),
+}
+
+/// Physical return slot for `CREATE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreateReturnSlot {
+    /// Whole created node value.
+    Node { name: String },
+    /// Created node property value.
+    Property { property: String, name: String },
 }
 
 /// Physical return slot.
@@ -80,5 +131,12 @@ impl PhysicalPlan {
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
         !self.order_by.is_empty() || self.limit.is_none()
+    }
+}
+
+impl PhysicalCreateNode {
+    /// Table OID whose rows will be inserted.
+    pub(crate) fn required_table_oid(&self) -> u32 {
+        self.table_oid
     }
 }

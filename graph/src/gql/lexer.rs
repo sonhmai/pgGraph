@@ -60,6 +60,8 @@ pub(crate) enum TokKind {
     Float,
     /// `MATCH`
     Match,
+    /// `CREATE`
+    Create,
     /// `WHERE`
     Where,
     /// `RETURN`
@@ -281,6 +283,7 @@ impl Lexer<'_> {
         let text = &self.input[start..self.pos];
         let kind = match text.to_ascii_uppercase().as_str() {
             "MATCH" => TokKind::Match,
+            "CREATE" => TokKind::Create,
             "WHERE" => TokKind::Where,
             "RETURN" => TokKind::Return,
             "DISTINCT" => TokKind::Distinct,

@@ -2,8 +2,8 @@
 
 Graph queries are normal SQL calls. The API has primitive functions for exact
 control, workflow wrappers for application-friendly search, expansion, paths,
-connections, and summaries, and a read-only GQL-compatible subset for graph
-pattern queries over registered tables and edges.
+connections, and summaries, and a GQL-compatible subset for graph pattern
+queries and narrow mapped node creation over registered tables and edges.
 
 ## Search
 
@@ -45,11 +45,11 @@ Search results are verified against source rows, deduplicated by
 Each source-table scan is bounded to `row_offset + max_rows` candidates before
 the final global merge.
 
-## Read-Only GQL
+## GQL
 
-`graph.gql()` executes the documented read-only GQL-compatible subset and
-returns one JSONB object per row. Node labels resolve to registered source-table
-names, and relationship types resolve to registered edge labels.
+`graph.gql()` executes the documented GQL-compatible subset and returns one
+JSONB object per row. Node labels resolve to registered source-table names, and
+relationship types resolve to registered edge labels.
 
 ```sql
 SELECT row
@@ -64,7 +64,7 @@ FROM graph.gql(
 );
 ```
 
-Supported Phase 1 coverage:
+Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
@@ -81,7 +81,26 @@ the caller has source-table privileges and RLS allows the read. With
 `hydrate := false`, node values are graph coordinates only. Relationship values
 are coordinate identity objects in this release; relationship source-row
 hydration, raw path values, path functions, aggregates, `OPTIONAL MATCH`,
-`WITH`, and GQL writes are future work.
+and `WITH` are future work.
+
+Supported write coverage is intentionally narrow. `CREATE` can insert one node
+row into a registered source table when the active graph was built with
+`mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'CREATE (c:customers {id: $id, name: $name}) RETURN c',
+  params := '{"id":"c-42","name":"Ada"}'::jsonb
+);
+```
+
+The write is PostgreSQL-first: pgGraph inserts the mapped source row through
+SPI, PostgreSQL enforces table privileges, constraints, RLS, triggers, and MVCC,
+and the GQL result is built from the inserted row. `CREATE` is rejected on
+`csr_readonly` projections. Relationship creation, `SET`, `DELETE`, `MERGE`,
+multi-row writes, dynamic labels, and creating new PostgreSQL schema objects
+from GQL are future work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query.

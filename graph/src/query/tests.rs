@@ -4,6 +4,7 @@ use super::explain::explain;
 use super::lower::lower;
 use super::physical_plan::ReturnSlot;
 use super::semantics::bind;
+use super::semantics::bind_statement;
 use super::value::{project_rows, HydratedRows, QueryParams};
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
@@ -22,6 +23,21 @@ fn fake_catalog() -> FakeCatalog {
 fn bind_query(query: &str) -> super::logical_plan::LogicalPlan {
     let ast = parse(query).unwrap();
     bind(&ast, &fake_catalog()).unwrap()
+}
+
+#[test]
+fn binder_accepts_create_node_for_registered_label() {
+    let ast =
+        crate::gql::parse_statement("CREATE (u:users {id: 'u3', name: $name}) RETURN u").unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::CreateNode(create) = plan else {
+        panic!("expected create node plan");
+    };
+
+    assert_eq!(create.node.var, "u");
+    assert_eq!(create.node.table_oid, 10);
+    assert_eq!(create.properties.len(), 2);
+    assert_eq!(create.returns.len(), 1);
 }
 
 #[test]
