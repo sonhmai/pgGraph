@@ -12,6 +12,7 @@ All functions live in the `graph` schema.
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
 | Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `vacuum`, `maintenance`, `maintenance_status` |
+| GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
 | Filters | `equals`, `eq`, `not_equals`, `neq`, `greater_than`, `gt`, `at_least`, `gte`, `less_than`, `lt`, `at_most`, `lte`, `between`, `on_node`, `all` |
@@ -406,6 +407,42 @@ RETURNS TABLE (
 
 With `NULL`, returns the latest 50 jobs. With a job ID, returns that job or a
 single `not_found` row.
+
+## GQL
+
+### `graph.gql()`
+
+```sql
+graph.gql(
+  query text,
+  params jsonb DEFAULT NULL,
+  hydrate boolean DEFAULT true
+)
+RETURNS TABLE (row jsonb)
+```
+
+Executes the documented read-only GQL-compatible subset over the active graph.
+Each output row is a JSONB object keyed by the `RETURN` aliases or expressions.
+Node labels resolve to registered table names, relationship types resolve to
+registered edge labels, and `$parameters` are read from the `params` JSON
+object.
+
+Supported return values are node values, scalar properties, and coordinate-only
+single-hop relationship identities. With `hydrate := true`, node values include
+source rows when PostgreSQL ACL and RLS allow them. With `hydrate := false`,
+node values are coordinates only. Relationship source-row hydration, raw path
+values, aggregates, `OPTIONAL MATCH`, `WITH`, and writes are not part of this
+release's GQL subset.
+
+### `graph.gql_explain()`
+
+```sql
+graph.gql_explain(query text) RETURNS text
+```
+
+Parses, binds, and lowers a GQL query and returns stable explain text for the
+frontend, logical-plan, and physical-plan stages. It performs the same catalog
+binding and ACL preflight as `graph.gql()` but does not execute the plan.
 
 ## Search
 

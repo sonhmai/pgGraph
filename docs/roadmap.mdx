@@ -18,7 +18,7 @@ The current engine already supports the core SQL workflow:
 | Area | Current behavior |
 |---|---|
 | Registration | Manual table and edge registration plus schema auto-discovery. |
-| Querying | Bounded traversal, shortest paths, weighted shortest paths, path reconstruction, source search, workflow helpers, and connected components. |
+| Querying | Bounded traversal, shortest paths, weighted shortest paths, path reconstruction, source search, workflow helpers, connected components, and a read-only GQL-compatible subset through `graph.gql()`. |
 | Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
 | Sync | Trigger-buffered change capture with explicit foreground or background apply. |
 | Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
@@ -143,7 +143,7 @@ work, but are not current behavior.
 |---|---|---|
 | WAL-driven sync | `graph.sync_mode = 'wal'` is reserved and rejected when selected. | Logical replication based sync for deployments that should avoid trigger-buffer volume. |
 | COPY build scanner | `graph.build_scan_mode = 'copy'` is reserved and rejected when selected. | A server-side COPY scanner once it can preserve the same validation, error, and memory guarantees as the current SPI path. |
-| GQL and SQL/PGQ frontends | Not part of the current public API. | Investigate a GQL-compatible query frontend and SQL/PGQ adapter path over a shared graph planner. API reference docs should be added only when SQL functions exist. |
+| Broader GQL and SQL/PGQ frontends | A read-only GQL-compatible subset is public through `graph.gql()`; SQL/PGQ, GQL writes, and broader GQL coverage are not current public APIs. | Extend GQL coverage and investigate a SQL/PGQ adapter path over the shared graph planner only when compatibility rows are green. |
 | Online mutable graph overlays | Not part of the current query path. | Investigate a `mutable_overlay` projection mode built as deltas over the immutable CSR base. Keep `csr_readonly` as the fast read-mostly mode and do not mutate CSR in place. |
 | pgVector embedding cache | Node embeddings are not part of the graph artifact or traversal hot path. | Investigate a sidecar or persisted embedding cache keyed by internal node IDs so semantic-guided search can rank candidates without source-table lookups inside the search loop. |
 | Full A* path search | Not current behavior. Existing shortest paths use bidirectional BFS and weighted paths use Dijkstra. | Consider as a specialized semantic-guided search mode only when the heuristic has an explicit admissibility contract. |

@@ -9,9 +9,10 @@ bounded traversal, path reconstruction, persistence, and maintenance behind the
 `graph` schema.
 
 <Callout type="info">
-The current public API is PostgreSQL SQL functions in the `graph` schema.
-Standards-aligned graph query frontends such as GQL and SQL/PGQ are planned
-work, but they are not part of the current public API.
+The current public API is PostgreSQL SQL functions in the `graph` schema,
+including a documented read-only GQL-compatible subset through `graph.gql()`.
+SQL/PGQ adapters, GQL writes, and broader graph-language coverage remain
+future work.
 </Callout>
 
 ## What It Does For You
@@ -22,6 +23,7 @@ work, but they are not part of the current public API.
 | Edge registration | FK-style edges and edge-table style relationships through `graph.add_edge()` |
 | Search | Source-table SQL search over registered columns with `contains`, `exact`, `prefix`, and `token` modes |
 | Traversal | Bounded BFS and DFS over CSR edges with direction, edge type, table, tenant, filter, hydration, pagination, and circuit breaker options |
+| Read-only GQL | A documented GQL-compatible graph-pattern subset over registered tables and edges, returned as JSONB rows |
 | Paths | Unweighted shortest path, weighted shortest path when edge weights are registered, readable path helpers, and workflow wrappers |
 | Components | Admin-only connected component summaries and paginated component membership |
 | Filtering | Traversal-time typed filter pushdown for registered filter columns |
@@ -77,6 +79,13 @@ FROM graph.shortest_path(
   '42',
   'public.customers'::regclass,
   '99'
+);
+
+SELECT row
+FROM graph.gql(
+  'MATCH (o:orders)-[:placed_by]->(c:customers)
+   RETURN o.status AS status, c.name AS customer
+   LIMIT 10'
 );
 ```
 

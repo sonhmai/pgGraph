@@ -22,17 +22,14 @@ durable source of truth.
 ## Contract Reconciliation
 
 This branch intentionally changes pgGraph's future positioning from "no graph
-query language" to "GQL/SQL-PGQ planned, PostgreSQL-first, compatibility matrix
-required." The roadmap and limitations docs have been adjusted on this branch,
-but the rest of the public and source-level contract must still be reconciled
-before any public GQL/SQL-PGQ API is merged:
+query language" to "read-only GQL subset now, broader GQL/SQL-PGQ planned,
+PostgreSQL-first, compatibility matrix required." Public docs and source-level
+crate docs now describe `graph.gql()` as a documented read-only subset, not a
+full GQL, SQL/PGQ, Cypher, Gremlin, or SPARQL compatibility promise.
 
-- `docs/user_guide/index.mdx` says pgGraph does not introduce a new graph query
-  language.
-- `docs/contributor_guide/architecture.mdx` says SQL is the public API.
-- `graph/src/lib.rs` says "No new query language."
-- API reference docs should not mention `graph.gql()` until the SQL function
-  exists.
+Before expanding the public graph-language surface further, keep public docs,
+SQL signatures, SQLSTATE rows, and this compatibility matrix in the same
+commit as the code change that exposes the behavior.
 
 The existing private `.agents/private/cypher-support-plan.md` is no longer the
 primary implementation plan. It remains useful research for parser/planner
@@ -57,8 +54,7 @@ openCypher compatibility.
 - Compatibility target: GQL-compatible subset first, aligned with SQL/PGQ graph
   pattern matching where possible.
 - Public API target: `graph.gql(query, params, hydrate)` returning JSONB rows,
-  with `graph.gql_explain(query, params)` for diagnostics once the SQL facade
-  exists.
+  with `graph.gql_explain(query)` for diagnostics.
 - Public docs strategy: update roadmap and limitations wording now; add API
   reference docs only when SQL functions exist.
 - Projection mode names: `csr_readonly` and `mutable_overlay`.
@@ -66,7 +62,8 @@ openCypher compatibility.
   PostgreSQL state and must not become a second durable source of truth.
 - Mutable projection writes are transaction-scoped. A transaction must read its
   own GQL writes and rollback must discard projection deltas.
-- SQLSTATE additions are deferred until the GQL SQL facade lands.
+- SQLSTATE additions for the read-only GQL facade are implemented; new write
+  categories still need explicit mapping before any GQL write API ships.
 - The first public graph-language milestone should be read-only GQL, not
   openCypher. It should prioritize graph pattern matching semantics that align
   with SQL/PGQ.
@@ -505,18 +502,22 @@ Phase gates:
 Status values: `phase_1`, `phase_2`, `phase_3`, `phase_4`, `out_of_scope`,
 `unknown`.
 
+Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
+
 | GQL feature area | Target status | Parser | Semantics | Execution | Negative tests | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| `MATCH` single graph pattern | phase_1 | required | required | required | required | First useful read surface. |
-| Node labels mapped to registered source tables | phase_1 | required | required | required | required | Unknown/ambiguous labels must fail. |
-| Relationship types mapped to registered edge labels | phase_1 | required | required | required | required | Unknown types must fail. |
-| Directed outbound/inbound relationships | phase_1 | required | required | required | required | Must map to forward/reverse execution. |
-| Undirected relationships | phase_1 | required | required | required | required | Requires duplicate/identity rules. |
-| `WHERE` property predicates | phase_1 | required | required | required | required | Start with eq/neq/range/null/membership. |
-| Parameters through JSONB | phase_1 | required | required | required | required | Missing/wrong type errors required. |
-| `RETURN` node/property/relationship/path | phase_1 | required | required | required | required | JSONB row shape must be stable. |
-| `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | required | required | required | required | Hard row limits still apply. |
-| Bounded variable-length relationships | phase_1 | required | required | required | required | Require explicit max bounds. |
+| `MATCH` single graph pattern | phase_1 | supported | supported | supported | supported | First public read surface. |
+| Node labels mapped to registered source tables | phase_1 | supported | supported | supported | supported | Unknown/ambiguous labels fail. |
+| Relationship types mapped to registered edge labels | phase_1 | supported | supported | supported | supported | Unknown types fail. |
+| Directed outbound/inbound relationships | phase_1 | supported | supported | supported | supported | Maps to forward/reverse execution. |
+| Undirected relationships | phase_1 | supported | supported | supported | supported | Includes duplicate/identity rules. |
+| `WHERE` property predicates | phase_1 | supported | supported | supported | supported | Covers eq/neq/range/null/membership plus boolean combinations. |
+| Parameters through JSONB | phase_1 | supported | supported | supported | supported | Missing/wrong type errors covered. |
+| `RETURN` node and scalar property values | phase_1 | supported | supported | supported | supported | JSONB row shape is stable. |
+| `RETURN` coordinate-only single-hop relationship identity | phase_1 | supported | supported | supported | supported | Relationship source-row hydration is deferred. |
+| `RETURN` raw paths and path functions | phase_3 | required | required | required | required | Raw path variables, `nodes`, `relationships`, and `length` are not Phase 1. |
+| `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | supported | supported | supported | supported | Hard row limits still apply. |
+| Bounded variable-length relationships | phase_1 | supported | supported | supported | supported | Requires explicit max bounds; variable-length relationship return is rejected. |
 | `OPTIONAL MATCH` | phase_3 | required | required | required | required | Needs null-extension semantics. |
 | `WITH` | phase_3 | required | required | required | required | Needed for multi-stage queries. |
 | `DISTINCT` | phase_3 | required | required | required | required | Memory limits required. |

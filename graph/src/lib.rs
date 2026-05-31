@@ -3,8 +3,8 @@
 //! `graph` is a PostgreSQL extension written in Rust (via pgrx) that lets you
 //! query your existing relational tables as a graph. No external services.
 //! No ETL pipelines. No separate graph database. The current public API is
-//! PostgreSQL SQL functions; standards-aligned graph query frontends are planned
-//! work and remain gated until their compatibility and regression gates pass.
+//! PostgreSQL SQL functions, including a read-only GQL-compatible subset
+//! exposed through `graph.gql()`.
 //!
 //! See: `docs/user_guide/index.mdx` and `docs/contributor_guide/index.mdx`
 
@@ -28,12 +28,10 @@ mod discover;
 mod edge_store;
 mod engine;
 mod filter_index;
-#[cfg(any(test, feature = "development", feature = "fuzzing"))]
 mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
-#[cfg(any(test, feature = "development"))]
 mod query;
 mod quote;
 mod resolution_index;
@@ -235,6 +233,5 @@ mod tests {
     include!("pg_tests/workflow_relationship_api.rs");
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
-    #[cfg(feature = "development")]
     include!("pg_tests/gql.rs");
 }

@@ -1,6 +1,7 @@
 //! Error types and source spans for GQL frontend diagnostics.
 
 use std::fmt;
+#[cfg(test)]
 use std::ops::Range;
 
 /// Byte span into the original query text.
@@ -22,6 +23,7 @@ impl Span {
     }
 
     /// Return this span as a standard range.
+    #[cfg(test)]
     pub(crate) fn range(self) -> Range<usize> {
         self.start as usize..self.end as usize
     }

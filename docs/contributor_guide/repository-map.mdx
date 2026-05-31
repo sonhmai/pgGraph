@@ -30,6 +30,8 @@ beside it in the crate tree.
 | `edge_store.rs` | CSR edge store with owned and mmap backings |
 | `resolution_index.rs` | Build-time and finalized table+PK lookup index |
 | `filter_index.rs` | Typed filter column encoding and hybrid dense/sparse storage |
+| `gql/` | pgrx-free frontend for the supported read-only GQL subset |
+| `query/` | GQL binding, logical planning, physical lowering, execution, and JSON projection |
 | `builder.rs` | SPI cursor build pipeline and temp spool loading |
 | `catalog.rs` | Catalog module boundary for registration reads, writes, and validation |
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
@@ -64,6 +66,7 @@ and keeps shared facade imports local to the SQL boundary:
 | `search.rs` | Search and search-then-traverse entrypoints |
 | `workflow.rs` | App-friendly workflow wrappers |
 | `components.rs` | Connected component entrypoints |
+| `gql.rs` | Read-only `graph.gql()` and `graph.gql_explain()` entrypoints |
 | `runtime.rs` | Reset, auto-load, current graph validation |
 
 Contributor changes to SQL behavior usually touch one facade file plus one or

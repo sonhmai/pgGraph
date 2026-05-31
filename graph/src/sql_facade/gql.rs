@@ -2,7 +2,7 @@ use super::admin::{check_enabled_result, with_panic_boundary};
 use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
 use super::*;
 
-/// Development-only GQL plan inspection.
+/// Explain how the supported read-only GQL subset binds and lowers.
 #[pg_extern(schema = "graph")]
 fn gql_explain(query: &str) -> String {
     with_panic_boundary("gql_explain()", || {
@@ -13,7 +13,7 @@ fn gql_explain(query: &str) -> String {
     })
 }
 
-/// Development-only coordinate-returning GQL execution.
+/// Execute the supported read-only GQL subset and return JSONB rows.
 #[pg_extern(schema = "graph", cost = 1000)]
 #[allow(
     clippy::type_complexity,

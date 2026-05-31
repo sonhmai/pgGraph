@@ -2,9 +2,10 @@
 
 ## Status
 
-Benchmark gate refreshed. The original saved `pre_gql_mutable_overlay`
-Criterion data is stale for this host; a same-host redo comparing current tree
-against baseline commit `0574e6b` showed no BFS regression.
+G1 public exposure is complete as of 2026-05-31. `graph.gql()` and
+`graph.gql_explain()` are public in plain `pg17` builds, public docs describe
+the actual read-only Phase 1 subset, and the same-host benchmark gate shows no
+BFS regression.
 
 ## Completed Evidence
 
@@ -14,8 +15,8 @@ against baseline commit `0574e6b` showed no BFS regression.
   `12f75a8 feat(gql): map stable SQLSTATEs`.
 - Tenant-scope topology filtering is implemented and committed:
   `078f094 fix(gql): enforce tenant scope`.
-- Public positioning now says SQL functions are the current public API while
-  GQL and SQL/PGQ are planned work:
+- Pre-exposure public positioning said SQL functions were the current public API
+  while GQL and SQL/PGQ were planned work:
   `1e57650 docs(gql): align public query language positioning`.
 - Relationship identity projection is implemented for single-hop relationship
   variables, including inbound orientation preserving registered edge start/end.
@@ -36,6 +37,22 @@ against baseline commit `0574e6b` showed no BFS regression.
     - `18 passed; 0 failed; 421 filtered out`
   - `cargo fmt --check`
   - `git diff --check`
+- Public exposure verification passed after moving the GQL SQL facade out of
+  `development`:
+  - `cargo build --features pg17 --lib --no-default-features`
+    - passed with no warnings
+  - `cargo test --features pg17 query::`
+    - `28 passed; 0 failed; 303 filtered out`
+  - `cargo pgrx test --features pg17 gql`
+    - `18 passed; 0 failed; 421 filtered out`
+  - `graph/tests/heavy/run_sqlstate_acl_boundary.sh`
+    - passed on `pggraph_boundary`
+  - `python3 scripts/check_sql_api_drift.py`
+    - `SQL API and GUC documentation are in sync.`
+  - `python3 scripts/check_doc_references.py`
+    - `Documentation local references are valid.`
+  - `cargo fmt --check`
+  - `git diff --check`
 
 ## Cargo Verification Policy
 
@@ -43,7 +60,7 @@ The user clarified on 2026-05-31 that `sfw` is only required for package
 installation, fetch, update, and other dependency-changing operations. Direct
 Cargo is allowed for ordinary build, test, format, and benchmark commands.
 
-## Missing Evidence
+## Benchmark Diagnosis
 
 The G1 gate in `todo/build-sequence.md` requires a `bfs_bench` comparison
 against the pre-GQL baseline with zero regression.
@@ -70,9 +87,9 @@ significant regressions. Representative rows:
 
 ### Follow-up Diagnosis - 2026-05-31
 
-The development-only GQL frontend and shared query planner modules are gated out
-of plain `pg17` builds. That is the intended production shape before G1, not a
-benchmark workaround. Validation:
+Before G1 exposure, the then-development-only GQL frontend and shared query
+planner modules were gated out of plain `pg17` builds. That was the intended
+production shape before G1, not a benchmark workaround. Validation:
 
 - `cargo build --features pg17 --lib --no-default-features`
   - passed with no GQL/query dead-code warnings
@@ -122,21 +139,36 @@ improved` or no regression. Representative rows:
 | `bfs_overlay_paths/sparse_overlay_d3` | `92.285 us` | `-27.752%` | Performance has improved |
 | `bfs_filter_index_paths/score_gte_50_d3/dense_100pct` | `20.577 us` | `-27.806%` | Performance has improved |
 
-## Next Action
+### Public Exposure Rerun - 2026-05-31
 
-The benchmark part of G1 is satisfied by the same-host redo. The remaining G1
-work is the public-exposure audit and code/docs flip:
+After the public SQL surface changed, the full benchmark comparison was rerun
+under `caffeinate` using a separate target directory seeded only with the
+same-host Criterion baseline:
 
-- Update the compatibility matrix so Phase 1 rows state actual supported
-  coverage, not only `required` coverage.
-- Update public docs that currently say GQL and SQL/PGQ are planned/not current
-  APIs before moving `graph.gql()` or `graph.gql_explain()` out of
-  `development`.
-- Keep non-Phase-1 rows clearly future/deferred so public docs do not imply full
-  GQL, SQL/PGQ, Cypher, or write support.
-- Re-run GQL unit/pgrx tests, SQLSTATE/ACL boundary, `cargo fmt --check`,
-  `git diff --check`, and the refreshed same-host `bfs_bench` comparison after
-  the public SQL surface changes.
+```sh
+CARGO_TARGET_DIR=/private/tmp/pggraph-current-g1-public-target \
+  caffeinate -i cargo bench --features pg17 --bench bfs_bench -- \
+  --baseline pre_gql_current_host_redo
+```
 
-After the public exposure diff exists, record its verification results here or
-in a replacement baseline note before marking G1 complete.
+Result: exit code `0`. Every reported comparison was `Performance has
+improved`; no Criterion regression rows were reported. Representative rows:
+
+| Benchmark | Current median/estimate | Change vs same-host baseline | Criterion result |
+|---|---:|---:|---|
+| `bfs_traverse/d1_supernode/10k` | `2.0854 us` | `-25.352%` | Performance has improved |
+| `bfs_traverse/d3_supernode/10k` | `61.085 us` | `-27.059%` | Performance has improved |
+| `bfs_traverse/d5_supernode/100k` | `1.6838 ms` | `-25.324%` | Performance has improved |
+| `bfs_traverse/d3_supernode/500k` | `126.29 us` | `-29.150%` | Performance has improved |
+| `bfs_traverse/d5_supernode/2M_panama` | `17.474 ms` | `-11.761%` | Performance has improved |
+| `graph_construction/build/500k` | `116.45 ms` | `-45.780%` | Performance has improved |
+| `bfs_overlay_paths/sparse_overlay_d3` | `90.232 us` | `-29.218%` | Performance has improved |
+| `bfs_filter_index_paths/score_gte_50_d3/dense_100pct` | `20.674 us` | `-27.431%` | Performance has improved |
+
+## G1 Result
+
+The public-exposure gate in `todo/build-sequence.md` is satisfied. Phase 2 may
+begin only from the documented read-only GQL subset: no GQL writes,
+relationship source-row hydration, raw path values, path functions, aggregates,
+`OPTIONAL MATCH`, `WITH`, full GQL, SQL/PGQ, Cypher, Gremlin, or SPARQL support
+is implied by this gate.

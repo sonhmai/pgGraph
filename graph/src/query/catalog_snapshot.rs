@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{RegisteredEdge, RegisteredTable};
-use crate::catalog::{catalog_fingerprint, read_catalog, table_oid_from_name};
+use crate::catalog::{read_catalog, table_oid_from_name};
 use crate::gql::errors::{GqlError, Span};
 use crate::safety::GraphResult;
 
@@ -55,7 +55,6 @@ pub(crate) trait CatalogSnapshot {
 pub(crate) struct CatalogSnapshotImpl {
     labels: HashMap<String, LabelEntry>,
     rels: Vec<RelTypeInfo>,
-    fingerprint: u64,
 }
 
 impl CatalogSnapshotImpl {
@@ -66,20 +65,10 @@ impl CatalogSnapshotImpl {
     /// Returns [`crate::safety::GraphError`] when catalog reads or relation OID
     /// resolution fail.
     pub(crate) fn load() -> GraphResult<Self> {
-        let (tables, edges, filter_columns) = read_catalog()?;
-        let fingerprint = catalog_fingerprint(&tables, &edges, &filter_columns);
+        let (tables, edges, _filter_columns) = read_catalog()?;
         let labels = load_labels(&tables)?;
         let rels = load_rels(&tables, &edges)?;
-        Ok(Self {
-            labels,
-            rels,
-            fingerprint,
-        })
-    }
-
-    /// Catalog fingerprint captured when this snapshot was loaded.
-    pub(crate) fn fingerprint(&self) -> u64 {
-        self.fingerprint
+        Ok(Self { labels, rels })
     }
 }
 

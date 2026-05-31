@@ -44,7 +44,6 @@ pub(crate) use std::time::Duration;
 mod admin;
 mod components;
 mod discovery;
-#[cfg(feature = "development")]
 mod gql;
 mod runtime;
 mod search;
