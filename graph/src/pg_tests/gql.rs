@@ -67,6 +67,49 @@ fn gql_single_directed_match_matches_traverse_fixture() {
 }
 
 #[pg_test]
+fn gql_binds_dynamic_edge_labels_from_registered_label_column() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "ALTER TABLE public.graph_test_friendships_pgtest
+         ADD COLUMN rel_type text NOT NULL DEFAULT 'colleague'",
+    )
+    .expect("add dynamic relationship label column failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                from_table := 'graph_test_friendships_pgtest'::regclass,
+                from_column := 'user_id',
+                to_table := 'graph_test_users_pgtest'::regclass,
+                to_column := 'friend_id',
+                label := 'related_to',
+                bidirectional := false,
+                label_column := 'rel_type'
+            )",
+    )
+    .expect("add dynamic friendship edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build dynamic relationship graph failed");
+
+    let count = Spi::get_one::<i64>(
+        "SELECT count(*)::bigint
+         FROM graph.gql(
+            'MATCH (u:graph_test_users_pgtest)-[:colleague]->(v:graph_test_users_pgtest)
+             RETURN u.id AS source, v.id AS target'
+         )",
+    )
+    .expect("dynamic GQL relationship query failed")
+    .unwrap_or_default();
+
+    assert_eq!(count, 1);
+}
+
+#[pg_test]
 fn gql_defaults_to_hydrated_nodes_and_projects_ids_explicitly() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

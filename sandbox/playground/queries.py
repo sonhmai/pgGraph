@@ -94,7 +94,7 @@ FROM graph.shortest_path(
 ORDER BY step;""",
             "GQL One-Hop Relationships": """SELECT row
 FROM graph.gql(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    WHERE source.node_id = $seed
      AND target.node_id = $target
    RETURN source.node_id AS source_id,
@@ -103,17 +103,16 @@ FROM graph.gql(
           target.label AS target_label
    ORDER BY target_id
    LIMIT 1',
-  params := '{"seed":"54662","target":"147079"}'::jsonb
+  params := '{"seed":"23000018","target":"11012822"}'::jsonb
 );""",
             "GQL Aggregated Neighbors": """SELECT row
 FROM graph.gql(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
-   WHERE source.node_id = $seed
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    RETURN count(*) AS direct_links',
-  params := '{"seed":"54662"}'::jsonb
+  params := '{}'::jsonb
 );""",
             "GQL Explain": """SELECT graph.gql_explain(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    WHERE source.node_id = $seed
    RETURN source.node_id AS source_id, target.node_id AS target_id
    ORDER BY target_id

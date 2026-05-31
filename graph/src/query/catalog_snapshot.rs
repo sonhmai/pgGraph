@@ -3,8 +3,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builder::{RegisteredEdge, RegisteredTable};
-use crate::catalog::{read_catalog, table_oid_from_name};
+use crate::catalog::{read_catalog, sql_table_name_from_catalog, table_oid_from_name};
 use crate::gql::errors::{GqlError, Span};
+use crate::quote::quote_ident;
 use crate::safety::GraphResult;
 
 #[derive(Debug, Clone)]
@@ -229,22 +230,79 @@ fn load_rels(
         };
         let source_table_oid = table_oid_from_name(from_node_table)?;
         let target_table_oid = table_oid_from_name(&edge.to_table)?;
-        rels.push(RelTypeInfo {
-            rel_type: edge.label.clone(),
-            from_table_oid: source_table_oid,
-            to_table_oid: target_table_oid,
-            edge_mapping: edge_mapping.clone(),
-        });
-        if edge.bidirectional {
+        for rel_type in relationship_type_names(edge)? {
             rels.push(RelTypeInfo {
-                rel_type: edge.label.clone(),
-                from_table_oid: target_table_oid,
-                to_table_oid: source_table_oid,
-                edge_mapping,
+                rel_type: rel_type.clone(),
+                from_table_oid: source_table_oid,
+                to_table_oid: target_table_oid,
+                edge_mapping: edge_mapping.clone(),
             });
+            if edge.bidirectional {
+                rels.push(RelTypeInfo {
+                    rel_type,
+                    from_table_oid: target_table_oid,
+                    to_table_oid: source_table_oid,
+                    edge_mapping: edge_mapping.clone(),
+                });
+            }
         }
     }
     Ok(rels)
+}
+
+fn relationship_type_names(edge: &RegisteredEdge) -> GraphResult<Vec<String>> {
+    let Some(label_column) = edge.label_column.as_deref() else {
+        return Ok(vec![edge.label.clone()]);
+    };
+    let edge_table = sql_table_name_from_catalog(&edge.from_table)?;
+    let label_expr = quote_ident(label_column);
+    let query = format!(
+        "SELECT DISTINCT COALESCE(NULLIF(BTRIM({label_expr}::text), ''), $1)
+         FROM {}
+         ORDER BY 1",
+        edge_table.as_sql()
+    );
+    pgrx::Spi::connect(|client| {
+        let rows = client
+            .select(&query, None, &[edge.label.clone().into()])
+            .map_err(|err| {
+                crate::safety::GraphError::Internal(format!(
+                    "dynamic relationship label read failed for {}.{}: {err}",
+                    edge.from_table, label_column
+                ))
+            })?;
+        let mut labels = Vec::with_capacity(rows.len());
+        for row in rows {
+            let label = row.get::<String>(1).map_err(|err| {
+                crate::safety::GraphError::Internal(format!(
+                    "dynamic relationship label value read failed: {err}"
+                ))
+            })?;
+            if let Some(label) = label {
+                if gql_identifier_from_text(&label).is_some() {
+                    labels.push(label);
+                }
+            }
+        }
+        if labels.is_empty() && gql_identifier_from_text(&edge.label).is_some() {
+            labels.push(edge.label.clone());
+        }
+        Ok(labels)
+    })
+}
+
+fn gql_identifier_from_text(text: &str) -> Option<String> {
+    let first = text.bytes().next()?;
+    if text.is_empty()
+        || text.starts_with('"')
+        || !(first == b'_' || first.is_ascii_alphabetic())
+        || !text
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
@@ -290,17 +348,7 @@ fn edge_source_fk_table_oid(edge: &RegisteredEdge) -> GraphResult<Option<u32>> {
 
 fn gql_label_from_regclass(regclass: &str) -> Option<String> {
     let label = regclass.rsplit('.').next()?;
-    let first = label.bytes().next()?;
-    if label.is_empty()
-        || label.starts_with('"')
-        || !(first == b'_' || first.is_ascii_alphabetic())
-        || !label
-            .bytes()
-            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(label.to_string())
+    gql_identifier_from_text(label)
 }
 
 /// In-memory catalog used by binder unit tests.

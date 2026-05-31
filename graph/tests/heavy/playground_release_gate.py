@@ -21,7 +21,7 @@ from queries import QUERY_QUESTIONS, query_catalog  # noqa: E402
 
 EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
     "Status + Catalog": [
-        {"hash": "f33c0357e2a340c3d5f0b83156e42a3c", "row_count": 1},
+        {"hash": "d5019272452d6a9a66be8ad818f81796", "row_count": 1},
         {"hash": "181a173a49cdbb4b9100e7b8ec693411", "row_count": 1},
         {"hash": "1f56018065f8f7688f33d312b976afd9", "row_count": 1},
     ],
@@ -30,9 +30,9 @@ EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
     "Traverse Neighborhood": [{"hash": "8838da4bf5f4f4741822d8646deafe68", "row_count": 100}],
     "Expand Neighborhood": [{"hash": "625782ba027f4a5ace8308363816a3ac", "row_count": 100}],
     "Shortest Path": [{"hash": "0273f33efa04c4ba2bf45e57e703e58d", "row_count": 2}],
-    "GQL One-Hop Relationships": [{"row_count": 1}],
-    "GQL Aggregated Neighbors": [{"row_count": 1}],
-    "GQL Explain": [{"row_count": 1}],
+    "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
+    "GQL Aggregated Neighbors": [{"hash": "e17964650e3a49bd449fcb1569ac5c31", "row_count": 1}],
+    "GQL Explain": [{"hash": "8dc56777352d78061ee6152ab07c8543", "row_count": 1}],
     "Component Stats": [
         {"hash": "4d337f672574a60eaa19f44639f30553", "row_count": 1},
         {"hash": "3addbef5dca49ab0f0592d0e69be5b17", "row_count": 20},
@@ -63,9 +63,6 @@ VOLATILE_HASH_LABELS = {
     "Build Graph",
     "Build Graph Concurrently",
     "Build Status",
-    "GQL One-Hop Relationships",
-    "GQL Aggregated Neighbors",
-    "GQL Explain",
     "Sync Health",
     "Apply Sync",
     "Scheduled Maintenance",

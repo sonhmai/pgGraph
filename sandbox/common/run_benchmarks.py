@@ -963,7 +963,9 @@ def workload(dataset: str, container: str) -> list[WorkloadQuery]:
     if dataset == "panama":
         seed = scalar(container, "SELECT start_id FROM panama.edges GROUP BY start_id ORDER BY count(*) DESC LIMIT 1;")
         target = scalar(container, f"SELECT end_id FROM panama.edges WHERE start_id = {sql_literal(seed)} LIMIT 1;")
-        gql_params = json.dumps({"seed": seed})
+        gql_seed = scalar(container, "SELECT start_id FROM panama.edges WHERE rel_type = 'same_intermediary_as' ORDER BY start_id, end_id LIMIT 1;")
+        gql_target = scalar(container, f"SELECT end_id FROM panama.edges WHERE rel_type = 'same_intermediary_as' AND start_id = {sql_literal(gql_seed)} ORDER BY end_id LIMIT 1;")
+        gql_params = json.dumps({"seed": gql_seed, "target": gql_target})
         status_sql = f"""
 WITH warm AS MATERIALIZED (
   SELECT count(*) AS rows_seen
@@ -982,8 +984,9 @@ FROM warm, graph.status() s
                 "What is the GQL overhead for a one-hop scalar projection over the built graph?",
                 f"""SELECT row
 FROM graph.gql(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    WHERE source.node_id = $seed
+     AND target.node_id = $target
    RETURN source.node_id AS source_id,
           target.node_id AS target_id,
           target.name AS target_name
@@ -997,8 +1000,9 @@ FROM graph.gql(
                 "What is the GQL overhead when returning hydrated source-row node objects?",
                 f"""SELECT row
 FROM graph.gql(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    WHERE source.node_id = $seed
+     AND target.node_id = $target
    RETURN source, target
    ORDER BY target.node_id
    LIMIT 50',
@@ -1010,8 +1014,9 @@ FROM graph.gql(
                 "What is the GQL overhead when returning coordinate-only node objects?",
                 f"""SELECT row
 FROM graph.gql(
-  'MATCH (source:nodes)-[:related_to]->(target:nodes)
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    WHERE source.node_id = $seed
+     AND target.node_id = $target
    RETURN source, target
    ORDER BY target.node_id
    LIMIT 50',
@@ -1028,7 +1033,9 @@ FROM graph.gql(
 FROM panama.nodes source
 JOIN panama.edges edge ON edge.start_id = source.node_id
 JOIN panama.nodes target ON target.node_id = edge.end_id
-WHERE source.node_id = {sql_literal(seed)}
+WHERE source.node_id = {sql_literal(gql_seed)}
+  AND target.node_id = {sql_literal(gql_target)}
+  AND edge.rel_type = 'same_intermediary_as'
 ORDER BY target.node_id
 LIMIT 50""",
             ),
@@ -1038,8 +1045,9 @@ LIMIT 50""",
                 f"""SELECT node_table_name, node_id, depth
 FROM graph.traverse(
   'panama.nodes'::regclass,
-  {sql_literal(seed)},
+  {sql_literal(gql_seed)},
   1,
+  edge_types := ARRAY['same_intermediary_as'],
   hydrate := false,
   max_rows := 50
 )
