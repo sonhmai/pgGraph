@@ -504,8 +504,9 @@ Phase gates:
 - Phase 2: GQL writes update PostgreSQL first, then transaction-local overlay
   state. Current internal edge-overlay lifecycle coverage proves rollback
   discard, commit cleanup, concurrent backend isolation, and query-time sync
-  catch-up for source-table writes; mapped GQL writes and crash/reload proof
-  still gate completion.
+  catch-up for source-table writes. Internal crash coverage proves uncommitted
+  transaction edge overlays are not trusted after restart while the persisted
+  base graph reloads; mapped GQL writes still gate completion.
 
 ## GQL Compatibility Matrix
 

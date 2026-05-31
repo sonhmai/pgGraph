@@ -18,6 +18,7 @@ RUN_METADATA="${RUN_METADATA:-1}"
 RUN_RSS="${RUN_RSS:-0}"
 RUN_SYNTHETIC="${RUN_SYNTHETIC:-1}"
 RUN_PLAYGROUND="${RUN_PLAYGROUND:-1}"
+RUN_TX_DELTA_CRASH="${RUN_TX_DELTA_CRASH:-0}"
 
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
   ./tests/heavy/run_pg_matrix.sh
@@ -87,6 +88,11 @@ fi
 if [[ "$RUN_CRASH" == "1" ]]; then
   : "${PGDATA:?PGDATA must point at a disposable cluster when RUN_CRASH=1}"
   DBNAME="${DB_PREFIX}_crash" PGDATA="$PGDATA" ./tests/heavy/crash_recovery.sh
+fi
+
+if [[ "$RUN_TX_DELTA_CRASH" == "1" ]]; then
+  : "${PGDATA:?PGDATA must point at a disposable cluster when RUN_TX_DELTA_CRASH=1}"
+  DBNAME="${DB_PREFIX}_tx_delta_crash" PGDATA="$PGDATA" ./tests/heavy/tx_delta_crash_recovery.sh
 fi
 
 if [[ "$RUN_DOCKER" == "1" ]]; then

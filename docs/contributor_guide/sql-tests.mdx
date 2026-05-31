@@ -52,6 +52,7 @@ clusters where the pgrx harness is not representative enough.
 | `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
 | `sqlstate_acl_boundary.sql` | SQL steps for the SQLSTATE/ACL boundary scenario; use the shell runner for assertions |
 | `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof: read-your-own-writes, rollback discard, commit cleanup, backend isolation, and trigger-sync catch-up |
+| `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash proof: uncommitted transaction overlays disappear after postmaster restart while the persisted base graph reloads |
 | `run_pgbench_sync.sh` and `pgbench_sync.sql` | Concurrent DML, trigger sync, sync apply, and post-sync query checks |
 | `crash_recovery.sh` | Persisted graph reload after postmaster kill and corrupt artifact rejection |
 | `run_memory_sanitizers.sh` | pgrx SQL suite plus optional ASan, Valgrind, and pgbench sync smoke |
@@ -75,7 +76,9 @@ clusters where the pgrx harness is not representative enough.
 Most heavy scripts accept `PG_VERSION_FEATURE=pg17`, `PG_CONFIG`, and a
 disposable database name such as `DBNAME=pggraph_boundary`. Scripts that kill or
 upgrade PostgreSQL require disposable `PGDATA` directories and document their
-required variables in the script header or argument checks.
+required variables in the script header or argument checks. Internal
+mutable-overlay scripts install the extension with `pg_test` and should be run
+only against disposable clusters or databases.
 
 ## pg_regress Smoke
 

@@ -73,6 +73,7 @@ Module-local Rust tests cover:
 | File | Scope |
 |---|---|
 | `discovery.rs` | schema and table-set discovery |
+| `gql.rs` | read-only GQL SQL facade, ACL, tenant, and internal overlay proof tests |
 | `traversal_api.rs` | traversal helpers, labels, weights, directions, strategies |
 | `traversal_paths.rs` | paths, aggregation, strict specs |
 | `filters.rs` | typed filter behavior |
@@ -153,6 +154,7 @@ Heavy suites:
 |---|---|
 | `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
 | `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof |
+| `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash/reload proof |
 | `run_pgbench_sync.sh` | Concurrent DML and trigger sync stress |
 | `crash_recovery.sh` | Persisted graph recovery and corruption rejection after postmaster kill |
 | `run_memory_sanitizers.sh` | pgrx suite plus optional ASan/Valgrind |
@@ -249,6 +251,18 @@ PG_VERSION_FEATURE=pg17 DBNAME=pggraph_crash PGDATA=/path/to/disposable/pgdata \
 
 When the instance needs custom server options, pass the same restart options
 with `POSTGRES_OPTS`, for example `POSTGRES_OPTS="-p 55433 -k /tmp"`.
+
+`tx_delta_crash_recovery.sh` uses the same disposable-cluster pattern but
+installs the extension with the internal `pg_test` surface. It opens an
+uncommitted transaction-local edge overlay, kills the postmaster, restarts the
+cluster, and verifies the persisted base graph reloads without the uncommitted
+overlay.
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash \
+  PGDATA=/path/to/disposable/pgdata ./tests/heavy/tx_delta_crash_recovery.sh
+```
 
 ### Memory And FFI Boundary
 

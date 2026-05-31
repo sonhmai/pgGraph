@@ -54,9 +54,10 @@ expansion now consumes the same overlay-aware neighbor path, with SQL-visible
 coverage for internal transaction edge inserts and deletes. The
 `tx_delta_lifecycle.sh` heavy script now proves commit cleanup, rollback
 discard, concurrent backend isolation, and trigger-sync catch-up for the
-internal transaction edge overlay path. The 2B write-proof gates remain open
-until mapped writes record deltas and crash/reload behavior proves uncommitted
-overlays are ignored end to end.
+internal transaction edge overlay path. `tx_delta_crash_recovery.sh` proves
+uncommitted transaction edge overlays are ignored after postmaster crash/reload
+while the persisted base graph reloads. The 2B write-proof gates remain open
+until mapped writes record deltas through the public write path.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 

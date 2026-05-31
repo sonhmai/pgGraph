@@ -110,11 +110,13 @@ mark-stale; upgrade if benchmarks demand).
   edge overlay path: read-your-own-writes, rollback discard, commit cleanup,
   concurrent backend isolation, and trigger-sync catch-up from source-table
   updates.
+- Added `tx_delta_crash_recovery.sh` heavy coverage showing an uncommitted
+  transaction edge overlay disappears after postmaster crash/reload while the
+  persisted base graph still reloads.
 - Exposed projection mode and empty transaction-delta counters through
   `graph.status()` and `graph.sync_health()`.
 - Remaining 2B work before write slices: route actual GQL write deltas into
-  `TxGraphDelta` and prove crash/reload ignores uncommitted overlays end to
-  end.
+  `TxGraphDelta` through the public write path.
 
 ## 4. Transaction callbacks (slice 2B) — NEW infrastructure
 
