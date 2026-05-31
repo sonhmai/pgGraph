@@ -172,6 +172,15 @@ arrays and objects keep their JSON shape. Missing JSONB keys project as JSON
 rejects dotted paths whose base column is not `jsonb`. JSONB path writes remain
 Phase 4 work.
 
+Status note, 2026-05-31: 3G is closed for the internal typed SQL/PGQ adapter
+seam. The adapter lives inside `graph/src/query/`, does not parse SQL text, and
+lowers PostgreSQL-owned typed pattern shapes through the shared GQL AST and
+binder path. The success corpus covers node-only reads, optional
+single-relationship reads, projections, aliases, path functions, aggregates,
+ordering, pagination, and `DISTINCT`. The rejection corpus covers out-of-matrix
+optional node-only patterns and invalid relationship ranges. Public SQL/PGQ API
+exposure remains deferred until PostgreSQL provides stable graph-pattern hooks.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |

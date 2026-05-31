@@ -388,6 +388,10 @@ SQLSTATE, tenant, and type-mapping decisions are implemented.
    read planner.
 2. Add SQL/PGQ adapters once the shared IR is stable.
 
+Phase 3 status, 2026-05-31: the advanced read slices are closed for the current
+single-pattern planner, and the internal typed SQL/PGQ adapter seam is present.
+SQL/PGQ remains non-public until PostgreSQL exposes stable graph-pattern hooks.
+
 ### Phase 4: Advanced GQL Writes And Optional Compatibility
 
 1. Add advanced write semantics such as `REMOVE`, `DETACH DELETE`, and `MERGE`
@@ -532,11 +536,12 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `RETURN` raw paths and path functions | phase_3 | supported | supported | supported | supported | Bounded named relationship paths and `nodes`, `relationships`, `length` are supported; standalone path variables remain later work. |
 | `ORDER BY`, `SKIP`, `LIMIT` | phase_1 | supported | supported | supported | supported | Hard row limits still apply. |
 | Bounded variable-length relationships | phase_1 | supported | supported | supported | supported | Requires explicit max bounds; variable-length relationship return is rejected. |
-| `OPTIONAL MATCH` | phase_3 | required | required | required | required | Needs null-extension semantics. |
+| `OPTIONAL MATCH` | phase_3 | supported | supported | supported | supported | Top-level single-relationship optional matches are supported; node-only optional matches and post-`WITH` optional joins remain later multi-pattern work. |
 | `WITH` | phase_3 | supported | supported | supported | supported | Projection-stage `WITH` is supported; aggregate `WITH` projections remain later multi-stage row-stream work. |
 | `DISTINCT` | phase_3 | supported | supported | supported | supported | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are bounded by the GQL unique-key cap. |
 | Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect` | phase_3 | supported | supported | supported | supported | `RETURN` aggregates over node-only and single-relationship row streams; aggregate `DISTINCT` is supported. |
 | Path functions: `nodes`, `relationships`, `length` | phase_3 | supported | supported | supported | supported | Supported over bounded named relationship path values in final `RETURN`. |
+| SQL/PGQ typed adapter seam | phase_3 | n/a | supported | supported | supported | Internal hook-targeted adapter only; no SQL text parser or public SQL/PGQ API. |
 | `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
 | `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |
 | `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |
@@ -617,6 +622,10 @@ frontends before either executes doubles parser/fuzz surface and risks shaping
 the IR around a speculative second consumer; PostgreSQL's own SQL/PGQ support is
 still maturing, so the adapter target is a moving spec. Keep the IR neutral but
 do not write the SQL/PGQ parser yet.
+
+Status, 2026-05-31: the internal typed adapter seam exists in
+`graph/src/query/`. It lowers eligible PostgreSQL-owned typed graph-pattern
+shapes into the shared IR. It is not a SQL parser and is not a public API.
 
 ### Q4. openCypher positioning
 

@@ -64,6 +64,26 @@ lowering entry into `graph/src/query/`, **not** a parser. A separate
 compatibility matrix tracks SQL/PGQ coverage; unmappable patterns are rejected
 with stable diagnostics.
 
+Status, 2026-05-31: the internal typed SQL/PGQ adapter seam is implemented in
+`graph/src/query/`. It accepts PostgreSQL-owned typed pattern shapes, lowers the
+supported subset into the shared GQL AST/binder path, and keeps SQL text parsing
+out of pgGraph. There is still no public SQL/PGQ API. Public exposure remains
+blocked on stable PostgreSQL graph-pattern hooks.
+
+### 5.1 SQL/PGQ Compatibility Matrix
+
+| SQL/PGQ feature area | Status | Notes |
+|---|---|---|
+| Node pattern | supported | Typed adapter lowers a labeled node pattern into the shared node-scan IR. |
+| Single relationship pattern | supported | Typed adapter lowers one labeled relationship pattern into the shared read IR. |
+| Optional relationship pattern | supported | Maps to the same null-extension plan used by GQL `OPTIONAL MATCH`. |
+| Projection and ordering | supported | Return items, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, and `LIMIT` lower through the shared binder. |
+| Aggregates | supported | `count`, `sum`, `avg`, `min`, `max`, and `collect` lower through the shared binder. |
+| Predicates | deferred | Typed predicate lowering waits for stable PostgreSQL hook semantics. |
+| `GRAPH_TABLE` SQL text | not_exposed | PostgreSQL owns SQL parsing; pgGraph exposes no SQL/PGQ parser or SQL API. |
+| SQL/PGQ DDL | not_exposed | `CREATE PROPERTY GRAPH` and catalog ownership remain PostgreSQL concerns. |
+| Multi-pattern joins | deferred | Requires the later multi-stage row-stream join planner before adapter exposure. |
+
 ## 6. PR slices (TDD order)
 
 - **3A — `WITH` + scope chain.** Binder scope stack; multi-stage projection.
@@ -119,5 +139,12 @@ with stable diagnostics.
   non-JSONB base columns. JSONB path writes are intentionally deferred to the
   Phase 4 write-path slices.
 - **3G — SQL/PGQ adapter.** Success + rejection corpus; own compatibility matrix.
+
+  Status, 2026-05-31: closed for the internal typed adapter seam. The success
+  corpus covers node-only reads, optional single-relationship reads,
+  projections, aliases, path functions, aggregates, ordering, pagination, and
+  `DISTINCT`. The rejection corpus covers out-of-matrix optional node-only
+  patterns and invalid relationship ranges. The compatibility matrix above is
+  the authoritative Phase 3G status; public SQL/PGQ exposure remains deferred.
 
 Benchmark gate unchanged: existing CSR traversal must not regress.

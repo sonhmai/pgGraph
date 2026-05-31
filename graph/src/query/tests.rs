@@ -5,6 +5,11 @@ use super::lower::{lower, lower_statement};
 use super::physical_plan::ReturnSlot;
 use super::semantics::bind;
 use super::semantics::bind_statement;
+use super::sqlpgq_adapter::{
+    lower_read as lower_sqlpgq_read, SqlPgqAggregateArg, SqlPgqAggregateFunc, SqlPgqDirection,
+    SqlPgqNodePattern, SqlPgqRead, SqlPgqRelationshipPattern, SqlPgqReturnExpr, SqlPgqReturnItem,
+    SqlPgqSortItem, SqlPgqSortKey, COMPATIBILITY_MATRIX,
+};
 use super::value::{project_node_rows, project_rows, HydratedRows, QueryParams};
 use crate::edge_store::{EdgeStore, RawEdge};
 use crate::engine::Engine;
@@ -137,6 +142,351 @@ fn binder_accepts_delete_for_mapped_edge_row() {
     assert_eq!(delete.edge.source_column, "user_id");
     assert_eq!(delete.edge.target_column, "friend_id");
     assert_eq!(delete.returns.len(), 2);
+}
+
+#[test]
+fn sqlpgq_adapter_lowers_node_pattern_into_shared_ir() {
+    let read = SqlPgqRead {
+        source: SqlPgqNodePattern {
+            var: "u".to_string(),
+            label: "users".to_string(),
+        },
+        relationship: None,
+        optional: false,
+        returns: vec![
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Property {
+                    var: "u".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: Some("name".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Count,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::All,
+                },
+                alias: Some("total".to_string()),
+            },
+        ],
+        distinct: false,
+        order_by: vec![SqlPgqSortItem {
+            key: SqlPgqSortKey::Alias("name".to_string()),
+            desc: false,
+        }],
+        skip: None,
+        limit: Some(10),
+    };
+
+    let logical = lower_sqlpgq_read(&read, &fake_catalog()).unwrap();
+
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = logical else {
+        panic!("expected SQL/PGQ node pattern to lower into node scan");
+    };
+    assert_eq!(scan.node.var, "u");
+    assert_eq!(scan.node.label, "users");
+    assert_eq!(scan.returns.len(), 2);
+    assert_eq!(scan.limit, Some(10));
+}
+
+#[test]
+fn sqlpgq_adapter_lowers_relationship_pattern_into_shared_ir() {
+    let read = SqlPgqRead {
+        source: SqlPgqNodePattern {
+            var: "u".to_string(),
+            label: "users".to_string(),
+        },
+        relationship: Some((
+            SqlPgqRelationshipPattern {
+                var: Some("r".to_string()),
+                rel_type: "works_at".to_string(),
+                direction: SqlPgqDirection::Out,
+                hops: Some((1, 2)),
+            },
+            SqlPgqNodePattern {
+                var: "c".to_string(),
+                label: "companies".to_string(),
+            },
+        )),
+        optional: true,
+        returns: vec![
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Var("u".to_string()),
+                alias: None,
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Property {
+                    var: "u".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: Some("name".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::PathFunction {
+                    name: "length".to_string(),
+                    arg: "r".to_string(),
+                },
+                alias: Some("hops".to_string()),
+            },
+        ],
+        distinct: true,
+        order_by: vec![SqlPgqSortItem {
+            key: SqlPgqSortKey::Alias("name".to_string()),
+            desc: true,
+        }],
+        skip: Some(1),
+        limit: Some(5),
+    };
+
+    let logical = lower_sqlpgq_read(&read, &fake_catalog()).unwrap();
+
+    let super::logical_plan::LogicalStatement::Read(plan) = logical else {
+        panic!("expected SQL/PGQ relationship pattern to lower into read plan");
+    };
+    assert!(plan.optional);
+    assert!(plan.distinct);
+    assert_eq!(plan.relationship.var.as_deref(), Some("r"));
+    assert_eq!(plan.relationship.hops.max, 2);
+    assert_eq!(plan.order_by.len(), 1);
+}
+
+#[test]
+fn sqlpgq_adapter_lowers_direction_and_property_sort_variants() {
+    for (source_label, target_label, direction, expected) in [
+        (
+            "companies",
+            "users",
+            SqlPgqDirection::In,
+            super::logical_plan::BoundDirection::In,
+        ),
+        (
+            "users",
+            "companies",
+            SqlPgqDirection::Undirected,
+            super::logical_plan::BoundDirection::Undirected,
+        ),
+    ] {
+        let read = SqlPgqRead {
+            source: SqlPgqNodePattern {
+                var: "u".to_string(),
+                label: source_label.to_string(),
+            },
+            relationship: Some((
+                SqlPgqRelationshipPattern {
+                    var: Some("r".to_string()),
+                    rel_type: "works_at".to_string(),
+                    direction,
+                    hops: None,
+                },
+                SqlPgqNodePattern {
+                    var: "c".to_string(),
+                    label: target_label.to_string(),
+                },
+            )),
+            optional: false,
+            returns: vec![SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Property {
+                    var: "c".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: Some("company".to_string()),
+            }],
+            distinct: false,
+            order_by: vec![SqlPgqSortItem {
+                key: SqlPgqSortKey::Property {
+                    var: "u".to_string(),
+                    property: "name".to_string(),
+                },
+                desc: false,
+            }],
+            skip: None,
+            limit: None,
+        };
+
+        let logical = lower_sqlpgq_read(&read, &fake_catalog()).unwrap();
+
+        let super::logical_plan::LogicalStatement::Read(plan) = logical else {
+            panic!("expected SQL/PGQ relationship pattern to lower into read plan");
+        };
+        assert_eq!(plan.relationship.direction, expected);
+        assert!(matches!(
+            plan.order_by.first().map(|sort| &sort.key),
+            Some(super::logical_plan::SortBindingKey::Property {
+                side: super::logical_plan::BindingSide::Source,
+                property
+            }) if property == "name"
+        ));
+    }
+}
+
+#[test]
+fn sqlpgq_adapter_lowers_all_supported_aggregate_variants() {
+    let read = SqlPgqRead {
+        source: SqlPgqNodePattern {
+            var: "u".to_string(),
+            label: "users".to_string(),
+        },
+        relationship: None,
+        optional: false,
+        returns: vec![
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Count,
+                    distinct: true,
+                    arg: SqlPgqAggregateArg::All,
+                },
+                alias: Some("count_rows".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Count,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Var("u".to_string()),
+                },
+                alias: Some("count_users".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Sum,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Property {
+                        var: "u".to_string(),
+                        property: "age".to_string(),
+                    },
+                },
+                alias: Some("sum_age".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Avg,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Property {
+                        var: "u".to_string(),
+                        property: "age".to_string(),
+                    },
+                },
+                alias: Some("avg_age".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Min,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Property {
+                        var: "u".to_string(),
+                        property: "name".to_string(),
+                    },
+                },
+                alias: Some("min_name".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Max,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Property {
+                        var: "u".to_string(),
+                        property: "name".to_string(),
+                    },
+                },
+                alias: Some("max_name".to_string()),
+            },
+            SqlPgqReturnItem {
+                expr: SqlPgqReturnExpr::Aggregate {
+                    func: SqlPgqAggregateFunc::Collect,
+                    distinct: false,
+                    arg: SqlPgqAggregateArg::Property {
+                        var: "u".to_string(),
+                        property: "name".to_string(),
+                    },
+                },
+                alias: Some("names".to_string()),
+            },
+        ],
+        distinct: false,
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    };
+
+    let logical = lower_sqlpgq_read(&read, &fake_catalog()).unwrap();
+
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = logical else {
+        panic!("expected SQL/PGQ aggregate pattern to lower into node scan");
+    };
+    let aggregate_funcs = scan
+        .returns
+        .iter()
+        .map(|binding| match binding {
+            super::logical_plan::ReturnBinding::Aggregate { func, .. } => *func,
+            other => panic!("expected aggregate binding, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aggregate_funcs,
+        vec![
+            super::logical_plan::AggregateFunc::Count,
+            super::logical_plan::AggregateFunc::Count,
+            super::logical_plan::AggregateFunc::Sum,
+            super::logical_plan::AggregateFunc::Avg,
+            super::logical_plan::AggregateFunc::Min,
+            super::logical_plan::AggregateFunc::Max,
+            super::logical_plan::AggregateFunc::Collect,
+        ]
+    );
+}
+
+#[test]
+fn sqlpgq_adapter_rejects_out_of_matrix_patterns() {
+    let optional_node = SqlPgqRead {
+        source: SqlPgqNodePattern {
+            var: "u".to_string(),
+            label: "users".to_string(),
+        },
+        relationship: None,
+        optional: true,
+        returns: vec![SqlPgqReturnItem {
+            expr: SqlPgqReturnExpr::Var("u".to_string()),
+            alias: None,
+        }],
+        distinct: false,
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    };
+    let err = lower_sqlpgq_read(&optional_node, &fake_catalog()).unwrap_err();
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+
+    let zero_hop = SqlPgqRead {
+        relationship: Some((
+            SqlPgqRelationshipPattern {
+                var: Some("r".to_string()),
+                rel_type: "works_at".to_string(),
+                direction: SqlPgqDirection::Out,
+                hops: Some((0, 1)),
+            },
+            SqlPgqNodePattern {
+                var: "c".to_string(),
+                label: "companies".to_string(),
+            },
+        )),
+        optional: false,
+        ..optional_node
+    };
+    let err = lower_sqlpgq_read(&zero_hop, &fake_catalog()).unwrap_err();
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+}
+
+#[test]
+fn sqlpgq_adapter_maintains_own_compatibility_matrix() {
+    assert!(COMPATIBILITY_MATRIX
+        .iter()
+        .any(|row| row.feature == "single relationship pattern" && row.status == "supported"));
+    assert!(COMPATIBILITY_MATRIX
+        .iter()
+        .any(|row| row.feature == "GRAPH_TABLE SQL text" && row.status != "supported"));
+    assert!(COMPATIBILITY_MATRIX
+        .iter()
+        .any(|row| row.feature == "predicates" && row.status == "deferred"));
 }
 
 #[test]

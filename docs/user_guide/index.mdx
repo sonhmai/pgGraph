@@ -10,8 +10,9 @@ bounded traversal, path reconstruction, persistence, and maintenance behind the
 
 <Callout type="info">
 The current public API is PostgreSQL SQL functions in the `graph` schema,
-including a documented GQL-compatible subset through `graph.gql()`. SQL/PGQ
-adapters and broader graph-language coverage remain future work.
+including a documented GQL-compatible subset through `graph.gql()`. pgGraph has
+an internal SQL/PGQ adapter seam for future PostgreSQL-owned graph-pattern
+hooks, but no public SQL/PGQ API is exposed yet.
 </Callout>
 
 ## What It Does For You
