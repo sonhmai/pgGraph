@@ -30,7 +30,7 @@ fn gql_explain(query: &str) -> String {
 }
 
 /// Execute the supported GQL subset and return JSONB rows.
-#[pg_extern(schema = "graph", cost = 1000)]
+#[pg_extern(schema = "graph", cost = 1000, volatile)]
 #[allow(
     clippy::type_complexity,
     reason = "pgrx SQL ABI exposes tuple row columns"
@@ -162,9 +162,9 @@ fn insert_mapped_node(
         table_name.as_sql(),
         pk_expr
     );
-    pgrx::Spi::connect(|client| {
+    pgrx::Spi::connect_mut(|client| {
         let rows = client
-            .select(&query, None, &[pgrx::JsonB(values).into()])
+            .update(&query, None, &[pgrx::JsonB(values).into()])
             .map_err(|err| {
                 safety::GraphError::Internal(format!(
                     "GQL CREATE insert failed for {}: {}",

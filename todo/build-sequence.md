@@ -63,10 +63,10 @@ single-node mapped `CREATE` on `mutable_overlay`, performs a PostgreSQL-first
 `INSERT ... RETURNING`, returns the inserted row, rejects `csr_readonly`, and
 records a transaction-local added-node delta. SQL-visible coverage includes
 read-only projection rejection, session-tenant insertion, source-table RLS
-preservation, and unregistered-label rejection. Remaining 2C work: explicit
-rollback coverage, clarify node-delta visibility for subsequent topology reads,
-and decide whether isolated node visibility needs a node-only `MATCH` read
-slice or should wait for edge `CREATE`.
+preservation, explicit rollback/commit lifecycle behavior, and
+unregistered-label rejection. Remaining 2C work: clarify node-delta visibility
+for subsequent topology reads, and decide whether isolated node visibility needs
+a node-only `MATCH` read slice or should wait for edge `CREATE`.
 
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
