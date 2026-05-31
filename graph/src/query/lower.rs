@@ -35,26 +35,9 @@ fn lower_node_scan(plan: LogicalNodeScan) -> PhysicalNodeScan {
         order_by: plan.order_by,
         skip: plan.skip,
         limit: plan.limit,
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|slot| match slot {
-                ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
-                ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
-                ReturnBinding::Property {
-                    side,
-                    property,
-                    name,
-                } => ReturnSlot::Property {
-                    side,
-                    property,
-                    name,
-                },
-                ReturnBinding::Aggregate { func, arg, name } => {
-                    ReturnSlot::Aggregate { func, arg, name }
-                }
-            })
-            .collect(),
+        distinct_stages: lower_return_stages(plan.distinct_stages),
+        distinct: plan.distinct,
+        returns: lower_returns(plan.returns),
     }
 }
 
@@ -76,26 +59,9 @@ pub(crate) fn lower(plan: LogicalPlan) -> PhysicalPlan {
         order_by: plan.order_by,
         skip: plan.skip,
         limit: plan.limit,
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|slot| match slot {
-                ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
-                ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
-                ReturnBinding::Property {
-                    side,
-                    property,
-                    name,
-                } => ReturnSlot::Property {
-                    side,
-                    property,
-                    name,
-                },
-                ReturnBinding::Aggregate { func, arg, name } => {
-                    ReturnSlot::Aggregate { func, arg, name }
-                }
-            })
-            .collect(),
+        distinct_stages: lower_return_stages(plan.distinct_stages),
+        distinct: plan.distinct,
+        returns: lower_returns(plan.returns),
     }
 }
 
@@ -172,27 +138,42 @@ fn lower_delete_edge(plan: LogicalDeleteEdge) -> PhysicalDeleteEdge {
         target_column: plan.edge.target_column,
         bidirectional: plan.edge.bidirectional,
         predicate: plan.predicate,
-        returns: plan
-            .returns
-            .into_iter()
-            .map(|slot| match slot {
-                ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
-                ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
-                ReturnBinding::Property {
-                    side,
-                    property,
-                    name,
-                } => ReturnSlot::Property {
-                    side,
-                    property,
-                    name,
-                },
-                ReturnBinding::Aggregate { func, arg, name } => {
-                    ReturnSlot::Aggregate { func, arg, name }
-                }
-            })
-            .collect(),
+        returns: lower_returns(plan.returns),
     }
+}
+
+fn lower_return_stages(stages: Vec<Vec<ReturnBinding>>) -> Vec<Vec<ReturnSlot>> {
+    stages.into_iter().map(lower_returns).collect()
+}
+
+fn lower_returns(returns: Vec<ReturnBinding>) -> Vec<ReturnSlot> {
+    returns
+        .into_iter()
+        .map(|slot| match slot {
+            ReturnBinding::Node { side, name } => ReturnSlot::Node { side, name },
+            ReturnBinding::Relationship { name } => ReturnSlot::Relationship { name },
+            ReturnBinding::Property {
+                side,
+                property,
+                name,
+            } => ReturnSlot::Property {
+                side,
+                property,
+                name,
+            },
+            ReturnBinding::Aggregate {
+                func,
+                arg,
+                distinct,
+                name,
+            } => ReturnSlot::Aggregate {
+                func,
+                arg,
+                distinct,
+                name,
+            },
+        })
+        .collect()
 }
 
 fn literal_value_json(value: crate::gql::ast::LiteralValue) -> serde_json::Value {

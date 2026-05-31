@@ -1,5 +1,5 @@
 use super::catalog_snapshot::FakeCatalog;
-use super::execute::{execute, execute_node_scan};
+use super::execute::{execute, execute_node_scan, GqlNodeCoordinate, GqlNodeRow};
 use super::explain::explain;
 use super::lower::{lower, lower_statement};
 use super::physical_plan::ReturnSlot;
@@ -186,7 +186,6 @@ fn binder_rejects_unknown_label_and_relationship_type() {
 #[test]
 fn binder_rejects_out_of_slice_1b_shapes() {
     for query in [
-        "MATCH (u:users)-[:works_at]->(c:companies) RETURN DISTINCT u",
         "MATCH (u:users)-[:works_at*0..1]->(c:companies) RETURN u",
         "MATCH (u:users)-[:works_at*1..65]->(c:companies) RETURN u",
         "MATCH (u:users)-[:works_at]->(c:companies) RETURN u ORDER BY u",
@@ -233,13 +232,50 @@ fn binder_orders_aggregate_query_by_returned_property_expression() {
 }
 
 #[test]
-fn binder_rejects_aggregate_distinct_until_distinct_phase() {
+fn binder_accepts_distinct_return_with_and_aggregates() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WITH DISTINCT c.name AS company, c \
+         RETURN DISTINCT company, count(DISTINCT c) AS companies",
+    );
+    let physical = lower(logical);
+
+    assert!(physical.distinct);
+    assert_eq!(physical.distinct_stages.len(), 1);
+    assert_eq!(physical.distinct_stages[0].len(), 2);
+    assert!(matches!(
+        physical.returns[1],
+        ReturnSlot::Aggregate { distinct: true, .. }
+    ));
+}
+
+#[test]
+fn binder_accepts_aggregate_distinct_for_node_scan() {
     let ast = parse("MATCH (u:users) RETURN collect(DISTINCT u.name) AS names").unwrap();
 
-    let err = bind_statement(&crate::gql::ast::Statement::Read(ast), &fake_catalog()).unwrap_err();
+    let plan = bind_statement(&crate::gql::ast::Statement::Read(ast), &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = plan else {
+        panic!("expected node scan");
+    };
+
+    assert!(matches!(
+        scan.returns[0],
+        super::logical_plan::ReturnBinding::Aggregate { distinct: true, .. }
+    ));
+}
+
+#[test]
+fn binder_rejects_distinct_order_by_non_returned_property() {
+    let ast = parse(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN DISTINCT c.name AS company ORDER BY u.age",
+    )
+    .unwrap();
+
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
 
     assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
-    assert!(err.to_string().contains("aggregate DISTINCT"));
+    assert!(err.to_string().contains("DISTINCT queries must ORDER BY"));
 }
 
 #[test]
@@ -687,6 +723,27 @@ fn aggregate_projection_returns_empty_group_for_empty_input() {
 }
 
 #[test]
+fn aggregate_limit_does_not_truncate_input_rows() {
+    let logical =
+        bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN count(*) AS rows LIMIT 1");
+    let physical = lower(logical);
+    let engine = engine_fixture();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(physical.execution_row_cap(), 10_000);
+    assert!(physical.cap_exhaustion_is_error());
+    assert_eq!(projected, vec![serde_json::json!({"rows": 2})]);
+}
+
+#[test]
 fn optional_aggregate_counts_null_extended_rows_like_left_join() {
     let logical = bind_query(
         "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies) \
@@ -707,6 +764,181 @@ fn optional_aggregate_counts_null_extended_rows_like_left_join() {
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0]["source_rows"], 2);
     assert_eq!(projected[0]["matched_targets"], 1);
+}
+
+#[test]
+fn distinct_return_deduplicates_before_order_and_limit() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN DISTINCT c.name AS company ORDER BY company LIMIT 1",
+    );
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 3,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected, vec![serde_json::json!({"company": "Acme"})]);
+}
+
+#[test]
+fn with_distinct_deduplicates_input_to_later_aggregate() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WITH DISTINCT c.name AS company \
+         RETURN count(*) AS companies",
+    );
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 3,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected, vec![serde_json::json!({"companies": 2})]);
+}
+
+#[test]
+fn aggregate_distinct_deduplicates_inputs_per_group() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         RETURN count(DISTINCT c.name) AS companies, collect(DISTINCT c.name) AS names",
+    );
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 3,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["companies"], 2);
+    assert_eq!(projected[0]["names"], serde_json::json!(["Acme", "Bell"]));
+}
+
+#[test]
+fn distinct_projection_aborts_when_key_cap_is_exceeded() {
+    let ast = crate::gql::parse_statement("MATCH (u:users) RETURN DISTINCT u.name").unwrap();
+    let logical = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::physical_plan::PhysicalStatement::NodeScan(physical) = lower_statement(logical)
+    else {
+        panic!("expected node scan");
+    };
+    let rows = (0..10_001)
+        .map(|idx| GqlNodeRow {
+            node: GqlNodeCoordinate {
+                table_oid: 10,
+                node_id: format!("u{idx}"),
+            },
+        })
+        .collect::<Vec<_>>();
+    let hydrated = (0..10_001)
+        .map(|idx| {
+            (
+                (10, format!("u{idx}")),
+                serde_json::json!({"id": format!("u{idx}"), "name": format!("user-{idx}")}),
+            )
+        })
+        .collect::<HydratedRows>();
+
+    let err = project_node_rows(rows, &physical, &hydrated, &QueryParams::new(), true).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("DISTINCT key cap"));
 }
 
 #[test]

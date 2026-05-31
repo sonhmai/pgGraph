@@ -74,9 +74,10 @@ Supported read coverage:
 | Variable length | Bounded variable-length relationships with an explicit maximum |
 | Predicates | Property comparisons, null checks, membership, boolean combinations, and JSONB `$parameters` |
 | Return values | Node values, scalar properties, coordinate-only single-hop relationship identities, aggregate values, and JSON `null` for unmatched optional targets or relationships |
-| Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases and shadowing |
+| Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
+| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
-| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced |
+| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
 With `hydrate := true`, returned node values include hydrated source rows when
 the caller has source-table privileges and RLS allows the read. With
@@ -86,9 +87,10 @@ unmatched source rows for single-relationship patterns. Aggregate functions
 ignore JSON `null` inputs for `count(expr)`, `sum`, `avg`, `min`, and `max`;
 `count(*)` counts every input row, `collect` preserves values in row order, and
 aggregate-only empty inputs return one row with `0`, `null`, or `[]` according
-to the aggregate. Relationship source-row hydration, raw path values, path
-functions, aggregate `DISTINCT`, and multi-pattern optional joins are planned
-outside this subset.
+to the aggregate. `DISTINCT` query forms abort if their unique-key working set
+exceeds the GQL result cap. Relationship source-row hydration, raw path values,
+path functions, aggregate `WITH` projections, and multi-pattern optional joins
+are planned outside this subset.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on

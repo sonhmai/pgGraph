@@ -1,6 +1,6 @@
 //! JSON value projection and hydrated predicate evaluation for GQL rows.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::safety::{GraphError, GraphResult};
 
@@ -8,7 +8,7 @@ use super::execute::{GqlNodeCoordinate, GqlNodeRow, GqlRow};
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, Predicate, SortBindingKey, ValueExpr,
 };
-use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot};
+use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, ReturnSlot, MAX_GQL_DISTINCT_KEYS};
 
 /// Hydrated source rows keyed by graph coordinate.
 pub(crate) type HydratedRows = HashMap<(u32, String), serde_json::Value>;
@@ -30,9 +30,13 @@ pub(crate) fn project_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
-    let rows = collect_projectable_rows(rows, plan, hydrated, params)?;
+    let mut rows = collect_projectable_rows(rows, plan, hydrated, params)?;
+    apply_distinct_stages_to_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
         let mut projected = aggregate_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        if plan.distinct {
+            dedup_projected_rows(&mut projected)?;
+        }
         sort_and_window(&mut projected, plan.skip, plan.limit);
         return Ok(projected.into_iter().map(|row| row.row).collect());
     }
@@ -43,6 +47,9 @@ pub(crate) fn project_rows(
             row: project_row(&row, plan, hydrated, hydrate_nodes),
             sort_values: sort_values(&row, plan, hydrated, params)?,
         });
+    }
+    if plan.distinct {
+        dedup_projected_rows(&mut projected)?;
     }
     sort_and_window(&mut projected, plan.skip, plan.limit);
     Ok(projected.into_iter().map(|row| row.row).collect())
@@ -142,9 +149,13 @@ pub(crate) fn project_node_rows(
             rows.push(row);
         }
     }
+    apply_distinct_stages_to_node_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
     if plan.returns.iter().any(ReturnSlot::is_aggregate) {
         let mut projected =
             aggregate_node_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        if plan.distinct {
+            dedup_projected_rows(&mut projected)?;
+        }
         sort_and_window(&mut projected, plan.skip, plan.limit);
         return Ok(projected.into_iter().map(|row| row.row).collect());
     }
@@ -156,8 +167,88 @@ pub(crate) fn project_node_rows(
             sort_values: sort_values_for_node(&row, plan, hydrated, params)?,
         });
     }
+    if plan.distinct {
+        dedup_projected_rows(&mut projected)?;
+    }
     sort_and_window(&mut projected, plan.skip, plan.limit);
     Ok(projected.into_iter().map(|row| row.row).collect())
+}
+
+fn apply_distinct_stages_to_rows(
+    rows: &mut Vec<GqlRow>,
+    plan: &PhysicalPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<()> {
+    for stage in &plan.distinct_stages {
+        dedup_by_slots(rows, stage, |row, slot| {
+            project_slot_value(row, slot, plan, hydrated, hydrate_nodes)
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_distinct_stages_to_node_rows(
+    rows: &mut Vec<GqlNodeRow>,
+    plan: &PhysicalNodeScan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<()> {
+    for stage in &plan.distinct_stages {
+        dedup_by_slots(rows, stage, |row, slot| {
+            project_node_slot_value(row, slot, plan, hydrated, hydrate_nodes)
+        })?;
+    }
+    Ok(())
+}
+
+fn dedup_by_slots<Row, KeyValue>(
+    rows: &mut Vec<Row>,
+    slots: &[ReturnSlot],
+    key_value: KeyValue,
+) -> GraphResult<()>
+where
+    KeyValue: Fn(&Row, &ReturnSlot) -> GraphResult<serde_json::Value>,
+{
+    let mut seen = HashSet::with_capacity(rows.len().min(MAX_GQL_DISTINCT_KEYS));
+    let mut deduped = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        let key_values = slots
+            .iter()
+            .map(|slot| key_value(&row, slot))
+            .collect::<GraphResult<Vec<_>>>()?;
+        if insert_distinct_key(&mut seen, serde_json::Value::Array(key_values))? {
+            deduped.push(row);
+        }
+    }
+    *rows = deduped;
+    Ok(())
+}
+
+fn dedup_projected_rows(projected: &mut Vec<ProjectedRow>) -> GraphResult<()> {
+    let mut seen = HashSet::with_capacity(projected.len().min(MAX_GQL_DISTINCT_KEYS));
+    let mut deduped = Vec::with_capacity(projected.len());
+    for row in projected.drain(..) {
+        if insert_distinct_key(&mut seen, row.row.clone())? {
+            deduped.push(row);
+        }
+    }
+    *projected = deduped;
+    Ok(())
+}
+
+fn insert_distinct_key(seen: &mut HashSet<String>, value: serde_json::Value) -> GraphResult<bool> {
+    let key = value.to_string();
+    if seen.contains(&key) {
+        return Ok(false);
+    }
+    if seen.len() >= MAX_GQL_DISTINCT_KEYS {
+        return Err(GraphError::GqlExecution {
+            reason: format!("GQL DISTINCT key cap exceeded ({MAX_GQL_DISTINCT_KEYS})"),
+        });
+    }
+    seen.insert(key);
+    Ok(true)
 }
 
 fn sort_and_window(projected: &mut Vec<ProjectedRow>, skip: Option<u64>, limit: Option<u64>) {
@@ -306,12 +397,32 @@ struct AggregateGroup {
 
 #[derive(Debug)]
 enum AggregateState {
-    Count { count: u64 },
-    Sum { sum: f64, seen: bool },
-    Avg { sum: f64, count: u64 },
-    Min { value: Option<serde_json::Value> },
-    Max { value: Option<serde_json::Value> },
-    Collect { values: Vec<serde_json::Value> },
+    Count {
+        count: u64,
+        distinct: Option<HashSet<String>>,
+    },
+    Sum {
+        sum: f64,
+        seen: bool,
+        distinct: Option<HashSet<String>>,
+    },
+    Avg {
+        sum: f64,
+        count: u64,
+        distinct: Option<HashSet<String>>,
+    },
+    Min {
+        value: Option<serde_json::Value>,
+        distinct: Option<HashSet<String>>,
+    },
+    Max {
+        value: Option<serde_json::Value>,
+        distinct: Option<HashSet<String>>,
+    },
+    Collect {
+        values: Vec<serde_json::Value>,
+        distinct: Option<HashSet<String>>,
+    },
 }
 
 impl AggregateState {
@@ -319,61 +430,116 @@ impl AggregateState {
         match slot {
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Count,
+                distinct,
                 ..
-            } => Self::Count { count: 0 },
+            } => Self::Count {
+                count: 0,
+                distinct: distinct_set(*distinct),
+            },
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Sum,
+                distinct,
                 ..
             } => Self::Sum {
                 sum: 0.0,
                 seen: false,
+                distinct: distinct_set(*distinct),
             },
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Avg,
+                distinct,
                 ..
-            } => Self::Avg { sum: 0.0, count: 0 },
+            } => Self::Avg {
+                sum: 0.0,
+                count: 0,
+                distinct: distinct_set(*distinct),
+            },
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Min,
+                distinct,
                 ..
-            } => Self::Min { value: None },
+            } => Self::Min {
+                value: None,
+                distinct: distinct_set(*distinct),
+            },
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Max,
+                distinct,
                 ..
-            } => Self::Max { value: None },
+            } => Self::Max {
+                value: None,
+                distinct: distinct_set(*distinct),
+            },
             ReturnSlot::Aggregate {
                 func: AggregateFunc::Collect,
+                distinct,
                 ..
-            } => Self::Collect { values: Vec::new() },
+            } => Self::Collect {
+                values: Vec::new(),
+                distinct: distinct_set(*distinct),
+            },
             _ => unreachable!("aggregate state requires aggregate slot"),
         }
     }
 
     fn accumulate(&mut self, value: serde_json::Value) -> GraphResult<()> {
         match self {
-            Self::Count { count } => {
-                if !value.is_null() {
+            Self::Count { count, distinct } => {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
                     *count += 1;
                 }
                 Ok(())
             }
-            Self::Sum { sum, seen } => {
-                if let Some(number) = numeric_value(&value)? {
+            Self::Sum {
+                sum,
+                seen,
+                distinct,
+            } => {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
+                    let Some(number) = numeric_value(&value)? else {
+                        return Ok(());
+                    };
                     *sum += number;
                     *seen = true;
                 }
                 Ok(())
             }
-            Self::Avg { sum, count } => {
-                if let Some(number) = numeric_value(&value)? {
+            Self::Avg {
+                sum,
+                count,
+                distinct,
+            } => {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
+                    let Some(number) = numeric_value(&value)? else {
+                        return Ok(());
+                    };
                     *sum += number;
                     *count += 1;
                 }
                 Ok(())
             }
-            Self::Min { value: current } => update_extreme(current, value, false),
-            Self::Max { value: current } => update_extreme(current, value, true),
-            Self::Collect { values } => {
-                values.push(value);
+            Self::Min {
+                value: current,
+                distinct,
+            } => {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
+                    update_extreme(current, value, false)?;
+                }
+                Ok(())
+            }
+            Self::Max {
+                value: current,
+                distinct,
+            } => {
+                if accept_distinct_aggregate_value(distinct, &value, true)? {
+                    update_extreme(current, value, true)?;
+                }
+                Ok(())
+            }
+            Self::Collect { values, distinct } => {
+                if accept_distinct_aggregate_value(distinct, &value, false)? {
+                    values.push(value);
+                }
                 Ok(())
             }
         }
@@ -381,15 +547,33 @@ impl AggregateState {
 
     fn finish(&self) -> GraphResult<serde_json::Value> {
         match self {
-            Self::Count { count } => Ok(serde_json::Value::from(*count)),
-            Self::Sum { sum, seen } => number_or_null(*sum, *seen),
-            Self::Avg { sum, count } => number_or_null(*sum / (*count as f64), *count > 0),
-            Self::Min { value } | Self::Max { value } => {
+            Self::Count { count, .. } => Ok(serde_json::Value::from(*count)),
+            Self::Sum { sum, seen, .. } => number_or_null(*sum, *seen),
+            Self::Avg { sum, count, .. } => number_or_null(*sum / (*count as f64), *count > 0),
+            Self::Min { value, .. } | Self::Max { value, .. } => {
                 Ok(value.clone().unwrap_or(serde_json::Value::Null))
             }
-            Self::Collect { values } => Ok(serde_json::Value::Array(values.clone())),
+            Self::Collect { values, .. } => Ok(serde_json::Value::Array(values.clone())),
         }
     }
+}
+
+fn distinct_set(enabled: bool) -> Option<HashSet<String>> {
+    enabled.then(HashSet::new)
+}
+
+fn accept_distinct_aggregate_value(
+    distinct: &mut Option<HashSet<String>>,
+    value: &serde_json::Value,
+    skip_null: bool,
+) -> GraphResult<bool> {
+    if skip_null && value.is_null() {
+        return Ok(false);
+    }
+    let Some(seen) = distinct else {
+        return Ok(true);
+    };
+    insert_distinct_key(seen, value.clone())
 }
 
 fn numeric_value(value: &serde_json::Value) -> GraphResult<Option<f64>> {
@@ -511,6 +695,11 @@ pub(crate) fn requires_hydration(plan: &PhysicalPlan, hydrate_nodes: bool) -> bo
         || plan.predicate.is_some()
         || !plan.order_by.is_empty()
         || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan
+            .distinct_stages
+            .iter()
+            .flatten()
+            .any(return_slot_requires_hydration)
 }
 
 /// Return whether this node-scan plan requires SQL row hydration.
@@ -519,6 +708,11 @@ pub(crate) fn node_scan_requires_hydration(plan: &PhysicalNodeScan, hydrate_node
         || plan.predicate.is_some()
         || !plan.order_by.is_empty()
         || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan
+            .distinct_stages
+            .iter()
+            .flatten()
+            .any(return_slot_requires_hydration)
 }
 
 fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {

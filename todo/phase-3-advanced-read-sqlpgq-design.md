@@ -88,11 +88,17 @@ with stable diagnostics.
   single-relationship row streams. Non-aggregate return items are grouping keys;
   aggregate-only empty inputs return one output row; optional-match null rows
   participate in `count(*)` and are skipped by `count(expr)`, numeric
-  aggregates, `min`, and `max`. Aggregate `DISTINCT`, aggregate `WITH`
-  projections, and aggregate path arguments remain follow-up work for 3D and
-  the later multi-stage planner.
+  aggregates, `min`, and `max`. Aggregate `WITH` projections and aggregate path
+  arguments remain follow-up work for the later multi-stage planner.
 - **3D — `DISTINCT`.** With memory limit (DR-2 style). Tests: dedup correctness,
   over-limit abort.
+
+  Status, 2026-05-31: bounded `DISTINCT` is implemented for `RETURN DISTINCT`,
+  `WITH DISTINCT` row-stream projection stages, and aggregate `DISTINCT` over
+  the current read row streams. DISTINCT uses the GQL result cap as the
+  unique-key memory cap and aborts on over-limit results. Remaining follow-up:
+  aggregate `WITH` projections require a true multi-stage aggregation planner,
+  and path arguments require the path value model from 3E.
 - **3E — Path functions.** `nodes`/`relationships`/`length` over a stable path
   value model. Tests: path value-shape snapshots.
 - **3F — jsonb properties.** Dynamic/list/map type mapping; missing-vs-null rule.

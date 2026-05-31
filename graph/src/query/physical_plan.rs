@@ -6,6 +6,8 @@ use super::logical_plan::{
 
 /// Maximum GQL matches collected before sorting/projection.
 pub(crate) const MAX_GQL_RESULT_ROWS: usize = 10_000;
+/// Maximum unique keys a bounded DISTINCT operation may retain.
+pub(crate) const MAX_GQL_DISTINCT_KEYS: usize = MAX_GQL_RESULT_ROWS;
 
 /// Physical GQL statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +51,10 @@ pub(crate) struct PhysicalPlan {
     pub(crate) target_label: String,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnSlot>>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
@@ -143,6 +149,10 @@ pub(crate) struct PhysicalNodeScan {
     pub(crate) label: String,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnSlot>>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
@@ -202,6 +212,8 @@ pub(crate) enum ReturnSlot {
         func: AggregateFunc,
         /// Aggregate input.
         arg: AggregateArg,
+        /// Whether duplicate aggregate inputs should be ignored.
+        distinct: bool,
         /// Return column name.
         name: String,
     },
@@ -224,6 +236,10 @@ impl ReturnSlot {
     }
 }
 
+fn has_aggregate_return(returns: &[ReturnSlot]) -> bool {
+    returns.iter().any(ReturnSlot::is_aggregate)
+}
+
 impl PhysicalPlan {
     /// Table OIDs whose rows must be visible to the current SQL role.
     pub(crate) fn required_table_oids(&self) -> [u32; 2] {
@@ -232,6 +248,10 @@ impl PhysicalPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
+        if self.distinct || !self.distinct_stages.is_empty() || has_aggregate_return(&self.returns)
+        {
+            return MAX_GQL_RESULT_ROWS;
+        }
         if self.order_by.is_empty() && self.predicate.is_none() {
             if let Some(limit) = self.limit {
                 let requested = self.skip.unwrap_or(0).saturating_add(limit);
@@ -245,7 +265,12 @@ impl PhysicalPlan {
 
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
-        !self.order_by.is_empty() || self.limit.is_none() || self.predicate.is_some()
+        self.distinct
+            || !self.distinct_stages.is_empty()
+            || has_aggregate_return(&self.returns)
+            || !self.order_by.is_empty()
+            || self.limit.is_none()
+            || self.predicate.is_some()
     }
 }
 
@@ -283,6 +308,10 @@ impl PhysicalNodeScan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
+        if self.distinct || !self.distinct_stages.is_empty() || has_aggregate_return(&self.returns)
+        {
+            return MAX_GQL_RESULT_ROWS;
+        }
         if self.order_by.is_empty() && self.predicate.is_none() {
             if let Some(limit) = self.limit {
                 let requested = self.skip.unwrap_or(0).saturating_add(limit);
@@ -296,6 +325,11 @@ impl PhysicalNodeScan {
 
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
-        !self.order_by.is_empty() || self.limit.is_none() || self.predicate.is_some()
+        self.distinct
+            || !self.distinct_stages.is_empty()
+            || has_aggregate_return(&self.returns)
+            || !self.order_by.is_empty()
+            || self.limit.is_none()
+            || self.predicate.is_some()
     }
 }

@@ -409,6 +409,157 @@ fn gql_aggregates_match_sql_grouping_and_numeric_results() {
 }
 
 #[pg_test]
+fn gql_distinct_matches_sql_distinct_counts() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+         VALUES ('u3', 'Cara', 29), ('u4', 'Drew', 31)",
+    )
+    .expect("insert distinct users failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_friendships_pgtest (id, user_id, friend_id)
+         VALUES ('f2', 'u3', 'u2'), ('f3', 'u4', 'u2'), ('f4', 'u4', 'u1')",
+    )
+    .expect("insert distinct friendships failed");
+    build_friendship_fixture_graph();
+
+    let (
+        return_distinct_matches,
+        with_distinct_matches,
+        aggregate_distinct_matches,
+        collect_distinct_matches,
+        optional_null_distinct_matches,
+    ) =
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "WITH sql_names AS (
+                         SELECT jsonb_agg(name ORDER BY name) AS rows,
+                                count(*)::bigint AS name_count
+                         FROM (
+                             SELECT DISTINCT v.name AS name
+                             FROM public.graph_test_users_pgtest u
+                             JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
+                             JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id
+                         ) distinct_names
+                     ),
+                     gql_names AS (
+                         SELECT jsonb_agg(row->>'friend' ORDER BY row->>'friend') AS rows
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                              RETURN DISTINCT v.name AS friend ORDER BY friend',
+                             hydrate := true
+                         )
+                     ),
+                     with_distinct AS (
+                         SELECT (row->>'friends')::bigint AS friends
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                              WITH DISTINCT v.name AS friend
+                              RETURN count(*) AS friends',
+                             hydrate := true
+                         )
+                     ),
+                     aggregate_distinct AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                              RETURN count(DISTINCT v.name) AS friends,
+                                     collect(DISTINCT v.name) AS names',
+                             hydrate := true
+                         )
+                     ),
+                     gql_collect_names AS (
+                         SELECT jsonb_agg(value ORDER BY value) AS rows
+                         FROM aggregate_distinct,
+                              jsonb_array_elements_text(row->'names') AS value
+                     ),
+                     optional_gql AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                              RETURN count(DISTINCT v.name) AS named_friends,
+                                     collect(DISTINCT v.name) AS names',
+                             hydrate := true
+                         )
+                     ),
+                     optional_sql AS (
+                         SELECT count(DISTINCT v.name)::bigint AS named_friends,
+                                bool_or(v.name IS NULL) AS has_null
+                         FROM public.graph_test_users_pgtest u
+                         LEFT JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
+                         LEFT JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id
+                     ),
+                     optional_sql_names AS (
+                         SELECT jsonb_agg(name ORDER BY name) AS rows
+                         FROM (
+                             SELECT DISTINCT v.name AS name
+                             FROM public.graph_test_users_pgtest u
+                             LEFT JOIN public.graph_test_friendships_pgtest f ON f.user_id = u.id
+                             LEFT JOIN public.graph_test_users_pgtest v ON v.id = f.friend_id
+                             WHERE v.name IS NOT NULL
+                         ) distinct_values
+                     ),
+                     optional_gql_names AS (
+                         SELECT jsonb_agg(value ORDER BY value) AS rows
+                         FROM optional_gql,
+                              jsonb_array_elements(row->'names') AS value
+                         WHERE value <> 'null'::jsonb
+                     ),
+                     optional_gql_null AS (
+                         SELECT EXISTS (
+                             SELECT 1
+                             FROM optional_gql,
+                                  jsonb_array_elements(row->'names') AS value
+                             WHERE value = 'null'::jsonb
+                         ) AS has_null
+                     )
+                     SELECT gql_names.rows = sql_names.rows,
+                            (SELECT friends FROM with_distinct) = sql_names.name_count,
+                            (SELECT (row->>'friends')::bigint FROM aggregate_distinct)
+                                = sql_names.name_count,
+                            (SELECT rows FROM gql_collect_names) = sql_names.rows,
+                            (
+                                SELECT (row->>'named_friends')::bigint = optional_sql.named_friends
+                                       AND optional_gql_names.rows = optional_sql_names.rows
+                                       AND optional_gql_null.has_null = optional_sql.has_null
+                                FROM optional_gql, optional_sql, optional_gql_names,
+                                     optional_sql_names, optional_gql_null
+                            )
+                     FROM gql_names, sql_names",
+                    None,
+                    &[],
+                )
+                .expect("distinct comparison query failed")
+                .first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<bool>(1)
+                    .expect("return distinct equality failed")
+                    .unwrap_or(false),
+                row.get::<bool>(2)
+                    .expect("with distinct count failed")
+                    .unwrap_or(false),
+                row.get::<bool>(3)
+                    .expect("aggregate distinct count failed")
+                    .unwrap_or(false),
+                row.get::<bool>(4)
+                    .expect("collect distinct names failed")
+                    .unwrap_or(false),
+                row.get::<bool>(5)
+                    .expect("optional null distinct failed")
+                    .unwrap_or(false),
+            ))
+        })
+        .expect("distinct comparison failed");
+
+    assert!(return_distinct_matches);
+    assert!(with_distinct_matches);
+    assert!(aggregate_distinct_matches);
+    assert!(collect_distinct_matches);
+    assert!(optional_null_distinct_matches);
+}
+
+#[pg_test]
 fn gql_aggregates_return_empty_group_and_optional_null_counts() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

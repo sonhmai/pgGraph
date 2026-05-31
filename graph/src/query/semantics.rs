@@ -50,9 +50,19 @@ pub(crate) fn bind(
         &target,
     )?;
     let initial_scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
-    let scope = bind_with_clauses(&query.with_, initial_scope, &source, &target)?;
+    let BoundWith {
+        scope,
+        distinct_stages,
+    } = bind_with_clauses(&query.with_, initial_scope, &source, &target)?;
     let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
-    let order_by = bind_scoped_sort_items(&query.order_by, &returns, &scope, &source, &target)?;
+    let order_by = bind_scoped_sort_items(
+        &query.order_by,
+        &returns,
+        &scope,
+        &source,
+        &target,
+        query.return_.distinct,
+    )?;
     Ok(LogicalPlan {
         optional: query.match_.optional,
         source,
@@ -64,6 +74,8 @@ pub(crate) fn bind(
         },
         target,
         returns,
+        distinct_stages,
+        distinct: query.return_.distinct,
         predicate,
         order_by,
         skip: query.skip,
@@ -93,12 +105,24 @@ fn bind_node_scan(
     let node = bind_node(start, catalog)?;
     let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
     let initial_scope = initial_node_scope(&node);
-    let scope = bind_with_clauses(&query.with_, initial_scope, &node, &node)?;
+    let BoundWith {
+        scope,
+        distinct_stages,
+    } = bind_with_clauses(&query.with_, initial_scope, &node, &node)?;
     let returns = bind_scoped_returns(&query.return_.items, &scope, &node, &node)?;
-    let order_by = bind_scoped_sort_items(&query.order_by, &returns, &scope, &node, &node)?;
+    let order_by = bind_scoped_sort_items(
+        &query.order_by,
+        &returns,
+        &scope,
+        &node,
+        &node,
+        query.return_.distinct,
+    )?;
     Ok(LogicalNodeScan {
         node,
         returns,
+        distinct_stages,
+        distinct: query.return_.distinct,
         predicate,
         order_by,
         skip: query.skip,
@@ -273,6 +297,12 @@ fn bind_set_property(
     query: &crate::gql::ast::SetQuery,
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalSetProperty, GqlError> {
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT over SET is implemented in a later phase",
+        ));
+    }
     if query.match_.optional {
         return Err(GqlError::unsupported(
             query.match_.span,
@@ -472,21 +502,7 @@ fn resolve_relationship(
     }
 }
 
-fn reject_later_clauses(query: &crate::gql::ast::Query) -> Result<(), GqlError> {
-    for with_ in &query.with_ {
-        if with_.distinct {
-            return Err(GqlError::unsupported(
-                with_.span,
-                "WITH DISTINCT is implemented in a later phase",
-            ));
-        }
-    }
-    if query.return_.distinct {
-        return Err(GqlError::unsupported(
-            query.return_.span,
-            "RETURN DISTINCT is implemented in a later phase",
-        ));
-    }
+fn reject_later_clauses(_query: &crate::gql::ast::Query) -> Result<(), GqlError> {
     Ok(())
 }
 
@@ -572,6 +588,12 @@ enum ScopedBinding {
 
 type BindingScope = std::collections::HashMap<String, ScopedBinding>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundWith {
+    scope: BindingScope,
+    distinct_stages: Vec<Vec<ReturnBinding>>,
+}
+
 fn initial_relationship_scope(
     rel_pat: &RelPat,
     target_pat: &NodePat,
@@ -617,17 +639,60 @@ fn bind_with_clauses(
     mut scope: BindingScope,
     source: &BoundNode,
     target: &BoundNode,
-) -> Result<BindingScope, GqlError> {
+) -> Result<BoundWith, GqlError> {
+    let mut distinct_stages = Vec::new();
     for clause in clauses {
         if clause.distinct {
-            return Err(GqlError::unsupported(
-                clause.span,
-                "WITH DISTINCT is implemented in a later phase",
-            ));
+            distinct_stages.push(bind_distinct_stage(&clause.items, &scope, source, target)?);
         }
         scope = bind_projection_scope(&clause.items, &scope, source, target)?;
     }
-    Ok(scope)
+    Ok(BoundWith {
+        scope,
+        distinct_stages,
+    })
+}
+
+fn bind_distinct_stage(
+    items: &[ReturnItem],
+    scope: &BindingScope,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<Vec<ReturnBinding>, GqlError> {
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut stage = Vec::with_capacity(items.len());
+    for item in items {
+        if let ReturnExpr::Aggregate { span, .. } = item.expr {
+            return Err(GqlError::unsupported(
+                span,
+                "aggregate WITH projections require row-stream aggregation from a later read phase",
+            ));
+        }
+        let (name, scoped) = bind_scoped_item(item, scope, source, target)?;
+        if !seen.insert(name.clone()) {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{name}`"),
+            ));
+        }
+        let binding = match scoped {
+            ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
+            ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
+            ScopedBinding::Relationship { var_len: true } => {
+                return Err(GqlError::unsupported(
+                    item.span,
+                    "WITH DISTINCT relationship variables over variable-length patterns require path support",
+                ));
+            }
+            ScopedBinding::Property { side, property } => ReturnBinding::Property {
+                side,
+                property,
+                name,
+            },
+        };
+        stage.push(binding);
+    }
+    Ok(stage)
 }
 
 fn bind_projection_scope(
@@ -675,19 +740,14 @@ fn bind_scoped_returns(
             func,
             distinct,
             arg,
-            span,
+            span: _,
             ..
         } = &item.expr
         {
-            if *distinct {
-                return Err(GqlError::unsupported(
-                    *span,
-                    "aggregate DISTINCT is implemented in Phase 3D",
-                ));
-            }
             ReturnBinding::Aggregate {
                 func: bind_aggregate_func(*func),
                 arg: bind_aggregate_arg(*func, arg, scope, source, target)?,
+                distinct: *distinct,
                 name,
             }
         } else {
@@ -876,6 +936,7 @@ fn bind_scoped_sort_items(
     scope: &BindingScope,
     source: &BoundNode,
     target: &BoundNode,
+    return_distinct: bool,
 ) -> Result<Vec<SortBinding>, GqlError> {
     let has_aggregate = returns.iter().any(ReturnBinding::is_aggregate);
     items
@@ -900,6 +961,12 @@ fn bind_scoped_sort_items(
                             return Err(GqlError::unsupported(
                                 alias.span,
                                 "aggregate queries must ORDER BY returned property or aggregate aliases",
+                            ));
+                        }
+                        if return_distinct {
+                            return Err(GqlError::unsupported(
+                                alias.span,
+                                "DISTINCT queries must ORDER BY returned scalar expressions",
                             ));
                         }
                         SortBindingKey::Property {
@@ -935,6 +1002,20 @@ fn bind_scoped_sort_items(
                             ));
                         }
                     } else {
+                        if return_distinct {
+                            if let Some(binding) =
+                                returned_property_binding(returns, scope, &var.text, &property.text)
+                            {
+                                return Ok(SortBinding {
+                                    key: SortBindingKey::ReturnName(binding.name().to_string()),
+                                    desc: item.desc,
+                                });
+                            }
+                            return Err(GqlError::unsupported(
+                                item.span,
+                                "DISTINCT queries must ORDER BY returned scalar expressions",
+                            ));
+                        }
                         match scope.get(&var.text) {
                             Some(ScopedBinding::Node(side)) => {
                                 validate_property(

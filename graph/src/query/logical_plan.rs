@@ -30,6 +30,10 @@ pub(crate) struct LogicalPlan {
     pub(crate) target: BoundNode,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnBinding>>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
@@ -47,6 +51,10 @@ pub(crate) struct LogicalNodeScan {
     pub(crate) node: BoundNode,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+    /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
+    pub(crate) distinct_stages: Vec<Vec<ReturnBinding>>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
@@ -223,6 +231,8 @@ pub(crate) enum ReturnBinding {
         func: AggregateFunc,
         /// Aggregate input.
         arg: AggregateArg,
+        /// Whether duplicate aggregate inputs should be ignored.
+        distinct: bool,
         /// Return column name.
         name: String,
     },

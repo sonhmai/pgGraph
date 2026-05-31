@@ -141,9 +141,18 @@ pagination after aggregation, returns an empty aggregate group for aggregate-onl
 empty inputs, and preserves optional-match null-extension semantics for
 aggregate counts. SQL-visible coverage compares grouping and numeric aggregate
 results against equivalent PostgreSQL aggregation and covers empty-group/null
-behavior. Aggregate `DISTINCT`, aggregate `WITH` projections, and aggregate
-arguments over future path values remain deferred to the later DISTINCT and
-multi-stage row-stream planner work.
+behavior. Aggregate `WITH` projections and aggregate arguments over future path
+values remain deferred to later multi-stage row-stream planner work.
+
+Status note, 2026-05-31: 3D is closed for bounded `DISTINCT` over the current
+node-only and single-relationship row streams. `graph.gql()` supports
+`RETURN DISTINCT`, `WITH DISTINCT` row-stream deduplication before later
+projection/aggregation, and aggregate `DISTINCT` for `count`, `sum`, `avg`,
+`min`, `max`, and `collect`. DISTINCT operations use the GQL result cap as the
+unique-key working-set cap and abort rather than returning partial results when
+that cap is exceeded. SQL-visible coverage compares `RETURN DISTINCT`,
+`WITH DISTINCT`, aggregate `DISTINCT`, and `collect(DISTINCT ...)` against
+equivalent PostgreSQL results.
 
 ## Phase 4 — Advanced writes + optional openCypher
 
