@@ -67,6 +67,75 @@ fn gql_single_directed_match_matches_traverse_fixture() {
 }
 
 #[pg_test]
+fn gql_with_projection_scope_aliases_and_shadows() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_capture_helper();
+
+    let (source_name, shadowed_id, leak_denied) = Spi::connect(|client| {
+        let source_name = client
+            .select(
+                "SELECT row #>> '{person_name}'
+                 FROM graph.gql(
+                     'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                      WITH u.name AS person_name, v AS u
+                      RETURN person_name, u
+                      ORDER BY person_name',
+                     hydrate := true
+                 )",
+                None,
+                &[],
+            )
+            .expect("with alias query failed")
+            .first()
+            .get::<String>(1)
+            .expect("source name read failed")
+            .unwrap_or_default();
+        let shadowed_id = client
+            .select(
+                "SELECT row #>> '{u,_id,id}'
+                 FROM graph.gql(
+                     'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                      WITH u.name AS person_name, v AS u
+                      RETURN person_name, u
+                      ORDER BY person_name',
+                     hydrate := true
+                 )",
+                None,
+                &[],
+            )
+            .expect("with shadow query failed")
+            .first()
+            .get::<String>(1)
+            .expect("shadowed id read failed")
+            .unwrap_or_default();
+        let leak_denied = client
+            .select(
+                "SELECT public.graph_test_sql_raises(
+                     'SELECT * FROM graph.gql(
+                        ''MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                          WITH v AS person
+                          RETURN u''
+                      )'
+                 )",
+                None,
+                &[],
+            )
+            .expect("scope leak error capture failed")
+            .first()
+            .get::<bool>(1)
+            .expect("scope leak bool read failed")
+            .unwrap_or(false);
+        Ok::<_, pgrx::spi::Error>((source_name, shadowed_id, leak_denied))
+    })
+    .expect("WITH scope query failed");
+
+    assert_eq!(source_name, "Alice");
+    assert_eq!(shadowed_id, "u2");
+    assert!(leak_denied);
+}
+
+#[pg_test]
 fn gql_denies_without_select_on_bound_tables() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

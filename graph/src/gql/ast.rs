@@ -22,6 +22,8 @@ pub(crate) struct Query {
     pub(crate) match_: MatchClause,
     /// Optional `WHERE` clause.
     pub(crate) where_: Option<Expr>,
+    /// Intermediate projection clauses that define downstream scope.
+    pub(crate) with_: Vec<WithClause>,
     /// Required `RETURN` clause.
     pub(crate) return_: ReturnClause,
     /// Optional `ORDER BY` sort keys.
@@ -31,6 +33,17 @@ pub(crate) struct Query {
     /// Optional `LIMIT` row bound.
     pub(crate) limit: Option<u64>,
     /// Full query span.
+    pub(crate) span: Span,
+}
+
+/// `WITH` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WithClause {
+    /// `WITH DISTINCT`; parsed now and rejected during binding until Phase 3D.
+    pub(crate) distinct: bool,
+    /// Projected expressions visible to downstream clauses.
+    pub(crate) items: Vec<ReturnItem>,
+    /// Clause span.
     pub(crate) span: Span,
 }
 

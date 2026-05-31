@@ -106,6 +106,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_with_projection_stage() {
+        let parsed = parse("MATCH (u:users) WITH u.name AS name RETURN name ORDER BY name")
+            .expect("query should parse");
+
+        assert_eq!(parsed.with_.len(), 1);
+        assert_eq!(parsed.with_[0].items.len(), 1);
+        assert_eq!(parsed.with_[0].items[0].alias_text(), Some("name"));
+        assert_eq!(parsed.return_.items.len(), 1);
+        assert_eq!(parsed.order_by.len(), 1);
+    }
+
+    #[test]
     fn parses_create_node_statement() {
         let parsed = super::parse_statement("CREATE (u:users {id: 'u3', name: $name}) RETURN u")
             .expect("statement should parse");
@@ -173,14 +185,6 @@ mod tests {
 
         assert!(matches!(err.kind, GqlErrorKind::Syntax { .. }));
         assert!(err.to_string().contains("too many nested NOT"));
-    }
-
-    #[test]
-    fn rejects_unsupported_clause_after_return() {
-        let err =
-            parse("MATCH (a) RETURN a WITH a RETURN a").expect_err("query should reject WITH");
-
-        assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
     }
 
     #[test]

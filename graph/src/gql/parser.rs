@@ -3,7 +3,7 @@
 use super::ast::{
     CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery, Direction, Expr, Ident, Literal,
     LiteralValue, MatchClause, NodePat, Operand, Pattern, PropertyRef, Query, RelPat, ReturnClause,
-    ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen,
+    ReturnExpr, ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -81,6 +81,10 @@ impl Parser {
         } else {
             None
         };
+        let mut with_ = Vec::new();
+        while self.peek_ident_keyword("WITH") {
+            with_.push(self.parse_with_clause()?);
+        }
         let return_ = self.parse_return_clause()?;
         let order_by = if self.consume(TokKind::Order).is_some() {
             self.expect(TokKind::By, "expected BY after ORDER")?;
@@ -104,6 +108,7 @@ impl Parser {
         Ok(Query {
             match_,
             where_,
+            with_,
             return_,
             order_by,
             skip,
@@ -430,6 +435,27 @@ impl Parser {
         }
         let end = items.last().map_or(start, |item| item.span.end as usize);
         Ok(ReturnClause {
+            distinct,
+            items,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_with_clause(&mut self) -> Result<WithClause, GqlError> {
+        let start = self
+            .expect_ident_keyword("WITH", "expected WITH clause")?
+            .span
+            .start as usize;
+        let distinct = self.consume(TokKind::Distinct).is_some();
+        let mut items = Vec::new();
+        loop {
+            items.push(self.parse_return_item()?);
+            if self.consume(TokKind::Comma).is_none() {
+                break;
+            }
+        }
+        let end = items.last().map_or(start, |item| item.span.end as usize);
+        Ok(WithClause {
             distinct,
             items,
             span: Span::new(start, end),
@@ -799,14 +825,20 @@ impl Parser {
     }
 
     fn reject_known_later_clauses(&self) -> Result<(), GqlError> {
+        Ok(())
+    }
+
+    fn peek_ident_keyword(&self, keyword: &str) -> bool {
         let token = self.current();
-        if token.kind == TokKind::Ident && token.text.eq_ignore_ascii_case("WITH") {
-            Err(GqlError::unsupported(
-                token.span,
-                "WITH is planned for a later read phase",
-            ))
+        token.kind == TokKind::Ident && token.text.eq_ignore_ascii_case(keyword)
+    }
+
+    fn expect_ident_keyword(&mut self, keyword: &str, message: &str) -> Result<Token, GqlError> {
+        let token = self.advance();
+        if token.kind == TokKind::Ident && token.text.eq_ignore_ascii_case(keyword) {
+            Ok(token)
         } else {
-            Ok(())
+            Err(GqlError::syntax(token.span, message))
         }
     }
 

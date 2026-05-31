@@ -68,6 +68,12 @@ with stable diagnostics.
 
 - **3A — `WITH` + scope chain.** Binder scope stack; multi-stage projection.
   Tests: variable visibility across stages, shadowing rules, scope-leak negatives.
+
+  Status, 2026-05-31: projection-stage `WITH` is implemented for the current
+  single-pattern executor. It supports aliases, shadowing, scalar property
+  aliases, and leak-negative binding tests. `WITH ... MATCH ...` remains a
+  later multi-pattern planner task because it requires row-stream joins rather
+  than only scope rebinding.
 - **3B — `OPTIONAL MATCH`.** Null-extension. Tests vs equivalent left-outer SQL.
 - **3C — Aggregates.** `count` (exists) → `sum`/`avg`/`min`/`max`/`collect`;
   grouping. Tests: correctness vs SQL aggregation, empty-group, null handling.

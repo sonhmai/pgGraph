@@ -112,6 +112,17 @@ maintenance scheduling treats that recommendation as work to run.
 | 3F jsonb dynamic/list/map properties + missing-vs-null rule | 3C | jsonb predicate + return; type-mapping negatives |
 | 3G SQL/PGQ adapter into shared IR | 3A–3F stable IR | success + rejection corpus; own compatibility matrix |
 
+Status note, 2026-05-31: 3A is closed for projection-stage `WITH`.
+`graph.gql()` now parses `WITH` between the base `MATCH` and final `RETURN`,
+and the binder carries a downstream scope chain for node variables,
+relationship variables, and scalar property aliases. SQL-visible coverage
+includes aliases crossing the `WITH` boundary, shadowing of an existing
+variable name by a later projection, scalar property aliases through
+`ORDER BY`, and negative tests proving hidden pre-`WITH` variables do not leak
+into final `RETURN`. Post-`WITH MATCH` joins remain deferred to the later
+multi-pattern read work, where the physical planner can add row-stream joins
+instead of overloading the current single-pattern executor.
+
 ## Phase 4 — Advanced writes + optional openCypher
 
 | Slice | Depends on | Merge gate |

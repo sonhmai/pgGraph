@@ -2,7 +2,7 @@
 
 use crate::gql::ast::{
     CmpOp, Direction, Expr, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern, RelPat,
-    ReturnExpr, ReturnItem, SortItem, SortKey,
+    ReturnExpr, ReturnItem, SortItem, SortKey, WithClause,
 };
 use crate::gql::errors::{GqlError, Span};
 
@@ -49,8 +49,10 @@ pub(crate) fn bind(
         &source,
         &target,
     )?;
-    let returns = bind_returns(&query.return_.items, &source, rel_pat, &target)?;
-    let order_by = bind_sort_items(&query.order_by, &returns, &source, &target)?;
+    let initial_scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
+    let scope = bind_with_clauses(&query.with_, initial_scope, &source, &target)?;
+    let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
+    let order_by = bind_scoped_sort_items(&query.order_by, &returns, &scope, &source, &target)?;
     Ok(LogicalPlan {
         source,
         relationship: BoundRel {
@@ -83,8 +85,10 @@ fn bind_node_scan(
     }
     let node = bind_node(start, catalog)?;
     let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
-    let returns = bind_node_returns(&query.return_.items, &node)?;
-    let order_by = bind_sort_items(&query.order_by, &returns, &node, &node)?;
+    let initial_scope = initial_node_scope(&node);
+    let scope = bind_with_clauses(&query.with_, initial_scope, &node, &node)?;
+    let returns = bind_scoped_returns(&query.return_.items, &scope, &node, &node)?;
+    let order_by = bind_scoped_sort_items(&query.order_by, &returns, &scope, &node, &node)?;
     Ok(LogicalNodeScan {
         node,
         returns,
@@ -360,7 +364,8 @@ fn bind_delete_edge(
         &source,
         &target,
     )?;
-    let returns = bind_returns(&query.return_.items, &source, rel_pat, &target)?;
+    let scope = initial_relationship_scope(rel_pat, target_pat, &source, &target)?;
+    let returns = bind_scoped_returns(&query.return_.items, &scope, &source, &target)?;
     Ok(LogicalDeleteEdge {
         source,
         relationship: BoundRel {
@@ -437,6 +442,14 @@ fn resolve_relationship(
 }
 
 fn reject_later_clauses(query: &crate::gql::ast::Query) -> Result<(), GqlError> {
+    for with_ in &query.with_ {
+        if with_.distinct {
+            return Err(GqlError::unsupported(
+                with_.span,
+                "WITH DISTINCT is implemented in a later phase",
+            ));
+        }
+    }
     if query.return_.distinct {
         return Err(GqlError::unsupported(
             query.return_.span,
@@ -519,150 +532,184 @@ fn bind_node(node: &NodePat, catalog: &impl CatalogSnapshot) -> Result<BoundNode
     })
 }
 
-fn bind_returns(
-    items: &[ReturnItem],
-    source: &BoundNode,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopedBinding {
+    Node(BindingSide),
+    Relationship { var_len: bool },
+    Property { side: BindingSide, property: String },
+}
+
+type BindingScope = std::collections::HashMap<String, ScopedBinding>;
+
+fn initial_relationship_scope(
     rel_pat: &RelPat,
+    target_pat: &NodePat,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<BindingScope, GqlError> {
+    let mut scope = BindingScope::with_capacity(3);
+    scope.insert(source.var.clone(), ScopedBinding::Node(BindingSide::Source));
+    if source.var == target.var {
+        let span = target_pat
+            .var
+            .as_ref()
+            .map_or(target_pat.span, |var| var.span);
+        return Err(GqlError::bind(
+            span,
+            format!("duplicate variable `{}` in MATCH scope", target.var),
+        ));
+    }
+    scope.insert(target.var.clone(), ScopedBinding::Node(BindingSide::Target));
+    if let Some(rel_var) = &rel_pat.var {
+        if rel_var.text == source.var || rel_var.text == target.var {
+            return Err(GqlError::bind(
+                rel_var.span,
+                format!("duplicate variable `{}` in MATCH scope", rel_var.text),
+            ));
+        }
+        scope.insert(
+            rel_var.text.clone(),
+            ScopedBinding::Relationship {
+                var_len: rel_pat.var_len.is_some(),
+            },
+        );
+    }
+    Ok(scope)
+}
+
+fn initial_node_scope(node: &BoundNode) -> BindingScope {
+    BindingScope::from([(node.var.clone(), ScopedBinding::Node(BindingSide::Source))])
+}
+
+fn bind_with_clauses(
+    clauses: &[WithClause],
+    mut scope: BindingScope,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<BindingScope, GqlError> {
+    for clause in clauses {
+        if clause.distinct {
+            return Err(GqlError::unsupported(
+                clause.span,
+                "WITH DISTINCT is implemented in a later phase",
+            ));
+        }
+        scope = bind_projection_scope(&clause.items, &scope, source, target)?;
+    }
+    Ok(scope)
+}
+
+fn bind_projection_scope(
+    items: &[ReturnItem],
+    scope: &BindingScope,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<BindingScope, GqlError> {
+    let mut next = BindingScope::with_capacity(items.len());
+    for item in items {
+        let (name, binding) = bind_scoped_item(item, scope, source, target)?;
+        if next.insert(name.clone(), binding).is_some() {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{name}`"),
+            ));
+        }
+    }
+    Ok(next)
+}
+
+fn bind_scoped_returns(
+    items: &[ReturnItem],
+    scope: &BindingScope,
+    source: &BoundNode,
     target: &BoundNode,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut bindings = Vec::with_capacity(items.len());
     for item in items {
-        let binding = match &item.expr {
-            ReturnExpr::Var { var, .. } if var.text == source.var => Ok(ReturnBinding::Node {
-                side: BindingSide::Source,
-                name: item
-                    .alias
-                    .as_ref()
-                    .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
-            }),
-            ReturnExpr::Var { var, .. } if var.text == target.var => Ok(ReturnBinding::Node {
-                side: BindingSide::Target,
-                name: item
-                    .alias
-                    .as_ref()
-                    .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
-            }),
-            ReturnExpr::Var { var, .. }
-                if rel_pat
-                    .var
-                    .as_ref()
-                    .is_some_and(|rel_var| rel_var.text == var.text) =>
-            {
-                if rel_pat.var_len.is_some() {
-                    return Err(GqlError::unsupported(
-                        var.span,
-                        "RETURN relationship variables over variable-length patterns require path support",
-                    ));
+        let (name, scoped) = bind_scoped_item(item, scope, source, target)?;
+        if !seen.insert(name.clone()) {
+            return Err(GqlError::bind(
+                item.span,
+                format!("duplicate return name `{name}`"),
+            ));
+        }
+        let binding = match scoped {
+            ScopedBinding::Node(side) => ReturnBinding::Node { side, name },
+            ScopedBinding::Relationship { var_len: false } => ReturnBinding::Relationship { name },
+            ScopedBinding::Relationship { var_len: true } => {
+                return Err(GqlError::unsupported(
+                    item.span,
+                    "RETURN relationship variables over variable-length patterns require path support",
+                ));
+            }
+            ScopedBinding::Property { side, property } => ReturnBinding::Property {
+                side,
+                property,
+                name,
+            },
+        };
+        bindings.push(binding);
+    }
+    Ok(bindings)
+}
+
+fn bind_scoped_item(
+    item: &ReturnItem,
+    scope: &BindingScope,
+    source: &BoundNode,
+    target: &BoundNode,
+) -> Result<(String, ScopedBinding), GqlError> {
+    let binding = match &item.expr {
+        ReturnExpr::Var { var, span } => scope.get(&var.text).cloned().ok_or_else(|| {
+            GqlError::bind(*span, format!("unknown return variable `{}`", var.text))
+        })?,
+        ReturnExpr::Property { var, property, .. } => match scope.get(&var.text) {
+            Some(ScopedBinding::Node(side)) => {
+                validate_property(*side, &property.text, source, target, property.span)?;
+                ScopedBinding::Property {
+                    side: *side,
+                    property: property.text.clone(),
                 }
-                Ok(ReturnBinding::Relationship {
-                    name: item
-                        .alias
-                        .as_ref()
-                        .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
-                })
             }
-            ReturnExpr::Var { var, span } => Err(GqlError::bind(
-                *span,
-                format!("unknown return variable `{}`", var.text),
-            )),
-            ReturnExpr::Property {
-                var,
-                property,
-                span: _,
-            } => {
-                let side = binding_side(&var.text, source, target, var.span)?;
-                validate_property(side, &property.text, source, target, property.span)?;
-                Ok(ReturnBinding::Property {
-                    side,
-                    property: property.text.clone(),
-                    name: item.alias.as_ref().map_or_else(
-                        || format!("{}.{}", var.text, property.text),
-                        |alias| alias.text.clone(),
-                    ),
-                })
+            Some(_) => {
+                return Err(GqlError::bind(
+                    var.span,
+                    format!("variable `{}` does not bind a node", var.text),
+                ));
             }
-            ReturnExpr::Func { span, .. } => Err(GqlError::unsupported(
+            None => {
+                return Err(GqlError::bind(
+                    var.span,
+                    format!("unknown return variable `{}`", var.text),
+                ));
+            }
+        },
+        ReturnExpr::Func { span, .. } => {
+            return Err(GqlError::unsupported(
                 *span,
                 "RETURN functions are implemented in a later read phase",
-            )),
-        }?;
-        let name = binding.name();
-        if !seen.insert(name.to_string()) {
-            return Err(GqlError::bind(
-                item.span,
-                format!("duplicate return name `{name}`"),
             ));
         }
-        bindings.push(binding);
-    }
-    Ok(bindings)
+    };
+    Ok((projection_name(item), binding))
 }
 
-fn bind_node_returns(
-    items: &[ReturnItem],
-    node: &BoundNode,
-) -> Result<Vec<ReturnBinding>, GqlError> {
-    let mut seen = std::collections::HashSet::with_capacity(items.len());
-    let mut bindings = Vec::with_capacity(items.len());
-    for item in items {
-        let binding = match &item.expr {
-            ReturnExpr::Var { var, .. } if var.text == node.var => Ok(ReturnBinding::Node {
-                side: BindingSide::Source,
-                name: item
-                    .alias
-                    .as_ref()
-                    .map_or_else(|| var.text.clone(), |alias| alias.text.clone()),
-            }),
-            ReturnExpr::Property {
-                var,
-                property,
-                span: _,
-            } if var.text == node.var => {
-                validate_property(
-                    BindingSide::Source,
-                    &property.text,
-                    node,
-                    node,
-                    property.span,
-                )?;
-                Ok(ReturnBinding::Property {
-                    side: BindingSide::Source,
-                    property: property.text.clone(),
-                    name: item.alias.as_ref().map_or_else(
-                        || format!("{}.{}", var.text, property.text),
-                        |alias| alias.text.clone(),
-                    ),
-                })
-            }
-            ReturnExpr::Var { var, span } => Err(GqlError::bind(
-                *span,
-                format!("unknown return variable `{}`", var.text),
-            )),
-            ReturnExpr::Property { var, span, .. } => Err(GqlError::bind(
-                *span,
-                format!("unknown return variable `{}`", var.text),
-            )),
-            ReturnExpr::Func { span, .. } => Err(GqlError::unsupported(
-                *span,
-                "RETURN functions are implemented in a later read phase",
-            )),
-        }?;
-        let name = binding.name();
-        if !seen.insert(name.to_string()) {
-            return Err(GqlError::bind(
-                item.span,
-                format!("duplicate return name `{name}`"),
-            ));
-        }
-        bindings.push(binding);
+fn projection_name(item: &ReturnItem) -> String {
+    if let Some(alias) = &item.alias {
+        return alias.text.clone();
     }
-    Ok(bindings)
+    match &item.expr {
+        ReturnExpr::Var { var, .. } => var.text.clone(),
+        ReturnExpr::Property { var, property, .. } => format!("{}.{}", var.text, property.text),
+        ReturnExpr::Func { name, .. } => name.text.clone(),
+    }
 }
 
-fn bind_sort_items(
+fn bind_scoped_sort_items(
     items: &[SortItem],
     returns: &[ReturnBinding],
+    scope: &BindingScope,
     source: &BoundNode,
     target: &BoundNode,
 ) -> Result<Vec<SortBinding>, GqlError> {
@@ -681,6 +728,18 @@ fn bind_sort_items(
                             alias.span,
                             "ORDER BY aliases must refer to scalar property returns",
                         ));
+                    } else if let Some(ScopedBinding::Property { side, property }) =
+                        scope.get(&alias.text)
+                    {
+                        SortBindingKey::Property {
+                            side: *side,
+                            property: property.clone(),
+                        }
+                    } else if scope.contains_key(&alias.text) {
+                        return Err(GqlError::unsupported(
+                            alias.span,
+                            "ORDER BY aliases must refer to scalar property returns",
+                        ));
                     } else {
                         return Err(GqlError::bind(
                             alias.span,
@@ -692,14 +751,27 @@ fn bind_sort_items(
                     var,
                     property,
                     span: _,
-                } => {
-                    let side = binding_side(&var.text, source, target, var.span)?;
-                    validate_property(side, &property.text, source, target, property.span)?;
-                    SortBindingKey::Property {
-                        side,
-                        property: property.text.clone(),
+                } => match scope.get(&var.text) {
+                    Some(ScopedBinding::Node(side)) => {
+                        validate_property(*side, &property.text, source, target, property.span)?;
+                        SortBindingKey::Property {
+                            side: *side,
+                            property: property.text.clone(),
+                        }
                     }
-                }
+                    Some(_) => {
+                        return Err(GqlError::bind(
+                            var.span,
+                            format!("variable `{}` does not bind a node", var.text),
+                        ));
+                    }
+                    None => {
+                        return Err(GqlError::bind(
+                            var.span,
+                            format!("unknown ORDER BY variable `{}`", var.text),
+                        ));
+                    }
+                },
             };
             Ok(SortBinding {
                 key,

@@ -256,6 +256,136 @@ fn lowering_preserves_bound_tables_and_return_slots() {
 }
 
 #[test]
+fn binder_allows_with_aliases_downstream() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WITH c AS company, u.name AS employee RETURN company, employee",
+    );
+    let physical = lower(logical);
+
+    assert_eq!(
+        physical.returns,
+        vec![
+            ReturnSlot::Node {
+                side: super::logical_plan::BindingSide::Target,
+                name: "company".into()
+            },
+            ReturnSlot::Property {
+                side: super::logical_plan::BindingSide::Source,
+                property: "name".into(),
+                name: "employee".into()
+            }
+        ]
+    );
+}
+
+#[test]
+fn binder_with_shadowing_rebinds_name_to_new_scope() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) WITH c AS u RETURN u");
+    let physical = lower(logical);
+
+    assert_eq!(
+        physical.returns,
+        vec![ReturnSlot::Node {
+            side: super::logical_plan::BindingSide::Target,
+            name: "u".into()
+        }]
+    );
+}
+
+#[test]
+fn binder_with_scope_does_not_leak_hidden_variables() {
+    let ast = parse(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WITH c AS company RETURN u",
+    )
+    .unwrap();
+
+    let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Bind { .. }));
+    assert!(err.to_string().contains("unknown return variable `u`"));
+}
+
+#[test]
+fn binder_with_property_alias_can_be_returned_and_ordered() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users) WITH u.name AS name RETURN name ORDER BY name",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = plan else {
+        panic!("expected node scan plan");
+    };
+
+    assert_eq!(
+        scan.returns,
+        vec![super::logical_plan::ReturnBinding::Property {
+            side: super::logical_plan::BindingSide::Source,
+            property: "name".into(),
+            name: "name".into()
+        }]
+    );
+    assert_eq!(scan.order_by.len(), 1);
+}
+
+#[test]
+fn binder_with_scope_can_chain_projection_stages() {
+    let logical = bind_query(
+        "MATCH (u:users)-[:works_at]->(c:companies) \
+         WITH c AS company WITH company.name AS company_name RETURN company_name",
+    );
+    let physical = lower(logical);
+
+    assert_eq!(
+        physical.returns,
+        vec![ReturnSlot::Property {
+            side: super::logical_plan::BindingSide::Target,
+            property: "name".into(),
+            name: "company_name".into()
+        }]
+    );
+}
+
+#[test]
+fn binder_rejects_duplicate_pattern_variables_in_initial_scope() {
+    for query in [
+        "MATCH (u:users)-[:friend]->(u:users) RETURN u",
+        "MATCH (u:users)-[u:friend]->(v:users) RETURN u",
+    ] {
+        let ast = parse(query).unwrap();
+        let err = bind(&ast, &fake_catalog()).unwrap_err();
+
+        assert!(
+            matches!(err.kind, GqlErrorKind::Bind { .. }),
+            "{query}: {err:?}"
+        );
+        assert!(err.to_string().contains("duplicate variable"), "{query}");
+    }
+}
+
+#[test]
+fn binder_orders_by_with_scalar_alias_not_returned() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users) WITH u.name AS name, u RETURN u ORDER BY name",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::NodeScan(scan) = plan else {
+        panic!("expected node scan plan");
+    };
+
+    assert_eq!(
+        scan.returns,
+        vec![super::logical_plan::ReturnBinding::Node {
+            side: super::logical_plan::BindingSide::Source,
+            name: "u".into()
+        }]
+    );
+    assert_eq!(scan.order_by.len(), 1);
+}
+
+#[test]
 fn value_projection_returns_relationship_coordinates() {
     let logical = bind_query("MATCH (u:users)-[r:works_at]->(c:companies) RETURN r");
     let physical = lower(logical);
