@@ -428,6 +428,123 @@ fn gql_create_node_applies_session_tenant_scope() {
 }
 
 #[pg_test]
+fn gql_create_node_preserves_source_table_rls() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.enforce_tenant_scope = on").expect("enable tenant enforcement failed");
+    Spi::run("SET graph.tenant_setting = 'app.graph_gql_rls_tenant'")
+        .expect("set tenant setting failed");
+    Spi::run("DROP ROLE IF EXISTS graph_gql_create_rls").expect("drop rls role failed");
+    Spi::run("CREATE ROLE graph_gql_create_rls").expect("create rls role failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_gql_create_rls_pgtest CASCADE")
+        .expect("drop rls create table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_gql_create_rls_pgtest (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create rls create table failed");
+    Spi::run("ALTER TABLE public.graph_gql_create_rls_pgtest ENABLE ROW LEVEL SECURITY")
+        .expect("enable source rls failed");
+    Spi::run(
+        "CREATE POLICY graph_gql_create_rls_insert
+             ON public.graph_gql_create_rls_pgtest
+             FOR INSERT
+             WITH CHECK (tenant_id = 'tenant-a')",
+    )
+    .expect("create insert rls policy failed");
+    Spi::run(
+        "CREATE POLICY graph_gql_create_rls_select
+             ON public.graph_gql_create_rls_pgtest
+             FOR SELECT
+             USING (tenant_id = 'tenant-a')",
+    )
+    .expect("create select rls policy failed");
+    Spi::run(
+        "GRANT USAGE ON SCHEMA graph TO graph_gql_create_rls;
+         GRANT INSERT, SELECT ON public.graph_gql_create_rls_pgtest TO graph_gql_create_rls",
+    )
+    .expect("grant rls role privileges failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_gql_create_rls_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name'],
+                tenant_column := 'tenant_id'
+            )",
+    )
+    .expect("add rls create table failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable rls graph failed");
+    create_error_capture_helper();
+
+    Spi::run("SET ROLE graph_gql_create_rls").expect("set rls role failed");
+    Spi::run("SET app.graph_gql_rls_tenant = 'tenant-a'").expect("set tenant-a failed");
+    let allowed_id = Spi::get_one::<String>(
+        "SELECT row #>> '{u,_id,id}'
+         FROM graph.gql(
+            'CREATE (u:graph_gql_create_rls_pgtest {id: ''a4'', name: ''Allowed''}) RETURN u'
+         )",
+    )
+    .expect("allowed rls create failed")
+    .unwrap_or_default();
+    Spi::run("SET app.graph_gql_rls_tenant = 'tenant-b'").expect("set tenant-b failed");
+    let denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'CREATE (u:graph_gql_create_rls_pgtest {id: ''b4'', name: ''Denied''}) RETURN u'
+             )"
+        )
+    ))
+    .expect("denied rls create capture failed")
+    .unwrap_or(false);
+    Spi::run("RESET ROLE").expect("reset rls role failed");
+
+    let (allowed_count, denied_count) = Spi::connect(|client| {
+        let allowed_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_gql_create_rls_pgtest
+                 WHERE id = 'a4' AND tenant_id = 'tenant-a'",
+                None,
+                &[],
+            )
+            .expect("allowed source count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("allowed count read failed")
+            .unwrap_or_default();
+        let denied_count = client
+            .select(
+                "SELECT count(*)::bigint
+                 FROM public.graph_gql_create_rls_pgtest
+                 WHERE id = 'b4'",
+                None,
+                &[],
+            )
+            .expect("denied source count failed")
+            .first()
+            .get::<i64>(1)
+            .expect("denied count read failed")
+            .unwrap_or_default();
+        Ok::<_, pgrx::spi::Error>((allowed_count, denied_count))
+    })
+    .expect("rls verification failed");
+
+    Spi::run("RESET app.graph_gql_rls_tenant").expect("reset rls tenant failed");
+    Spi::run("RESET graph.tenant_setting").expect("reset tenant setting failed");
+    Spi::run("SET graph.enforce_tenant_scope = off").expect("disable tenant enforcement failed");
+
+    assert_eq!(allowed_id, "a4");
+    assert!(denied);
+    assert_eq!(allowed_count, 1);
+    assert_eq!(denied_count, 0);
+}
+
+#[pg_test]
 fn gql_create_node_rejects_unregistered_label() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
