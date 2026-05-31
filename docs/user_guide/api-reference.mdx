@@ -7,7 +7,7 @@ All functions live in the `graph` schema.
 
 | Category | Functions |
 |---|---|
-| Availability | `test_enabled`, `status`, `sync_health`, `reset` |
+| Availability | `test_enabled`, `status`, `memory_profile`, `sync_health`, `reset` |
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
@@ -77,6 +77,27 @@ Reports backend-local engine state and current catalog/sync validity. When
 `csr_readonly` or `mutable_overlay`. Overlay columns summarize tombstones,
 memory, and durable compaction policy; `edge_buffer_used` plus `tx_delta_dirty`
 show whether pending sync or transaction-local overlays exist.
+
+### `graph.memory_profile()`
+
+```sql
+graph.memory_profile(concurrent_backends int DEFAULT 1)
+RETURNS TABLE (
+  active_backend_private_mb double precision,
+  active_backend_shared_mb double precision,
+  active_backend_total_mb double precision,
+  estimated_instance_private_mb double precision,
+  estimated_instance_shared_mb double precision,
+  estimated_instance_total_mb double precision,
+  memory_limit_mb int,
+  assumed_concurrent_backends int
+)
+```
+
+Reports sizing estimates for the current backend's active engine. Shared mmap
+bytes are counted once; backend-private heap is multiplied by
+`concurrent_backends`, with a minimum of one. This is an operator sizing aid,
+not a live connection counter or cluster-wide hard cap.
 
 ### `graph.sync_health()`
 
@@ -166,7 +187,9 @@ graph.add_edge(
 ```
 
 Admin-only. Registers a relationship. `weight_column` must be numeric.
-`label_column`, when supplied, provides per-row dynamic edge labels.
+`label_column`, when supplied, provides per-row dynamic edge labels. A graph can
+use up to 254 distinct user-facing edge labels; registering or building a graph
+that would require another label fails with `PG004`.
 
 ### `graph.add_filter_column()`
 

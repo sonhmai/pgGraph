@@ -91,7 +91,11 @@ recovery.
 | Sync overlays | backend-local heap |
 
 Use `graph.estimate()` before large builds and watch `memory_used_mb`,
-`edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`.
+`edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`. For
+instance sizing, run `graph.memory_profile(concurrent_backends := N)` with the
+number of sessions that may actively use the graph; pgGraph reports
+backend-private heap separately from mmap-backed bytes that can be shared
+through the OS page cache.
 
 ## Operational Guidance
 

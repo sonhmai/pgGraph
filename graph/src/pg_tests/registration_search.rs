@@ -73,6 +73,116 @@ fn registered_tables_and_edges_reflect_public_registration_apis() {
 }
 
 #[pg_test]
+fn memory_profile_projects_private_heap_by_backend_count() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+
+    let (
+        private_mb,
+        shared_mb,
+        instance_private_mb,
+        instance_shared_mb,
+        instance_total_mb,
+        backends,
+    ) = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT active_backend_private_mb,
+                        active_backend_shared_mb,
+                        estimated_instance_private_mb,
+                        estimated_instance_shared_mb,
+                        estimated_instance_total_mb,
+                        assumed_concurrent_backends
+                 FROM graph.memory_profile(4)",
+                None,
+                &[],
+            )
+            .expect("memory_profile query failed");
+        let row = rows.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<f64>(1)?.expect("private estimate missing"),
+            row.get::<f64>(2)?.expect("shared estimate missing"),
+            row.get::<f64>(3)?.expect("instance private estimate missing"),
+            row.get::<f64>(4)?.expect("instance shared estimate missing"),
+            row.get::<f64>(5)?.expect("instance total estimate missing"),
+            row.get::<i32>(6)?.expect("backend count missing"),
+        ))
+    })
+    .expect("memory_profile row read failed");
+
+    assert_eq!(backends, 4);
+    assert!(private_mb > 0.0);
+    assert_eq!(shared_mb, instance_shared_mb);
+    assert!(instance_private_mb >= private_mb * 4.0);
+    assert!((instance_total_mb - (instance_private_mb + instance_shared_mb)).abs() < 0.000001);
+}
+
+#[pg_test]
+fn memory_profile_counts_persisted_mmap_once() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    build_friendship_fixture_graph();
+
+    crate::ENGINE.with(|e| {
+        *e.borrow_mut() = crate::engine::Engine::new();
+    });
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    let loaded_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.search(
+                'name',
+                'Alice',
+                'graph_test_users_pgtest'::regclass,
+                mode := 'exact',
+                hydrate := false
+             )",
+    )
+    .expect("auto-load search failed")
+    .unwrap_or(0);
+    assert_eq!(loaded_count, 1);
+
+    let (private_mb, shared_mb, instance_private_mb, instance_shared_mb, instance_total_mb) =
+        Spi::connect(|client| {
+            let rows = client
+                .select(
+                    "SELECT active_backend_private_mb,
+                            active_backend_shared_mb,
+                            estimated_instance_private_mb,
+                            estimated_instance_shared_mb,
+                            estimated_instance_total_mb
+                     FROM graph.memory_profile(4)",
+                    None,
+                    &[],
+                )
+                .expect("memory_profile query failed");
+            let row = rows.first();
+            Ok::<_, pgrx::spi::Error>((
+                row.get::<f64>(1)?.expect("private estimate missing"),
+                row.get::<f64>(2)?.expect("shared estimate missing"),
+                row.get::<f64>(3)?.expect("instance private estimate missing"),
+                row.get::<f64>(4)?.expect("instance shared estimate missing"),
+                row.get::<f64>(5)?.expect("instance total estimate missing"),
+            ))
+        })
+        .expect("memory_profile row read failed");
+
+    assert!(shared_mb > 0.0);
+    assert_eq!(shared_mb, instance_shared_mb);
+    assert!(instance_private_mb >= private_mb * 4.0);
+    assert!((instance_total_mb - (instance_private_mb + instance_shared_mb)).abs() < 0.000001);
+
+    let clamped_backends = Spi::get_one::<i32>(
+        "SELECT assumed_concurrent_backends FROM graph.memory_profile(0)",
+    )
+    .expect("memory_profile clamp query failed")
+    .expect("memory_profile clamp row missing");
+    assert_eq!(clamped_backends, 1);
+
+    Spi::run("SET graph.auto_load = off").expect("restore auto_load failed");
+    Spi::run("SET graph.persist_on_build = off").expect("restore persist_on_build failed");
+}
+
+#[pg_test]
 fn sql_search_defaults_to_contains_and_supports_exact_mode() {
     reset_and_create_fixtures();
     Spi::run(

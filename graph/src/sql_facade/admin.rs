@@ -314,6 +314,50 @@ fn status() -> TableIterator<
     })
 }
 
+/// Return backend-local and projected instance memory estimates.
+///
+/// `concurrent_backends` is an operator-supplied sizing assumption, not a live
+/// backend count. Shared mmap bytes are counted once; backend-private heap is
+/// multiplied by the supplied backend count.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn memory_profile(
+    concurrent_backends: default!(i32, 1),
+) -> TableIterator<
+    'static,
+    (
+        name!(active_backend_private_mb, f64),
+        name!(active_backend_shared_mb, f64),
+        name!(active_backend_total_mb, f64),
+        name!(estimated_instance_private_mb, f64),
+        name!(estimated_instance_shared_mb, f64),
+        name!(estimated_instance_total_mb, f64),
+        name!(memory_limit_mb, i32),
+        name!(assumed_concurrent_backends, i32),
+    ),
+> {
+    with_panic_boundary("memory_profile()", || {
+        let memory_limit_mb = config::MEMORY_LIMIT_MB.get();
+        let profile = ENGINE.with(|e| {
+            e.borrow()
+                .memory_profile(concurrent_backends, memory_limit_mb)
+        });
+        TableIterator::new(vec![(
+            profile.active_backend_private_mb,
+            profile.active_backend_shared_mb,
+            profile.active_backend_total_mb,
+            profile.estimated_instance_private_mb,
+            profile.estimated_instance_shared_mb,
+            profile.estimated_instance_total_mb,
+            profile.memory_limit_mb,
+            profile.assumed_concurrent_backends,
+        )])
+    })
+}
+
 #[pg_extern(schema = "graph")]
 #[allow(
     clippy::type_complexity,

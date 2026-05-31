@@ -325,14 +325,11 @@ Full design: `phase-1-readonly-gql-design.md`.
    the primary plan.
 3. Confirm critical pre-launch safety/correctness items. **Named items** (from
    `docs/known-issues.mdx`): the Data Correctness, SQL Contract, SQL Safety,
-   Persistence, Sync, and Internal-Construction categories are all cleared
-   ("No currently tracked next-update items"). The only remaining tracked items
-   are **P0** (per-backend `pggraph.memory_limit_mb` accounting / no
-   cluster-wide guard) and **P2** (edge-type `u8` 255-type ceiling). Decision:
-   **neither gates Phase 1** — read-only GQL registers no new edge types and
-   adds only bounded per-query memory, not new persistent per-backend
-   structures. The edge-type ceiling is carried forward as a **Phase 2**
-   write-path input (dynamic edge creation must respect it).
+   Persistence, Sync, Internal-Construction, P0, P1, and P2 categories are all
+   cleared ("No currently tracked items"). The former P0 per-backend memory
+   visibility item is closed by `graph.memory_profile(concurrent_backends)`.
+   The former P2 edge-type ceiling item is closed by user-facing documentation;
+   GQL writes still respect the existing `PG004` edge-label limit.
 4. Add private GQL parser/AST and fuzz tests.
 5. Add catalog binding (`CatalogSnapshot`) and shared logical graph IR.
 6. Add physical operators for read-only GQL over existing primitives.

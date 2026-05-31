@@ -906,6 +906,25 @@ impl Engine {
             / 1_048_576.0
     }
 
+    pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {
+        let private_bytes = self.estimated_heap_bytes();
+        let shared_bytes = self.estimated_mmap_bytes();
+        let backend_count = concurrent_backends.max(1) as usize;
+        let instance_private_bytes = private_bytes.saturating_mul(backend_count);
+        let instance_total_bytes = instance_private_bytes.saturating_add(shared_bytes);
+
+        MemoryProfile {
+            active_backend_private_mb: bytes_to_mb(private_bytes),
+            active_backend_shared_mb: bytes_to_mb(shared_bytes),
+            active_backend_total_mb: bytes_to_mb(private_bytes.saturating_add(shared_bytes)),
+            estimated_instance_private_mb: bytes_to_mb(instance_private_bytes),
+            estimated_instance_shared_mb: bytes_to_mb(shared_bytes),
+            estimated_instance_total_mb: bytes_to_mb(instance_total_bytes),
+            memory_limit_mb,
+            assumed_concurrent_backends: backend_count.min(i32::MAX as usize) as i32,
+        }
+    }
+
     pub fn estimated_heap_bytes(&self) -> usize {
         let resolution_bytes = match &self.resolution_store {
             ResolutionStore::Builder(builder) => builder.estimated_heap_bytes(),
@@ -963,6 +982,22 @@ impl Engine {
             + edge_buffer_bytes
     }
 
+    fn estimated_mmap_bytes(&self) -> usize {
+        if let Some(mmap) = &self._mmap {
+            return mmap.len();
+        }
+
+        let resolution_bytes = match &self.resolution_store {
+            ResolutionStore::MmapBacked(state) => state.len,
+            ResolutionStore::Builder(_) | ResolutionStore::Finalized(_) => 0,
+        };
+
+        self.node_store
+            .estimated_mmap_bytes()
+            .saturating_add(self.edge_store.estimated_mmap_bytes())
+            .saturating_add(resolution_bytes)
+    }
+
     /// Compute connected components.
     pub fn connected_components(
         &self,
@@ -990,6 +1025,10 @@ impl Engine {
             ),
         )
     }
+}
+
+fn bytes_to_mb(bytes: usize) -> f64 {
+    bytes as f64 / 1_048_576.0
 }
 
 impl Default for Engine {
@@ -1078,6 +1117,39 @@ mod tests {
             "edges should increase memory: no_edges={} with_edges={}",
             no_edges,
             with_edges
+        );
+    }
+
+    #[test]
+    fn memory_profile_multiplies_private_heap_but_not_shared_mapping() {
+        let mut engine = Engine::new();
+        for i in 0..10u32 {
+            engine.node_store.add_node(1, format!("n-{}", i));
+        }
+        engine.edge_store = crate::edge_store::EdgeStore::from_edges(
+            10,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            }],
+            false,
+        );
+
+        let one_backend = engine.memory_profile(1, 2048);
+        let four_backends = engine.memory_profile(4, 2048);
+
+        assert!(one_backend.active_backend_private_mb > 0.0);
+        assert_eq!(one_backend.active_backend_shared_mb, 0.0);
+        assert_eq!(four_backends.assumed_concurrent_backends, 4);
+        assert!(
+            four_backends.estimated_instance_private_mb
+                >= one_backend.active_backend_private_mb * 4.0
+        );
+        assert_eq!(
+            four_backends.estimated_instance_shared_mb,
+            one_backend.active_backend_shared_mb
         );
     }
 

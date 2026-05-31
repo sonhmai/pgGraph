@@ -858,31 +858,32 @@ Run docs drift checks before calling any public milestone complete.
 
 ## Implementation Readiness Checklist
 
-Status as of 2026-05-30. Per-phase detail lives in the phase design docs
+Status as of 2026-06-01. Per-phase detail lives in the phase design docs
 (`phase-1-readonly-gql-design.md` … `phase-4-advanced-writes-opencypher-design.md`).
 
 - [x] Public compatibility target chosen — GQL-compatible subset; matrix-gated.
-- [ ] Current non-goal docs reconciled — tracked as Phase 1A PR work
-      (`lib.rs` "No new query language", `docs/index.mdx`, `architecture.mdx`).
+- [x] Current non-goal docs reconciled — public docs now describe the supported
+      GQL, SQL/PGQ adapter, and openCypher compatibility boundaries.
 - [x] Critical pre-launch safety/correctness items named — see
-      `mutable-graph-projections-todo.md` Phase 1 step 3; only known-issues P0
-      (per-backend memory accounting) and P2 (edge-type `u8` ceiling) remain,
-      and neither gates Phase 1.
+      `mutable-graph-projections-todo.md` Phase 1 step 3; P0/P1/P2 public rows
+      are closed, including memory sizing visibility and edge-label cardinality
+      documentation.
 - [x] Parser design accepted — handwritten lexer + recursive descent + Pratt
       `WHERE` parser (see Parser Implementation Strategy above).
 - [x] Query IR accepted (shape) — concrete logical/physical types defined in
       `phase-1-readonly-gql-design.md`; frontend-neutral so SQL/PGQ adapts later.
 - [x] Projection-mode API accepted — `csr_readonly` / `mutable_overlay`.
-- [ ] Overlay neighbor abstraction accepted — `NeighborSource` shape proposed;
-      finalized in Phase 2 (`phase-2-mutable-overlay-writes-design.md`).
-- [ ] SQLSTATE taxonomy accepted — deferred to the pre-facade gate task; must be
-      done before public `graph.gql()`.
+- [x] Overlay neighbor abstraction accepted — `NeighborSource` was finalized in
+      Phase 2 and is used by dirty-overlay-aware traversal paths.
+- [x] SQLSTATE taxonomy accepted — public GQL/openCypher errors map through the
+      stable graph SQLSTATE surface.
 - [x] GUC additions accepted (list) — see Configuration; defaults preserve
       current read-only behavior.
 - [x] Test ladder accepted — see Test Architecture + per-phase docs.
 - [x] Benchmark gates accepted — baselines current as of 2026-05-29 at HEAD
-      `0574e6b` (still HEAD on 2026-05-30); mmap PSS pending a Linux host.
+      `0574e6b`; G1 was rechecked under `caffeinate` with no Criterion
+      regression rows.
 
-**Phase 1A is clear to start coding.** The remaining unchecked items
-(docs reconciliation, SQLSTATE taxonomy, overlay abstraction) gate the *public*
-`graph.gql()` exposure and Phase 2 respectively, not the start of parser/AST work.
+The ordered phase implementation is closed for the current pgGraph scope. Future
+work such as public SQL/PGQ exposure remains gated on PostgreSQL graph-pattern
+hooks rather than this branch's implementation checklist.

@@ -81,6 +81,19 @@ constructing the active engine. With `graph.oom_action = 'error'`, it raises `PG
 With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
 engine read-only.
 
+`graph.memory_limit_mb` is enforced per PostgreSQL backend. To size a database
+where multiple sessions may load or build the graph, build or load the graph in
+one representative backend and run:
+
+```sql
+SELECT *
+FROM graph.memory_profile(concurrent_backends := 8);
+```
+
+The result separates backend-private heap from mmap-backed bytes that are
+physically shareable through the OS page cache, then projects an instance total
+for the supplied backend count.
+
 Mapped GQL writes use transaction-local overlays. If a node, edge, or overlay
 memory limit would be exceeded, the current SQL statement aborts with `PG019`
 and PostgreSQL rolls back the source-table DML for that statement.

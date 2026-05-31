@@ -571,6 +571,25 @@ impl EdgeStore {
         }
     }
 
+    /// Estimate bytes borrowed from an mmap-backed graph artifact.
+    pub fn estimated_mmap_bytes(&self) -> usize {
+        match &self.backing {
+            EdgeBacking::Owned { .. } => 0,
+            EdgeBacking::Mmap { arrays } => {
+                let weight_bytes = if arrays.has_weights {
+                    arrays.edge_count as usize * std::mem::size_of::<u32>()
+                } else {
+                    0
+                };
+                (arrays.node_count as usize + 1)
+                    .saturating_mul(std::mem::size_of::<u32>())
+                    .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u32>())
+                    .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
+                    .saturating_add(weight_bytes)
+            }
+        }
+    }
+
     /// Degree (number of outgoing edges) for a node.
     #[inline]
     pub fn degree(&self, node_idx: u32) -> u32 {

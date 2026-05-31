@@ -222,6 +222,20 @@ pub struct EngineStatus {
     pub tx_delta_memory_bytes: i64,
 }
 
+/// Backend and instance memory sizing estimate returned by
+/// `graph.memory_profile()`.
+#[derive(Debug, Clone)]
+pub struct MemoryProfile {
+    pub active_backend_private_mb: f64,
+    pub active_backend_shared_mb: f64,
+    pub active_backend_total_mb: f64,
+    pub estimated_instance_private_mb: f64,
+    pub estimated_instance_shared_mb: f64,
+    pub estimated_instance_total_mb: f64,
+    pub memory_limit_mb: i32,
+    pub assumed_concurrent_backends: i32,
+}
+
 /// Edge type filter for traversal.
 #[derive(Debug, Clone)]
 pub enum EdgeTypeFilter {
