@@ -190,6 +190,14 @@ exposure remains deferred until PostgreSQL provides stable graph-pattern hooks.
 | 4C `MERGE` (FOR UPDATE / ON CONFLICT) | 2C | two-session race on same key; ON CREATE/ON MATCH |
 | 4D openCypher frontend (optional) | 3G stable IR | parser totality fuzz; unmappable rejection corpus; shared-IR equivalence; dual-surface SQLSTATE |
 
+Status note, 2026-05-31: 4A is closed for single-node mapped property
+`REMOVE`. `graph.gql()` parses `REMOVE n.property`, binds it through the same
+single-node write path as `SET`, and executes it PostgreSQL-first against the
+registered source row. Scalar mapped columns are set to SQL `NULL`; registered
+dotted JSONB property paths remove the addressed key and missing-key removal is
+idempotent. `REMOVE n:Label` is parsed and rejected because labels map to
+registered source tables rather than mutable node tags.
+
 ## Cross-cutting, every slice
 
 - TDD: failing test first, then code (rust-planning rule 34a).

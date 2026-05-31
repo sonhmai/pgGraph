@@ -2,11 +2,12 @@
 
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan,
-    LogicalPlan, LogicalSetProperty, LogicalStatement, ReturnBinding,
+    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
-    PhysicalNodeScan, PhysicalPlan, PhysicalSetProperty, PhysicalStatement, ReturnSlot,
+    PhysicalNodeScan, PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement,
+    ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -19,6 +20,9 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
         }
         LogicalStatement::SetProperty(plan) => {
             PhysicalStatement::SetProperty(lower_set_property(plan))
+        }
+        LogicalStatement::RemoveProperty(plan) => {
+            PhysicalStatement::RemoveProperty(lower_remove_property(plan))
         }
         LogicalStatement::DeleteEdge(plan) => {
             PhysicalStatement::DeleteEdge(lower_delete_edge(plan))
@@ -107,6 +111,26 @@ fn lower_set_property(plan: LogicalSetProperty) -> PhysicalSetProperty {
             CreateValue::Literal(value) => CreateValueSlot::Literal(literal_value_json(value)),
             CreateValue::Param(name) => CreateValueSlot::Param(name),
         },
+        returns: plan
+            .returns
+            .into_iter()
+            .map(|binding| match binding {
+                CreateReturnBinding::Node { name } => CreateReturnSlot::Node { name },
+                CreateReturnBinding::Property { property, name } => {
+                    CreateReturnSlot::Property { property, name }
+                }
+            })
+            .collect(),
+    }
+}
+
+fn lower_remove_property(plan: LogicalRemoveProperty) -> PhysicalRemoveProperty {
+    PhysicalRemoveProperty {
+        var: plan.node.var,
+        table_oid: plan.node.table_oid,
+        label: plan.node.label,
+        predicate: plan.predicate,
+        property: plan.property,
         returns: plan
             .returns
             .into_iter()

@@ -3,8 +3,8 @@
 use super::ast::{
     AggregateArg, AggregateFunc, CmpOp, CreateClause, CreateQuery, DeleteClause, DeleteQuery,
     Direction, Expr, Ident, Literal, LiteralValue, MatchClause, NodePat, Operand, Pattern,
-    PropertyRef, Query, RelPat, ReturnClause, ReturnExpr, ReturnItem, SetClause, SetQuery,
-    SortItem, SortKey, Statement, VarLen, WithClause,
+    PropertyRef, Query, RelPat, RemoveClause, RemoveQuery, RemoveTarget, ReturnClause, ReturnExpr,
+    ReturnItem, SetClause, SetQuery, SortItem, SortKey, Statement, VarLen, WithClause,
 };
 use super::errors::{GqlError, Span};
 use super::lexer::{tokenize, TokKind, Token};
@@ -52,6 +52,11 @@ impl Parser {
                 self.parse_set_query().map(Statement::Set)
             }
             TokKind::Match | TokKind::Optional
+                if self.statement_contains_remove_before_return() =>
+            {
+                self.parse_remove_query().map(Statement::Remove)
+            }
+            TokKind::Match | TokKind::Optional
                 if self.statement_contains_delete_before_return() =>
             {
                 self.parse_delete_query().map(Statement::Delete)
@@ -69,11 +74,19 @@ impl Parser {
     }
 
     fn statement_contains_delete_before_return(&self) -> bool {
+        self.statement_contains_before_return(TokKind::Delete)
+    }
+
+    fn statement_contains_remove_before_return(&self) -> bool {
+        self.statement_contains_before_return(TokKind::Remove)
+    }
+
+    fn statement_contains_before_return(&self, kind: TokKind) -> bool {
         self.tokens
             .iter()
             .skip(self.pos)
             .take_while(|token| token.kind != TokKind::Return && token.kind != TokKind::Eof)
-            .any(|token| token.kind == TokKind::Delete)
+            .any(|token| token.kind == kind)
     }
 
     fn parse_query(&mut self) -> Result<Query, GqlError> {
@@ -156,6 +169,28 @@ impl Parser {
         })
     }
 
+    fn parse_remove_query(&mut self) -> Result<RemoveQuery, GqlError> {
+        let start = self.current().span.start as usize;
+        let match_ = self.parse_match_clause()?;
+        let where_ = if self.consume(TokKind::Where).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let remove = self.parse_remove_clause()?;
+        let return_ = self.parse_return_clause()?;
+        self.reject_known_later_clauses()?;
+        let end = self.expect(TokKind::Eof, "expected end of query")?.span.end as usize;
+
+        Ok(RemoveQuery {
+            match_,
+            where_,
+            remove,
+            return_,
+            span: Span::new(start, end),
+        })
+    }
+
     fn parse_delete_query(&mut self) -> Result<DeleteQuery, GqlError> {
         let start = self.current().span.start as usize;
         let match_ = self.parse_match_clause()?;
@@ -217,6 +252,40 @@ impl Parser {
         Ok(DeleteClause {
             span: Span::new(start, var.span.end as usize),
             var,
+        })
+    }
+
+    fn parse_remove_clause(&mut self) -> Result<RemoveClause, GqlError> {
+        let start = self
+            .expect(TokKind::Remove, "expected REMOVE clause")?
+            .span
+            .start as usize;
+        let var = self.parse_ident()?;
+        let target = if self.consume(TokKind::Dot).is_some() {
+            let property = self.parse_property_path()?;
+            let property_ref = PropertyRef {
+                span: Span::new(var.span.start as usize, property.span.end as usize),
+                var,
+                property,
+            };
+            RemoveTarget::Property(property_ref)
+        } else if self.consume(TokKind::Colon).is_some() {
+            let label = self.parse_ident()?;
+            let span = Span::new(var.span.start as usize, label.span.end as usize);
+            RemoveTarget::Label { var, label, span }
+        } else {
+            return Err(GqlError::syntax(
+                var.span,
+                "expected property or label target in REMOVE clause",
+            ));
+        };
+        let end = match &target {
+            RemoveTarget::Property(property) => property.span.end,
+            RemoveTarget::Label { span, .. } => span.end,
+        };
+        Ok(RemoveClause {
+            target,
+            span: Span::new(start, end as usize),
         })
     }
 

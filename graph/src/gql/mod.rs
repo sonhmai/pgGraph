@@ -204,6 +204,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_remove_property_statement() {
+        let parsed =
+            super::parse_statement("MATCH (u:users {id: 'u1'}) REMOVE u.name RETURN u.name")
+                .expect("statement should parse");
+        let Statement::Remove(remove) = parsed else {
+            panic!("statement should be a remove query");
+        };
+
+        assert_eq!(remove.match_.pattern.start.var_text(), Some("u"));
+        let super::ast::RemoveTarget::Property(property) = &remove.remove.target else {
+            panic!("REMOVE target should be a property");
+        };
+        assert_eq!(property.var.text, "u");
+        assert_eq!(property.property.text, "name");
+        assert_eq!(remove.return_.items.len(), 1);
+    }
+
+    #[test]
+    fn parses_remove_label_statement() {
+        let parsed = super::parse_statement("MATCH (u:users {id: 'u1'}) REMOVE u:users RETURN u")
+            .expect("statement should parse");
+        let Statement::Remove(remove) = parsed else {
+            panic!("statement should be a remove query");
+        };
+
+        let super::ast::RemoveTarget::Label { var, label, .. } = &remove.remove.target else {
+            panic!("REMOVE target should be a label");
+        };
+        assert_eq!(var.text, "u");
+        assert_eq!(label.text, "users");
+    }
+
+    #[test]
     fn parses_delete_edge_statement() {
         let parsed =
             super::parse_statement("MATCH (u:users)-[r:friend]->(v:users) DELETE r RETURN u, v")

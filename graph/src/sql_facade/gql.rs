@@ -2,7 +2,7 @@ use super::admin::{check_enabled_result, with_panic_boundary};
 use super::runtime::{current_query_freshness, ensure_current_graph_for_query};
 use super::*;
 use crate::catalog::{primary_key_expr, read_catalog, sql_table_name_from_catalog};
-use crate::quote::quote_ident;
+use crate::quote::{quote_ident, quote_literal};
 
 /// Explain how the supported GQL subset binds and lowers.
 #[pg_extern(schema = "graph")]
@@ -33,6 +33,16 @@ fn gql_explain(query: &str) -> String {
                 check_set_acl(&plan);
                 format!(
                     "SetProperty(label={}, table_oid={}, property={}, returns={})",
+                    plan.label,
+                    plan.table_oid,
+                    plan.property,
+                    plan.returns.len()
+                )
+            }
+            crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
+                check_remove_acl(&plan);
+                format!(
+                    "RemoveProperty(label={}, table_oid={}, property={}, returns={})",
                     plan.label,
                     plan.table_oid,
                     plan.property,
@@ -88,6 +98,7 @@ fn build_statement(
         crate::gql::ast::Statement::Read(query) => query.span,
         crate::gql::ast::Statement::Create(query) => query.span,
         crate::gql::ast::Statement::Set(query) => query.span,
+        crate::gql::ast::Statement::Remove(query) => query.span,
         crate::gql::ast::Statement::Delete(query) => query.span,
     };
     let catalog = crate::query::catalog_snapshot::CatalogSnapshotImpl::load()
@@ -111,6 +122,11 @@ fn check_node_scan_acl(plan: &crate::query::physical_plan::PhysicalNodeScan) {
 }
 
 fn check_set_acl(plan: &crate::query::physical_plan::PhysicalSetProperty) {
+    acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+    acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
+}
+
+fn check_remove_acl(plan: &crate::query::physical_plan::PhysicalRemoveProperty) {
     acl::check_table_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
     acl::check_table_update_acl(plan.required_table_oid()).unwrap_or_else(|err| err.report());
 }
@@ -159,6 +175,10 @@ fn execute_statement(
         crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
             check_set_acl(&plan);
             execute_set_property(&plan, tenant_scope, params, hydrate)
+        }
+        crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
+            check_remove_acl(&plan);
+            execute_remove_property(&plan, tenant_scope, params, hydrate)
         }
         crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
             check_delete_acl(&plan);
@@ -217,8 +237,58 @@ fn execute_set_property(
     Ok(vec![project_updated_node(plan, updated, hydrate)])
 }
 
+fn execute_remove_property(
+    plan: &crate::query::physical_plan::PhysicalRemoveProperty,
+    tenant_scope: Option<&str>,
+    params: &crate::query::value::QueryParams,
+    hydrate: bool,
+) -> safety::GraphResult<Vec<serde_json::Value>> {
+    ensure_mutable_projection("GQL REMOVE")?;
+    crate::projection::tx_delta::ensure_write_capacity(0, 0, 0)?;
+    let scan = remove_property_node_scan(plan);
+    let matches = ENGINE.with(|engine| {
+        crate::query::execute::execute_node_scan(&engine.borrow(), &scan, tenant_scope)
+    })?;
+    let hydrated = hydrate_gql_node_rows(&matches, scan.predicate.is_some())?;
+    let matches = crate::query::value::filter_node_rows(matches, &scan, &hydrated, params)?;
+    let [row] = matches.as_slice() else {
+        return Err(safety::GraphError::GqlExecution {
+            reason: format!(
+                "GQL REMOVE requires exactly one matched `{}` node, found {}",
+                plan.label,
+                matches.len()
+            ),
+        });
+    };
+    let updated = remove_mapped_property(plan, &row.node.node_id)?;
+    update_filter_index_for_property(
+        plan.table_oid,
+        &updated.node_id,
+        &plan.property,
+        &updated.row,
+    )?;
+    Ok(vec![project_removed_node(plan, updated, hydrate)])
+}
+
 fn set_property_node_scan(
     plan: &crate::query::physical_plan::PhysicalSetProperty,
+) -> crate::query::physical_plan::PhysicalNodeScan {
+    crate::query::physical_plan::PhysicalNodeScan {
+        var: plan.var.clone(),
+        table_oid: plan.table_oid,
+        label: plan.label.clone(),
+        returns: Vec::new(),
+        distinct_stages: Vec::new(),
+        distinct: false,
+        predicate: plan.predicate.clone(),
+        order_by: Vec::new(),
+        skip: None,
+        limit: None,
+    }
+}
+
+fn remove_property_node_scan(
+    plan: &crate::query::physical_plan::PhysicalRemoveProperty,
 ) -> crate::query::physical_plan::PhysicalNodeScan {
     crate::query::physical_plan::PhysicalNodeScan {
         var: plan.var.clone(),
@@ -484,6 +554,100 @@ fn update_mapped_property(
             row: row_json.0,
         })
     })
+}
+
+fn remove_mapped_property(
+    plan: &crate::query::physical_plan::PhysicalRemoveProperty,
+    node_id: &str,
+) -> safety::GraphResult<UpdatedNode> {
+    let (tables, _edges, _filter_columns) = read_catalog()?;
+    let table = tables
+        .iter()
+        .find(|table| {
+            crate::catalog::table_oid_from_name(&table.table_name)
+                .ok()
+                .is_some_and(|oid| oid == plan.table_oid)
+        })
+        .ok_or_else(|| {
+            safety::GraphError::Internal(format!(
+                "cannot remove property from unregistered table OID {}",
+                plan.table_oid
+            ))
+        })?;
+    let table_name = sql_table_name_from_catalog(&table.table_name)?;
+    let pk_expr = primary_key_expr("src", &table.id_columns);
+    let assignment = remove_property_assignment(&plan.property);
+    let query = format!(
+        "WITH updated AS (
+             UPDATE {} AS src
+             SET {}
+             WHERE {} = $1
+             RETURNING to_jsonb(src.*), {}
+         )
+         SELECT * FROM updated",
+        table_name.as_sql(),
+        assignment,
+        pk_expr,
+        pk_expr
+    );
+    pgrx::Spi::connect_mut(|client| {
+        let rows = client
+            .update(&query, None, &[node_id.into()])
+            .map_err(|err| safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL REMOVE update failed for {}.{}: {}",
+                    table_name.as_sql(),
+                    quote_ident(&plan.property),
+                    err
+                ),
+            })?;
+        if rows.is_empty() {
+            return Err(safety::GraphError::GqlExecution {
+                reason: format!(
+                    "GQL REMOVE matched node `{}` but PostgreSQL updated no row",
+                    node_id
+                ),
+            });
+        }
+        let row = rows.first();
+        let row_json = row
+            .get::<pgrx::JsonB>(1)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL REMOVE row read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL REMOVE returned no row JSON".into())
+            })?;
+        let node_id = row
+            .get::<String>(2)
+            .map_err(|err| {
+                safety::GraphError::Internal(format!("GQL REMOVE primary key read failed: {err}"))
+            })?
+            .ok_or_else(|| {
+                safety::GraphError::Internal("GQL REMOVE returned no primary key".to_string())
+            })?;
+        Ok(UpdatedNode {
+            node_id,
+            row: row_json.0,
+        })
+    })
+}
+
+fn remove_property_assignment(property: &str) -> String {
+    let Some((root, path)) = property.split_once('.') else {
+        return format!("{} = NULL", quote_ident(property));
+    };
+    let path = path
+        .split('.')
+        .map(quote_literal)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} = {} #- ARRAY[{}]::text[]",
+        quote_ident(root),
+        quote_ident(root),
+        path
+    )
 }
 
 fn delete_mapped_edge_row(
@@ -910,6 +1074,25 @@ fn project_updated_node(
     serde_json::Value::Object(output)
 }
 
+fn project_removed_node(
+    plan: &crate::query::physical_plan::PhysicalRemoveProperty,
+    updated: UpdatedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    for slot in &plan.returns {
+        match slot {
+            crate::query::physical_plan::CreateReturnSlot::Node { name } => {
+                output.insert(name.clone(), removed_node_value(plan, &updated, hydrate));
+            }
+            crate::query::physical_plan::CreateReturnSlot::Property { property, name } => {
+                output.insert(name.clone(), row_property_value(&updated.row, property));
+            }
+        }
+    }
+    serde_json::Value::Object(output)
+}
+
 fn created_node_value(
     plan: &crate::query::physical_plan::PhysicalCreateNode,
     created: &CreatedNode,
@@ -956,6 +1139,46 @@ fn updated_node_value(
         serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
     );
     serde_json::Value::Object(node)
+}
+
+fn removed_node_value(
+    plan: &crate::query::physical_plan::PhysicalRemoveProperty,
+    updated: &UpdatedNode,
+    hydrate: bool,
+) -> serde_json::Value {
+    let mut node = if hydrate {
+        updated.row.as_object().cloned().unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    node.insert(
+        "_id".to_string(),
+        serde_json::json!({
+            "table": &plan.label,
+            "id": &updated.node_id,
+        }),
+    );
+    node.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(plan.label.clone())]),
+    );
+    serde_json::Value::Object(node)
+}
+
+fn row_property_value(row: &serde_json::Value, property: &str) -> serde_json::Value {
+    let mut current = row;
+    for part in property.split('.') {
+        match current {
+            serde_json::Value::Object(map) => {
+                let Some(next) = map.get(part) else {
+                    return serde_json::Value::Null;
+                };
+                current = next;
+            }
+            _ => return serde_json::Value::Null,
+        }
+    }
+    current.clone()
 }
 
 fn update_filter_index_for_property(

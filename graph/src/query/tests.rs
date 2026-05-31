@@ -34,7 +34,7 @@ fn fake_catalog() -> FakeCatalog {
                 "profile.missing",
                 "profile.explicit_null",
             ],
-            ["name"],
+            ["name", "age", "profile", "profile.plan"],
         )
         .with_writable_label("companies", 20, ["id", "name"], ["name"])
         .with_edge("works_at", 10, 20)
@@ -76,6 +76,49 @@ fn binder_accepts_set_property_for_writable_column() {
     assert_eq!(set.property, "name");
     assert!(set.predicate.is_some());
     assert_eq!(set.returns.len(), 1);
+}
+
+#[test]
+fn binder_accepts_remove_property_for_writable_column() {
+    let ast = crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) REMOVE u.age RETURN u.age")
+        .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::RemoveProperty(remove) = plan else {
+        panic!("expected remove property plan");
+    };
+
+    assert_eq!(remove.node.var, "u");
+    assert_eq!(remove.node.table_oid, 10);
+    assert_eq!(remove.property, "age");
+    assert!(remove.predicate.is_some());
+    assert_eq!(remove.returns.len(), 1);
+}
+
+#[test]
+fn binder_accepts_remove_jsonb_property_path() {
+    let ast = crate::gql::parse_statement(
+        "MATCH (u:users {id: 'u1'}) REMOVE u.profile.plan RETURN u.profile.plan AS plan",
+    )
+    .unwrap();
+    let plan = bind_statement(&ast, &fake_catalog()).unwrap();
+    let super::logical_plan::LogicalStatement::RemoveProperty(remove) = plan else {
+        panic!("expected remove property plan");
+    };
+
+    assert_eq!(remove.property, "profile.plan");
+    assert_eq!(remove.returns[0].name(), "plan");
+}
+
+#[test]
+fn binder_rejects_remove_label_for_source_table_labels() {
+    let ast =
+        crate::gql::parse_statement("MATCH (u:users {id: 'u1'}) REMOVE u:users RETURN u").unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(matches!(err.kind, GqlErrorKind::Unsupported { .. }));
+    assert!(err
+        .to_string()
+        .contains("labels map to registered source tables"));
 }
 
 #[test]

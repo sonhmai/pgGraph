@@ -61,6 +61,12 @@ GQL/SQL-PGQ primary.
 
 - **4A — `REMOVE`.** Property/label; null/missing per Phase 3. Tests: typed +
   jsonb cases, idempotency.
+
+  Status, 2026-05-31: closed for single-node mapped property removal. Scalar
+  mapped columns are set to SQL `NULL`; registered dotted JSONB property paths
+  remove the addressed key with PostgreSQL JSONB operators; repeated removal is
+  idempotent. Label removal is parsed and rejected because pgGraph labels map to
+  registered source tables rather than dynamic node labels.
 - **4B — `DETACH DELETE`.** Cascade policy. Tests: incident-edge enumeration,
   ordering, reverse consistency, partial-failure rollback.
 - **4C — `MERGE`.** Locking. Tests: two-session race on same key, ON CREATE / ON

@@ -11,6 +11,8 @@ pub(crate) enum Statement {
     Create(CreateQuery),
     /// `MATCH ... SET ... RETURN` property write query.
     Set(SetQuery),
+    /// `MATCH ... REMOVE ... RETURN` property/label write query.
+    Remove(RemoveQuery),
     /// `MATCH ... DELETE ... RETURN` edge write query.
     Delete(DeleteQuery),
 }
@@ -73,6 +75,21 @@ pub(crate) struct SetQuery {
     pub(crate) span: Span,
 }
 
+/// Parsed mapped property/label removal query.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RemoveQuery {
+    /// Required `MATCH` clause selecting the updated node.
+    pub(crate) match_: MatchClause,
+    /// Optional `WHERE` clause.
+    pub(crate) where_: Option<Expr>,
+    /// Property or label removal clause.
+    pub(crate) remove: RemoveClause,
+    /// Required `RETURN` clause.
+    pub(crate) return_: ReturnClause,
+    /// Full query span.
+    pub(crate) span: Span,
+}
+
 /// Parsed mapped edge delete query.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeleteQuery {
@@ -106,6 +123,31 @@ pub(crate) struct SetClause {
     pub(crate) value: Operand,
     /// Clause span.
     pub(crate) span: Span,
+}
+
+/// `REMOVE` clause for one node property or label.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RemoveClause {
+    /// Removed property or label target.
+    pub(crate) target: RemoveTarget,
+    /// Clause span.
+    pub(crate) span: Span,
+}
+
+/// Target of a `REMOVE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RemoveTarget {
+    /// Remove a mapped source-table property.
+    Property(PropertyRef),
+    /// Remove a node label.
+    Label {
+        /// Node variable name.
+        var: Ident,
+        /// Label name.
+        label: Ident,
+        /// Full target span.
+        span: Span,
+    },
 }
 
 /// `DELETE` clause for one relationship variable.

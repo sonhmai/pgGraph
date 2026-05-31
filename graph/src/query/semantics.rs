@@ -10,8 +10,9 @@ use super::catalog_snapshot::CatalogSnapshot;
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundMappedEdge,
     BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue, HopBounds,
-    LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan, LogicalPlan, LogicalSetProperty,
-    LogicalStatement, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey, ValueExpr,
+    LogicalCreateNode, LogicalDeleteEdge, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
+    LogicalSetProperty, LogicalStatement, PathFunc, Predicate, ReturnBinding, SortBinding,
+    SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -152,6 +153,9 @@ pub(crate) fn bind_statement(
         crate::gql::ast::Statement::Set(query) => {
             bind_set_property(query, catalog).map(LogicalStatement::SetProperty)
         }
+        crate::gql::ast::Statement::Remove(query) => {
+            bind_remove_property(query, catalog).map(LogicalStatement::RemoveProperty)
+        }
         crate::gql::ast::Statement::Delete(query) => {
             bind_delete_edge(query, catalog).map(LogicalStatement::DeleteEdge)
         }
@@ -176,7 +180,7 @@ fn bind_create_node(
         ));
     }
     let properties = bind_create_properties(&query.create.node, &node)?;
-    let returns = bind_create_returns(&query.return_.items, &node)?;
+    let returns = bind_write_returns(&query.return_.items, &node, false)?;
     Ok(LogicalCreateNode {
         node,
         properties,
@@ -233,9 +237,10 @@ fn bind_create_value(value: &Operand) -> Result<CreateValue, GqlError> {
     }
 }
 
-fn bind_create_returns(
+fn bind_write_returns(
     items: &[ReturnItem],
     node: &BoundNode,
+    allow_jsonb_paths: bool,
 ) -> Result<Vec<CreateReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut bindings = Vec::with_capacity(items.len());
@@ -255,7 +260,7 @@ fn bind_create_returns(
                     node,
                     property.span,
                 )?;
-                if property.text.contains('.') {
+                if property.text.contains('.') && !allow_jsonb_paths {
                     return Err(GqlError::unsupported(
                         property.span,
                         "write RETURN jsonb property paths require the Phase 4 jsonb write path",
@@ -329,13 +334,7 @@ fn bind_set_property(
         ));
     }
     let node = bind_node(start, catalog)?;
-    let writable_properties = start
-        .label
-        .as_ref()
-        .map(|label| catalog.resolve_node_label(&label.text, label.span))
-        .transpose()?
-        .map(|info| info.writable_properties)
-        .unwrap_or_default();
+    let writable_properties = writable_properties_for_match_start(start, catalog)?;
     if query.set.target.var.text != node.var {
         return Err(GqlError::bind(
             query.set.target.var.span,
@@ -363,7 +362,7 @@ fn bind_set_property(
     }
     let value = bind_create_value(&query.set.value)?;
     let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
-    let returns = bind_create_returns(&query.return_.items, &node)?;
+    let returns = bind_write_returns(&query.return_.items, &node, false)?;
     Ok(LogicalSetProperty {
         node,
         predicate,
@@ -371,6 +370,92 @@ fn bind_set_property(
         value,
         returns,
     })
+}
+
+fn bind_remove_property(
+    query: &crate::gql::ast::RemoveQuery,
+    catalog: &impl CatalogSnapshot,
+) -> Result<LogicalRemoveProperty, GqlError> {
+    if query.return_.distinct {
+        return Err(GqlError::unsupported(
+            query.return_.span,
+            "RETURN DISTINCT over REMOVE is implemented in a later phase",
+        ));
+    }
+    if query.match_.optional {
+        return Err(GqlError::unsupported(
+            query.match_.span,
+            "OPTIONAL MATCH is only supported for read queries",
+        ));
+    }
+    let Pattern { start, tail, .. } = &query.match_.pattern;
+    if !tail.is_empty() {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "REMOVE supports a single-node MATCH pattern in this release",
+        ));
+    }
+    let node = bind_node(start, catalog)?;
+    let writable_properties = writable_properties_for_match_start(start, catalog)?;
+    let property = match &query.remove.target {
+        crate::gql::ast::RemoveTarget::Property(target) => {
+            if target.var.text != node.var {
+                return Err(GqlError::bind(
+                    target.var.span,
+                    format!("unknown REMOVE variable `{}`", target.var.text),
+                ));
+            }
+            let property = target.property.text.clone();
+            if property.starts_with('_') {
+                return Err(GqlError::bind(
+                    target.property.span,
+                    format!("reserved GQL property key `{property}`"),
+                ));
+            }
+            if !writable_properties.contains(&property) {
+                return Err(GqlError::bind(
+                    target.property.span,
+                    format!("property `{property}` is not a writable mapped column"),
+                ));
+            }
+            property
+        }
+        crate::gql::ast::RemoveTarget::Label { var, label, .. } => {
+            if var.text != node.var {
+                return Err(GqlError::bind(
+                    var.span,
+                    format!("unknown REMOVE variable `{}`", var.text),
+                ));
+            }
+            return Err(GqlError::unsupported(
+                label.span,
+                "REMOVE label is not supported because labels map to registered source tables",
+            ));
+        }
+    };
+    let predicate = bind_node_predicates(query.where_.as_ref(), start, &node)?;
+    let returns = bind_write_returns(&query.return_.items, &node, true)?;
+    Ok(LogicalRemoveProperty {
+        node,
+        predicate,
+        property,
+        returns,
+    })
+}
+
+fn writable_properties_for_match_start(
+    start: &NodePat,
+    catalog: &impl CatalogSnapshot,
+) -> Result<std::collections::BTreeSet<String>, GqlError> {
+    start
+        .label
+        .as_ref()
+        .map(|label| catalog.resolve_node_label(&label.text, label.span))
+        .transpose()
+        .map(|info| {
+            info.map(|info| info.writable_properties)
+                .unwrap_or_default()
+        })
 }
 
 fn bind_delete_edge(

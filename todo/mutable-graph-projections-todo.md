@@ -400,6 +400,11 @@ SQL/PGQ remains non-public until PostgreSQL exposes stable graph-pattern hooks.
 2. Add optional openCypher compatibility only after GQL/SQL-PGQ direction is
    stable.
 
+Phase 4 status, 2026-05-31: `REMOVE` is closed for single-node mapped property
+removal. Scalar mapped columns are set to SQL `NULL`; registered dotted JSONB
+property paths remove the addressed key; repeated removal is idempotent. Label
+removal is rejected because labels map to registered source tables.
+
 ## Implementation Tracks
 
 - GQL parser and planner integration
@@ -545,7 +550,7 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `CREATE` registered node/edge rows | phase_2 | required | required | required | required | PostgreSQL-first, registered labels/types only. |
 | `SET` mapped properties | phase_2 | required | required | required | required | Requires type mapping and row locks. |
 | `DELETE` mapped relationships | phase_2 | required | required | required | required | No cascade in first write milestone. |
-| `REMOVE` property/label | phase_4 | required | required | required | required | Needs null/missing semantics. |
+| `REMOVE` property/label | phase_4 | supported | supported | supported | supported | Single-node mapped property removal is supported for scalar columns and registered dotted JSONB paths; label removal is an explicit unsupported-shape rejection. |
 | `DETACH DELETE` | phase_4 | required | required | required | required | Requires cascade policy. |
 | `MERGE` | phase_4 | required | required | required | required | Requires read-before-write locking semantics. |
 | GQL DDL/schema creation | out_of_scope | optional | required | reject | required | Do not create arbitrary tables from GQL. |

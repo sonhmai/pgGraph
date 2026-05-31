@@ -1510,6 +1510,216 @@ fn gql_set_property_updates_source_row_and_filter_index() {
 }
 
 #[pg_test]
+fn gql_remove_typed_property_sets_source_column_null_idempotently() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN status TEXT")
+        .expect("add status column failed");
+    Spi::run("UPDATE public.graph_test_users_pgtest SET status = 'active'")
+        .expect("seed status failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age', 'status']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (first_is_null, second_is_null, source_is_null) = Spi::connect(|client| {
+        let first = client
+            .select(
+                "SELECT row->'status' = 'null'::jsonb
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}) REMOVE u.status RETURN u.status AS status'
+                 )",
+                None,
+                &[],
+            )
+            .expect("first remove failed")
+            .first()
+            .get::<bool>(1)
+            .expect("first null read failed")
+            .unwrap_or(false);
+        let second = client
+            .select(
+                "SELECT row->'status' = 'null'::jsonb
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}) REMOVE u.status RETURN u.status AS status'
+                 )",
+                None,
+                &[],
+            )
+            .expect("second remove failed")
+            .first()
+            .get::<bool>(1)
+            .expect("second null read failed")
+            .unwrap_or(false);
+        let source = client
+            .select(
+                "SELECT status IS NULL FROM public.graph_test_users_pgtest WHERE id = 'u2'",
+                None,
+                &[],
+            )
+            .expect("source status query failed")
+            .first()
+            .get::<bool>(1)
+            .expect("source status read failed")
+            .unwrap_or(false);
+        Ok::<_, pgrx::spi::Error>((first, second, source))
+    })
+    .expect("remove typed verification failed");
+
+    assert!(first_is_null);
+    assert!(second_is_null);
+    assert!(source_is_null);
+}
+
+#[pg_test]
+fn gql_remove_jsonb_property_path_drops_key_idempotently() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("ALTER TABLE public.graph_test_users_pgtest ADD COLUMN profile jsonb")
+    .expect("add profile column failed");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+         SET profile = CASE id
+           WHEN 'u1' THEN '{\"plan\":\"pro\",\"flags\":{\"beta\":true}}'::jsonb
+           ELSE NULL
+         END",
+    )
+    .expect("seed profile failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age', 'profile', 'profile.plan', 'profile.flags']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend'
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build mutable graph failed");
+
+    let (first_plan_null, second_plan_null, profile, source_has_plan, null_root_preserved) =
+        Spi::connect(|client| {
+        let first = client
+            .select(
+                "SELECT row->'plan' = 'null'::jsonb
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u1''}) REMOVE u.profile.plan RETURN u.profile.plan AS plan'
+                 )",
+                None,
+                &[],
+            )
+            .expect("first jsonb remove failed")
+            .first()
+            .get::<bool>(1)
+            .expect("first plan null read failed")
+            .unwrap_or(false);
+        let second_row = client
+            .select(
+                "SELECT row->'plan' = 'null'::jsonb, row->'profile'
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u1''}) REMOVE u.profile.plan RETURN u.profile.plan AS plan, u.profile AS profile'
+                 )",
+                None,
+                &[],
+            )
+            .expect("second jsonb remove failed")
+            .first();
+        let second = second_row
+            .get::<bool>(1)
+            .expect("second plan null read failed")
+            .unwrap_or(false);
+        let profile = second_row
+            .get::<pgrx::JsonB>(2)
+            .expect("profile read failed")
+            .unwrap();
+        let source_has_plan = client
+            .select(
+                "SELECT profile ? 'plan' FROM public.graph_test_users_pgtest WHERE id = 'u1'",
+                None,
+                &[],
+            )
+            .expect("source profile query failed")
+            .first()
+            .get::<bool>(1)
+            .expect("source profile read failed")
+            .unwrap_or(true);
+        let null_root_preserved = client
+            .select(
+                "SELECT row->'profile' = 'null'::jsonb
+                 FROM graph.gql(
+                    'MATCH (u:graph_test_users_pgtest {id: ''u2''}) REMOVE u.profile.plan RETURN u.profile AS profile'
+                 )",
+                None,
+                &[],
+            )
+            .expect("null-root jsonb remove failed")
+            .first()
+            .get::<bool>(1)
+            .expect("null-root profile read failed")
+            .unwrap_or(false);
+        Ok::<_, pgrx::spi::Error>((first, second, profile, source_has_plan, null_root_preserved))
+    })
+    .expect("remove jsonb verification failed");
+
+    assert!(first_plan_null);
+    assert!(second_plan_null);
+    assert_eq!(profile.0, serde_json::json!({"flags": {"beta": true}}));
+    assert!(!source_has_plan);
+    assert!(null_root_preserved);
+}
+
+#[pg_test]
+fn gql_remove_property_requires_mutable_overlay_projection() {
+    reset_and_create_fixtures();
+    build_friendship_fixture_graph();
+    create_error_capture_helper();
+
+    let denied = Spi::get_one::<bool>(&format!(
+        "SELECT public.graph_test_sql_raises({})",
+        super::sql_literal(
+            "SELECT * FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest {id: ''u2''}) REMOVE u.age RETURN u.age'
+             )"
+        )
+    ))
+    .expect("readonly remove capture failed")
+    .unwrap_or(false);
+    let source_age = Spi::get_one::<i32>(
+        "SELECT age FROM public.graph_test_users_pgtest WHERE id = 'u2'",
+    )
+    .expect("source age query failed")
+    .unwrap_or_default();
+
+    assert!(denied);
+    assert_eq!(source_age, 41);
+}
+
+#[pg_test]
 fn gql_set_property_rejects_type_mismatch_and_readonly_projection() {
     reset_and_create_fixtures();
     Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");

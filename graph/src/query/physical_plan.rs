@@ -21,6 +21,8 @@ pub(crate) enum PhysicalStatement {
     CreateNode(PhysicalCreateNode),
     /// PostgreSQL-backed node property update.
     SetProperty(PhysicalSetProperty),
+    /// PostgreSQL-backed node property removal.
+    RemoveProperty(PhysicalRemoveProperty),
     /// PostgreSQL-backed edge row deletion.
     DeleteEdge(PhysicalDeleteEdge),
 }
@@ -96,6 +98,23 @@ pub(crate) struct PhysicalSetProperty {
     pub(crate) property: String,
     /// New property value.
     pub(crate) value: CreateValueSlot,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnSlot>,
+}
+
+/// Physical node property removal plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PhysicalRemoveProperty {
+    /// Matched node variable.
+    pub(crate) var: String,
+    /// Source table OID.
+    pub(crate) table_oid: u32,
+    /// Source label.
+    pub(crate) label: String,
+    /// Optional hydrated-row predicate selecting the row.
+    pub(crate) predicate: Option<Predicate>,
+    /// Source table column or registered JSONB property path to remove.
+    pub(crate) property: String,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnSlot>,
 }
@@ -299,6 +318,13 @@ impl PhysicalCreateNode {
 }
 
 impl PhysicalSetProperty {
+    /// Table OID whose row will be updated.
+    pub(crate) fn required_table_oid(&self) -> u32 {
+        self.table_oid
+    }
+}
+
+impl PhysicalRemoveProperty {
     /// Table OID whose row will be updated.
     pub(crate) fn required_table_oid(&self) -> u32 {
         self.table_oid

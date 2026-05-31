@@ -13,6 +13,8 @@ pub(crate) enum LogicalStatement {
     CreateNode(LogicalCreateNode),
     /// Mapped node property update.
     SetProperty(LogicalSetProperty),
+    /// Mapped node property removal.
+    RemoveProperty(LogicalRemoveProperty),
     /// Mapped edge row deletion.
     DeleteEdge(LogicalDeleteEdge),
 }
@@ -87,6 +89,19 @@ pub(crate) struct LogicalSetProperty {
     pub(crate) property: String,
     /// New property value.
     pub(crate) value: CreateValue,
+    /// Return slots in requested order.
+    pub(crate) returns: Vec<CreateReturnBinding>,
+}
+
+/// Bound node property removal.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalRemoveProperty {
+    /// Matched node binding.
+    pub(crate) node: BoundNode,
+    /// Optional hydrated-row predicate selecting the row.
+    pub(crate) predicate: Option<Predicate>,
+    /// Source table column or registered JSONB property path to remove.
+    pub(crate) property: String,
     /// Return slots in requested order.
     pub(crate) returns: Vec<CreateReturnBinding>,
 }
