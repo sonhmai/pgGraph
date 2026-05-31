@@ -958,6 +958,23 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
+    )
+    .expect("insert pending weighted node failed");
+    let weighted_cost = Spi::get_one::<i64>(
+        "SELECT total_cost
+             FROM graph.weighted_shortest_path(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node',
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node'
+             )",
+    )
+    .expect("weighted path failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
              VALUES ('multi-start-child', 'root', 'Multi Start Child', 7)",
     )
     .expect("insert pending multi-start child failed");
@@ -995,23 +1012,6 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
-    )
-    .expect("insert pending weighted node failed");
-    let weighted_cost = Spi::get_one::<i64>(
-        "SELECT total_cost
-             FROM graph.weighted_shortest_path(
-                'graph_test_topology_auto_sync_pgtest'::regclass,
-                'weighted-node',
-                'graph_test_topology_auto_sync_pgtest'::regclass,
-                'weighted-node'
-             )",
-    )
-    .expect("weighted path failed")
-    .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
              VALUES ('search-node', NULL, 'Search Node', 1)",
     )
     .expect("insert pending search node failed");
@@ -1034,6 +1034,24 @@ fn topology_reads_auto_sync_traversal_and_paths() {
     assert_eq!(shortest_rows, 1);
     assert_eq!(weighted_cost, 0);
     assert_eq!(traverse_search_sees_child, 1);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
+fn weighted_shortest_path_rejects_pending_edge_overlay_with_pg018() {
+    setup_topology_auto_sync_fixture();
+
+    insert_topology_auto_sync_node("pending-weighted-child", Some("root"), "Pending Weighted Child");
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.weighted_shortest_path(
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'root',
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'pending-weighted-child'
+         )",
+    );
+
+    assert_eq!(sqlstate.as_deref(), Some("PG018"));
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
 

@@ -10,6 +10,9 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
+use crate::projection::neighbors::{
+    CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
+};
 use crate::resolution_index::{ResolutionDeltaIndex, ResolutionIndex, ResolutionIndexBuilder};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::*;
@@ -17,10 +20,6 @@ use crate::types::*;
 use pgrx::prelude::TimestampWithTimeZone;
 use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
-
-type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
-type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
-type TraversalEdgeOverlay = (OverlayInserts, OverlayDeletes);
 
 /// Resolution storage backend.
 ///
@@ -668,7 +667,7 @@ impl Engine {
         }
     }
 
-    fn traversal_edge_overlay(&self, direction: TraversalDirection) -> TraversalEdgeOverlay {
+    fn traversal_edge_overlay(&self, direction: TraversalDirection) -> EdgeOverlay {
         let mut inserts: HashSet<(u32, u32, u8)> = HashSet::new();
         let mut deletes: HashSet<(u32, u32, u8)> = HashSet::new();
 
@@ -735,15 +734,35 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
-        let result = path_finder::shortest_path(
-            &self.node_store,
-            &self.edge_store,
-            source,
-            target,
-            max_depth,
-            self.has_unidirectional_edges,
-            &self.edge_type_registry,
-        );
+        let result = if self.edge_buffer.is_empty() {
+            let neighbors = CsrNeighbors::new(&self.edge_store);
+            path_finder::shortest_path_with_neighbors(
+                &self.node_store,
+                &neighbors,
+                source,
+                target,
+                max_depth,
+                self.has_unidirectional_edges,
+                &self.edge_type_registry,
+            )
+        } else {
+            let (overlay_insert_edges, overlay_deleted_edges) =
+                self.traversal_edge_overlay(TraversalDirection::Out);
+            let neighbors = OverlayNeighbors::new(
+                &self.edge_store,
+                &overlay_insert_edges,
+                &overlay_deleted_edges,
+            );
+            path_finder::shortest_path_with_neighbors(
+                &self.node_store,
+                &neighbors,
+                source,
+                target,
+                max_depth,
+                self.has_unidirectional_edges,
+                &self.edge_type_registry,
+            )
+        };
 
         Ok(result.unwrap_or_default())
     }
@@ -758,6 +777,13 @@ impl Engine {
     ) -> GraphResult<Vec<WeightedPathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
+        }
+        if !self.edge_buffer.is_empty() {
+            return Err(GraphError::UnsupportedOperation {
+                operation: "graph.weighted_shortest_path() with pending edge overlays"
+                    .to_string(),
+                reason: "pending edge overlays do not carry edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
+            });
         }
 
         let source =
@@ -881,10 +907,25 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        Ok(crate::connected_components::compute_components(
-            &self.node_store,
+        if self.edge_buffer.is_empty() {
+            return Ok(crate::connected_components::compute_components(
+                &self.node_store,
+                &self.edge_store,
+            ));
+        }
+        let (overlay_insert_edges, overlay_deleted_edges) =
+            self.traversal_edge_overlay(TraversalDirection::Out);
+        let neighbors = OverlayNeighbors::new(
             &self.edge_store,
-        ))
+            &overlay_insert_edges,
+            &overlay_deleted_edges,
+        );
+        Ok(
+            crate::connected_components::compute_components_with_neighbors(
+                &self.node_store,
+                &neighbors,
+            ),
+        )
     }
 }
 
@@ -1486,6 +1527,44 @@ mod tests {
         assert_eq!(steps.last().unwrap().node_id, "D");
     }
 
+    #[test]
+    fn shortest_path_uses_pending_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        eng.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "E", "D"]
+        );
+    }
+
+    #[test]
+    fn shortest_path_hides_deleted_overlay_edges() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        eng.edge_buffer.push(EdgeMutation {
+            source: 1,
+            target: 2,
+            type_id: 1,
+            kind: MutationKind::Delete,
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert!(steps.is_empty());
+    }
+
     // ─── weighted_shortest_path() ───
 
     #[test]
@@ -1500,6 +1579,34 @@ mod tests {
         let eng = build_test_engine(); // unweighted
         let result = eng.weighted_shortest_path(100, "A", 100, "D").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn weighted_shortest_path_rejects_pending_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+            }],
+            true,
+        );
+        eng.edge_buffer.push(EdgeMutation {
+            source: 1,
+            target: 2,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let result = eng.weighted_shortest_path(100, "A", 100, "C");
+
+        assert!(matches!(
+            result,
+            Err(GraphError::UnsupportedOperation { .. })
+        ));
     }
 
     // ─── connected_components() ───
@@ -1517,6 +1624,23 @@ mod tests {
         let result = eng.connected_components().unwrap();
         assert_eq!(result.num_components, 1);
         assert_eq!(result.largest_component_size, 5);
+    }
+
+    #[test]
+    fn connected_components_honor_pending_edge_deletes() {
+        let mut eng = build_test_engine();
+        for (source, target) in [(1, 2), (2, 1)] {
+            eng.edge_buffer.push(EdgeMutation {
+                source,
+                target,
+                type_id: 1,
+                kind: MutationKind::Delete,
+            });
+        }
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
     }
 
     // ─── register_edge_type() ───

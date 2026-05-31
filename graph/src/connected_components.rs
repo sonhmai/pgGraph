@@ -17,6 +17,7 @@
 
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
+use crate::projection::neighbors::{CsrNeighbors, NeighborSource};
 use crate::types::TableOid;
 use std::collections::HashMap;
 
@@ -96,6 +97,15 @@ impl UnionFind {
 /// # Returns
 /// ComponentResult with per-node component labels and summary stats.
 pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> ComponentResult {
+    let neighbors = CsrNeighbors::new(edge_store);
+    compute_components_with_neighbors(node_store, &neighbors)
+}
+
+/// Compute connected components over a supplied neighbor source.
+pub(crate) fn compute_components_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+) -> ComponentResult {
     let node_count = node_store.node_count() as usize;
 
     if node_count == 0 {
@@ -115,10 +125,9 @@ pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> Com
             continue;
         }
 
-        let (targets, _type_ids) = edge_store.neighbors(node);
-        for &target in targets {
-            if node_store.is_active(target) {
-                uf.union(node, target);
+        for edge in neighbors.neighbors(node) {
+            if node_store.is_active(edge.target) {
+                uf.union(node, edge.target);
             }
         }
     }

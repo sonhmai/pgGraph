@@ -32,6 +32,7 @@ mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
+mod projection;
 mod query;
 mod quote;
 mod resolution_index;

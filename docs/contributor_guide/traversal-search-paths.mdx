@@ -96,8 +96,9 @@ to `(table_oid, primary_key)` coordinates.
 
 1. Verifies engine built.
 2. Resolves source and target coordinates.
-3. Calls `path_finder::shortest_path()`.
-4. Returns path steps with edge labels.
+3. Builds a clean CSR or overlay-aware neighbor source.
+4. Calls `path_finder::shortest_path_with_neighbors()`.
+5. Returns path steps with edge labels.
 
 The path finder can use bidirectional search when safe. When the graph contains
 any unidirectional edges, correctness requires a forward search path that does
@@ -124,6 +125,9 @@ The SQL wrapper returns no rows when:
 | No weight data exists | Weighted path cannot be evaluated |
 
 Missing per-edge weights in a weighted store default to cost `1`.
+When pending edge overlays exist, weighted path search is rejected with `PG018`
+because overlay mutations do not carry edge weights until maintenance merges
+them into the CSR weight store.
 
 ## Source-Table Search
 

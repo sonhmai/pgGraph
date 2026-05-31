@@ -40,6 +40,12 @@ Detail per slice lives in the phase design docs:
 | 2E `DELETE` mapped edge | 2C | tombstone reduces neighbors; reverse consistency; no cascade |
 | 2F Compaction + observability + memory limits (DR-2) | 2D, 2E | compaction equivalence (CSR+overlay ≡ rebuilt); statement-scoped abort; status row shape |
 
+Status note, 2026-05-31: 2A is implemented in the working branch. Clean
+overlay equivalence is covered by a `NeighborSource` property test, dirty
+unweighted paths/components route through overlay neighbors, weighted paths
+reject dirty edge overlays with `PG018`, and the clean-overlay benchmark is
+within noise of the pre-2A baseline.
+
 ## Phase 3 — Advanced reads + SQL/PGQ adapter
 
 | Slice | Depends on | Merge gate |

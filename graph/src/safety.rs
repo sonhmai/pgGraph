@@ -50,6 +50,9 @@ pub enum GraphError {
     #[error("GQL execution error: {reason}")]
     GqlExecution { reason: String }, // PG017
 
+    #[error("Unsupported graph operation {operation}: {reason}")]
+    UnsupportedOperation { operation: String, reason: String }, // PG018
+
     #[error("Another build() or vacuum() is already running")]
     BuildLocked, // PG006
 
@@ -91,6 +94,7 @@ impl GraphError {
             GraphError::GqlSemantic { .. } => "PG015",
             GraphError::GqlParameter { .. } => "PG016",
             GraphError::GqlExecution { .. } => "PG017",
+            GraphError::UnsupportedOperation { .. } => "PG018",
             GraphError::BuildLocked => "PG006",
             GraphError::EdgeBufferFull { .. } => "PG008",
             GraphError::ReadOnly { .. } => "PG012",
@@ -137,6 +141,9 @@ impl GraphError {
             }
             GraphError::GqlExecution { .. } => {
                 "Reduce result cardinality with labels, predicates, direction, hop bounds, or LIMIT; rebuild the graph if registered metadata changed.".to_string()
+            }
+            GraphError::UnsupportedOperation { .. } => {
+                "Use a supported query shape, or run graph.vacuum()/graph.maintenance() to merge pending graph overlays before retrying.".to_string()
             }
             GraphError::BuildLocked => {
                 "Wait for the current build() or vacuum() to complete, or check pg_stat_activity for blocking sessions.".to_string()
@@ -340,6 +347,15 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_operation_maps_to_pg018() {
+        let err = GraphError::UnsupportedOperation {
+            operation: "op".to_string(),
+            reason: "reason".to_string(),
+        };
+        assert_eq!(err.sqlstate(), "PG018");
+    }
+
+    #[test]
     fn read_only_maps_to_pg012() {
         let err = GraphError::ReadOnly {
             reason: "memory_limit".to_string(),
@@ -519,6 +535,10 @@ mod tests {
             GraphError::GqlSemantic { reason: "r".into() },
             GraphError::GqlParameter { reason: "r".into() },
             GraphError::GqlExecution { reason: "r".into() },
+            GraphError::UnsupportedOperation {
+                operation: "op".into(),
+                reason: "r".into(),
+            },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
@@ -555,6 +575,10 @@ mod tests {
             GraphError::GqlSemantic { reason: "r".into() },
             GraphError::GqlParameter { reason: "r".into() },
             GraphError::GqlExecution { reason: "r".into() },
+            GraphError::UnsupportedOperation {
+                operation: "op".into(),
+                reason: "r".into(),
+            },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },
@@ -596,6 +620,10 @@ mod tests {
             GraphError::GqlSemantic { reason: "r".into() },
             GraphError::GqlParameter { reason: "r".into() },
             GraphError::GqlExecution { reason: "r".into() },
+            GraphError::UnsupportedOperation {
+                operation: "op".into(),
+                reason: "r".into(),
+            },
             GraphError::BuildLocked,
             GraphError::EdgeBufferFull { size: 0 },
             GraphError::CorruptFile { reason: "r".into() },

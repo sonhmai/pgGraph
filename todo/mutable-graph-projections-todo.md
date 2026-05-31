@@ -269,12 +269,13 @@ interacts with the current sync path.
   mutable regions, not a prerequisite for GQL writes.
 - Algorithms: overlay-aware execution must cover traversal, shortest path,
   weighted shortest path, connected components, search/traversal hybrids, and
-  aggregation where supported. Today the overlay gap is large, not marginal:
-  only `bfs.rs` and `sql_aggregation.rs` consume the delta/edge_buffer overlays.
-  `path_finder.rs` (shortest / weighted path), `connected_components.rs`, and
-  `sql_search.rs` do not consume `resolution_delta` or `edge_buffer` at all, so
-  the "make algorithms overlay-aware" step covers most of the algorithm
-  surface, not a few stragglers.
+  aggregation where supported. Phase 2A introduced the shared neighbor-source
+  abstraction for clean CSR and edge overlays; `bfs.rs`, unweighted
+  `path_finder.rs`, `connected_components.rs`, and `sql_aggregation.rs` now
+  consume pending edge overlays. Weighted shortest path rejects dirty edge
+  overlays with `PG018` until vacuum/maintenance merges weights into CSR.
+  Source-table search remains a PostgreSQL source-row lookup rather than a
+  graph-topology algorithm; `traverse_search` inherits overlay-aware traversal.
 
 ## Blind Spots To Resolve
 
@@ -659,9 +660,10 @@ Per-API:
 |---|---|
 | `graph.traverse()` / BFS (`bfs.rs`) | **Overlay-aware** (already consumes deltas). |
 | Aggregation (`sql_aggregation.rs`) | **Overlay-aware** (already consumes deltas). |
-| `graph.shortest_path()` / weighted (`path_finder.rs`) | **Reject dirty overlay** with stable SQLSTATE until routed through `NeighborSource`. |
-| `graph.connected_components()` (`connected_components.rs`) | **Reject dirty overlay** until routed through `NeighborSource`. |
-| `graph.search()` / `traverse_search` (`sql_search.rs`) | **Reject dirty overlay** until routed through `NeighborSource`. |
+| `graph.shortest_path()` (`path_finder.rs`) | **Overlay-aware** through `NeighborSource`. |
+| `graph.weighted_shortest_path()` (`path_finder.rs`) | **Reject dirty edge overlay** with `PG018` because pending mutations do not carry weights. |
+| `graph.connected_components()` (`connected_components.rs`) | **Overlay-aware** through `NeighborSource`. |
+| `graph.search()` / `traverse_search` (`sql_search.rs`) | Source-table search is not a graph-topology read; `traverse_search` inherits overlay-aware traversal. |
 
 `graph.status()` / `graph.sync_health()` must expose the dirty flag and the
 read-only/rejection reason. **Justification:** correctness over convenience;

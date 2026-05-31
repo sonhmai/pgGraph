@@ -370,6 +370,11 @@ FROM graph.weighted_shortest_path(
 );
 ```
 
+Unweighted shortest path includes pending trigger-sync edge overlays after
+`graph.apply_sync()`. Weighted shortest path requires merged weighted CSR data;
+when edge overlays are pending, it fails with `PG018` until `graph.vacuum()` or
+`graph.maintenance()` rebuilds the weighted graph.
+
 Weighted path return columns:
 
 | Column | Type | Meaning |

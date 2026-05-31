@@ -12,6 +12,9 @@ use roaring::RoaringBitmap;
 
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
+#[cfg(test)]
+use crate::projection::neighbors::CsrNeighbors;
+use crate::projection::neighbors::NeighborSource;
 use crate::types::{PathStep, TableOid, WeightedPathStep};
 
 #[derive(Debug, Clone, Copy)]
@@ -31,9 +34,32 @@ struct WeightedParentStep {
 ///
 /// Returns `None` if no path exists.
 /// Falls back to single-direction BFS if the graph has unidirectional edges.
+#[cfg(test)]
 pub fn shortest_path(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
+    source: u32,
+    target: u32,
+    max_depth: i32,
+    has_unidirectional_edges: bool,
+    edge_type_registry: &[String],
+) -> Option<Vec<PathStep>> {
+    let neighbors = CsrNeighbors::new(edge_store);
+    shortest_path_with_neighbors(
+        node_store,
+        &neighbors,
+        source,
+        target,
+        max_depth,
+        has_unidirectional_edges,
+        edge_type_registry,
+    )
+}
+
+/// Find the shortest unweighted path over a supplied neighbor source.
+pub(crate) fn shortest_path_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
     source: u32,
     target: u32,
     max_depth: i32,
@@ -56,7 +82,7 @@ pub fn shortest_path(
     if has_unidirectional_edges {
         return single_direction_bfs(
             node_store,
-            edge_store,
+            neighbors,
             source,
             target,
             max_depth,
@@ -66,7 +92,7 @@ pub fn shortest_path(
 
     bidirectional_bfs(
         node_store,
-        edge_store,
+        neighbors,
         source,
         target,
         max_depth,
@@ -76,7 +102,7 @@ pub fn shortest_path(
 
 fn bidirectional_bfs(
     node_store: &NodeStore,
-    edge_store: &EdgeStore,
+    neighbors: &impl NeighborSource,
     source: u32,
     target: u32,
     max_depth: i32,
@@ -119,29 +145,27 @@ fn bidirectional_bfs(
                 let Some(current) = fwd_frontier.pop_front() else {
                     break;
                 };
-                let (targets, type_ids) = edge_store.neighbors(current);
-                for i in 0..targets.len() {
-                    let neighbor = targets[i];
-                    if !node_store.is_active(neighbor) {
+                for edge in neighbors.neighbors(current) {
+                    if !node_store.is_active(edge.target) {
                         continue;
                     }
-                    if !fwd_visited.contains(neighbor) {
-                        fwd_visited.insert(neighbor);
+                    if !fwd_visited.contains(edge.target) {
+                        fwd_visited.insert(edge.target);
                         fwd_parent.insert(
-                            neighbor,
+                            edge.target,
                             ParentStep {
                                 parent: current,
-                                edge_type: type_ids[i],
+                                edge_type: edge.type_id,
                             },
                         );
-                        fwd_frontier.push_back(neighbor);
+                        fwd_frontier.push_back(edge.target);
                     }
-                    if bwd_visited.contains(neighbor) {
-                        fwd_parent.entry(neighbor).or_insert(ParentStep {
+                    if bwd_visited.contains(edge.target) {
+                        fwd_parent.entry(edge.target).or_insert(ParentStep {
                             parent: current,
-                            edge_type: type_ids[i],
+                            edge_type: edge.type_id,
                         });
-                        meeting_node = Some(neighbor);
+                        meeting_node = Some(edge.target);
                         break;
                     }
                 }
@@ -155,29 +179,27 @@ fn bidirectional_bfs(
                 let Some(current) = bwd_frontier.pop_front() else {
                     break;
                 };
-                let (targets, type_ids) = edge_store.neighbors(current);
-                for i in 0..targets.len() {
-                    let neighbor = targets[i];
-                    if !node_store.is_active(neighbor) {
+                for edge in neighbors.neighbors(current) {
+                    if !node_store.is_active(edge.target) {
                         continue;
                     }
-                    if !bwd_visited.contains(neighbor) {
-                        bwd_visited.insert(neighbor);
+                    if !bwd_visited.contains(edge.target) {
+                        bwd_visited.insert(edge.target);
                         bwd_parent.insert(
-                            neighbor,
+                            edge.target,
                             ParentStep {
                                 parent: current,
-                                edge_type: type_ids[i],
+                                edge_type: edge.type_id,
                             },
                         );
-                        bwd_frontier.push_back(neighbor);
+                        bwd_frontier.push_back(edge.target);
                     }
-                    if fwd_visited.contains(neighbor) {
-                        bwd_parent.entry(neighbor).or_insert(ParentStep {
+                    if fwd_visited.contains(edge.target) {
+                        bwd_parent.entry(edge.target).or_insert(ParentStep {
                             parent: current,
-                            edge_type: type_ids[i],
+                            edge_type: edge.type_id,
                         });
-                        meeting_node = Some(neighbor);
+                        meeting_node = Some(edge.target);
                         break;
                     }
                 }
@@ -260,7 +282,7 @@ fn bidirectional_bfs(
 
 fn single_direction_bfs(
     node_store: &NodeStore,
-    edge_store: &EdgeStore,
+    neighbors: &impl NeighborSource,
     source: u32,
     target: u32,
     max_depth: i32,
@@ -285,24 +307,22 @@ fn single_direction_bfs(
             continue;
         }
 
-        let (targets, type_ids) = edge_store.neighbors(current);
-        for i in 0..targets.len() {
-            let neighbor = targets[i];
-            if visited.contains(neighbor) || !node_store.is_active(neighbor) {
+        for edge in neighbors.neighbors(current) {
+            if visited.contains(edge.target) || !node_store.is_active(edge.target) {
                 continue;
             }
 
-            visited.insert(neighbor);
+            visited.insert(edge.target);
             parent.insert(
-                neighbor,
+                edge.target,
                 ParentStep {
                     parent: current,
-                    edge_type: type_ids[i],
+                    edge_type: edge.type_id,
                 },
             );
-            frontier.push_back((neighbor, current_depth + 1));
+            frontier.push_back((edge.target, current_depth + 1));
 
-            if neighbor == target {
+            if edge.target == target {
                 // Found target — reconstruct path
                 let mut path = Vec::new();
                 let mut cur = target;

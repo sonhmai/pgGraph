@@ -48,6 +48,23 @@ consume `NeighborSource` or reject a dirty overlay with a stable SQLSTATE. A
 clean `mutable_overlay` must benchmark within noise of `csr_readonly` via
 `CsrNeighbors`.
 
+### Slice 2A implementation status - 2026-05-31
+
+- Added `graph/src/projection/neighbors.rs` with `NeighborSource`,
+  `CsrNeighbors`, and `OverlayNeighbors`.
+- Routed BFS/DFS, unweighted shortest path, and connected components through
+  the shared neighbor-source abstraction.
+- Kept source-table search as a source-row SQL lookup; `traverse_search`
+  inherits the overlay-aware traversal path.
+- `graph.weighted_shortest_path()` rejects dirty edge overlays with `PG018`
+  until `graph.vacuum()` or `graph.maintenance()` merges edge weights into CSR.
+- Tests added:
+  - clean overlay equivalence property test;
+  - overlay insert/delete neighbor tests;
+  - engine shortest-path overlay insert/delete tests;
+  - connected-component dirty-overlay test;
+  - weighted shortest-path dirty-overlay rejection test.
+
 ## 3. Transaction delta model (slice 2B)
 
 ```rust
