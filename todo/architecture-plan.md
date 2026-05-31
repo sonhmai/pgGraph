@@ -25,13 +25,13 @@ SQL facade
   graph.gql(...)
   existing graph.* SQL functions
   future SQL/PGQ adapter
-  optional future graph.cypher(...)
+  graph.cypher(...)
         |
 query frontend layer
   GQL lexer/parser
   SQL function request lowering
   SQL/PGQ adapter lowering
-  optional openCypher compatibility lowering
+  openCypher compatibility lowering
         |
 semantic binding
   graph catalog snapshot
@@ -53,8 +53,8 @@ PostgreSQL source tables remain authoritative
 The architecture deliberately separates language support from runtime
 mutability. Read-only GQL can run on the current immutable CSR engine. Mutable
 overlay support is valuable to existing SQL APIs even without GQL. GQL writes
-come after both layers are stable. openCypher is optional compatibility after
-the GQL/SQL-PGQ planner is proven.
+come after both layers are stable. openCypher compatibility remains a separate
+surface over the shared planner rather than a Neo4j compatibility claim.
 
 ## Crate And Module Layout
 
@@ -97,7 +97,7 @@ graph/src/projection/
 graph/src/sql_facade/gql.rs
 ```
 
-**Deferred module groups (do NOT create until their phase begins):**
+**Phase-owned module groups:**
 
 ```text
 graph/src/cypher/            # Phase 4 only — optional openCypher compatibility
@@ -111,10 +111,10 @@ graph/src/cypher/            # Phase 4 only — optional openCypher compatibilit
 graph/src/sql_facade/cypher.rs   # Phase 4 only
 ```
 
-`graph/src/projection/` is created in Phase 2, not Phase 1. The `cypher/`
-modules and `sql_facade/cypher.rs` must not be scaffolded during Phase 1–3
-work: their presence would imply a compatibility commitment the public contract
-has not made yet (see Risk Register and `phase-4-advanced-writes-opencypher-design.md`).
+`graph/src/projection/` was created in Phase 2, not Phase 1. The `cypher/`
+modules and `sql_facade/cypher.rs` were deferred until Phase 4 so their presence
+matches the explicit compatibility commitment in the public contract (see Risk
+Register and `phase-4-advanced-writes-opencypher-design.md`).
 SQL/PGQ does not get its own frontend module at all — it lowers into the shared
 IR through an adapter once the IR is stable (Phase 3), so it reuses
 `graph/src/query/` rather than adding a parser directory.
@@ -229,7 +229,7 @@ Rules:
 See `phase-1-readonly-gql-design.md` for worked examples and the snapshot-test
 corpus.
 
-Optional future openCypher compatibility API:
+openCypher compatibility API:
 
 ```sql
 graph.cypher(
@@ -241,11 +241,10 @@ RETURNS TABLE (row jsonb)
 ```
 
 ```sql
-graph.cypher_explain(
-  query text,
-  params jsonb default '{}'
-)
-RETURNS TABLE (stage text, detail jsonb)
+graph.cypher_explain(query text) RETURNS text
+
+graph.cypher_compatibility()
+RETURNS TABLE (feature text, status text, notes text)
 ```
 
 Projection-mode selection should expose the accepted mode names:
@@ -311,9 +310,9 @@ pgGraph projections.
 
 ### openCypher Compatibility
 
-openCypher support is optional compatibility after GQL/SQL-PGQ are stable. It
-owns openCypher syntax and diagnostics, but lowers into the same logical IR
-where semantics overlap.
+openCypher support is a separate compatibility surface. It owns openCypher
+syntax and diagnostics, but lowers into the same logical IR where semantics
+overlap.
 
 openCypher features that cannot map to the PostgreSQL-authoritative property
 graph model should be rejected during semantic binding with stable diagnostics.

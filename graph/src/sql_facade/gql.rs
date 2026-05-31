@@ -11,77 +11,83 @@ fn gql_explain(query: &str) -> String {
         check_enabled_result().unwrap_or_else(|err| err.report());
         let statement =
             build_statement(query).unwrap_or_else(|err| gql_error_to_graph_error(err).report());
-        match statement {
-            crate::query::physical_plan::PhysicalStatement::Read(plan) => {
-                check_plan_acl(&plan);
-                crate::query::explain::explain(&plan)
-            }
-            crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
-                check_node_scan_acl(&plan);
-                crate::query::explain::explain_node_scan(&plan)
-            }
-            crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
-                check_create_acl(&plan);
-                format!(
-                    "CreateNode(label={}, table_oid={}, returns={})",
-                    plan.label,
-                    plan.table_oid,
-                    plan.returns.len()
-                )
-            }
-            crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
-                check_merge_acl(&plan);
-                format!(
-                    "MergeNode(label={}, table_oid={}, properties={}, on_create={}, on_match={}, returns={})",
-                    plan.label,
-                    plan.table_oid,
-                    plan.properties.len(),
-                    plan.on_create.is_some(),
-                    plan.on_match.is_some(),
-                    plan.returns.len()
-                )
-            }
-            crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
-                check_set_acl(&plan);
-                format!(
-                    "SetProperty(label={}, table_oid={}, property={}, returns={})",
-                    plan.label,
-                    plan.table_oid,
-                    plan.property,
-                    plan.returns.len()
-                )
-            }
-            crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
-                check_remove_acl(&plan);
-                format!(
-                    "RemoveProperty(label={}, table_oid={}, property={}, returns={})",
-                    plan.label,
-                    plan.table_oid,
-                    plan.property,
-                    plan.returns.len()
-                )
-            }
-            crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
-                check_delete_acl(&plan);
-                format!(
-                    "DeleteEdge(type={}, edge_table_oid={}, returns={})",
-                    plan.rel_type,
-                    plan.edge_table_oid,
-                    plan.returns.len()
-                )
-            }
-            crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
-                check_detach_delete_acl(&plan);
-                format!(
-                    "DetachDeleteNode(label={}, table_oid={}, incident_edge_tables={}, returns={})",
-                    plan.label,
-                    plan.table_oid,
-                    plan.required_edge_table_oids().len(),
-                    plan.returns.len()
-                )
-            }
-        }
+        explain_statement(statement)
     })
+}
+
+pub(super) fn explain_statement(
+    statement: crate::query::physical_plan::PhysicalStatement,
+) -> String {
+    match statement {
+        crate::query::physical_plan::PhysicalStatement::Read(plan) => {
+            check_plan_acl(&plan);
+            crate::query::explain::explain(&plan)
+        }
+        crate::query::physical_plan::PhysicalStatement::NodeScan(plan) => {
+            check_node_scan_acl(&plan);
+            crate::query::explain::explain_node_scan(&plan)
+        }
+        crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
+            check_create_acl(&plan);
+            format!(
+                "CreateNode(label={}, table_oid={}, returns={})",
+                plan.label,
+                plan.table_oid,
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::MergeNode(plan) => {
+            check_merge_acl(&plan);
+            format!(
+                "MergeNode(label={}, table_oid={}, properties={}, on_create={}, on_match={}, returns={})",
+                plan.label,
+                plan.table_oid,
+                plan.properties.len(),
+                plan.on_create.is_some(),
+                plan.on_match.is_some(),
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::SetProperty(plan) => {
+            check_set_acl(&plan);
+            format!(
+                "SetProperty(label={}, table_oid={}, property={}, returns={})",
+                plan.label,
+                plan.table_oid,
+                plan.property,
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::RemoveProperty(plan) => {
+            check_remove_acl(&plan);
+            format!(
+                "RemoveProperty(label={}, table_oid={}, property={}, returns={})",
+                plan.label,
+                plan.table_oid,
+                plan.property,
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::DeleteEdge(plan) => {
+            check_delete_acl(&plan);
+            format!(
+                "DeleteEdge(type={}, edge_table_oid={}, returns={})",
+                plan.rel_type,
+                plan.edge_table_oid,
+                plan.returns.len()
+            )
+        }
+        crate::query::physical_plan::PhysicalStatement::DetachDeleteNode(plan) => {
+            check_detach_delete_acl(&plan);
+            format!(
+                "DetachDeleteNode(label={}, table_oid={}, incident_edge_tables={}, returns={})",
+                plan.label,
+                plan.table_oid,
+                plan.required_edge_table_oids().len(),
+                plan.returns.len()
+            )
+        }
+    }
 }
 
 /// Execute the supported GQL subset and return JSONB rows.
@@ -178,7 +184,7 @@ fn check_detach_delete_acl(plan: &crate::query::physical_plan::PhysicalDetachDel
     }
 }
 
-fn execute_statement(
+pub(super) fn execute_statement(
     statement: crate::query::physical_plan::PhysicalStatement,
     tenant_scope: Option<&str>,
     params: &crate::query::value::QueryParams,
@@ -2084,7 +2090,7 @@ fn encode_filter_value_from_json(
     }
 }
 
-fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphError {
+pub(super) fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphError {
     match &err.kind {
         crate::gql::errors::GqlErrorKind::Syntax { .. } => safety::GraphError::GqlSyntax {
             reason: err.to_string(),
@@ -2100,7 +2106,7 @@ fn gql_error_to_graph_error(err: crate::gql::errors::GqlError) -> safety::GraphE
     }
 }
 
-fn gql_params(
+pub(super) fn gql_params(
     params: Option<pgrx::JsonB>,
 ) -> safety::GraphResult<crate::query::value::QueryParams> {
     match params.map(|json| json.0) {

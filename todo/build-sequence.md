@@ -219,6 +219,17 @@ existing row is matched. Coverage includes parser/binder tests, pgrx insert,
 match, lazy-branch, mutable-overlay, identity, and delta-limit cases, plus
 `gql_merge_race.sh` for a two-session same-key race.
 
+Status note, 2026-06-01: 4D is closed for the optional openCypher
+compatibility surface. `graph.cypher()` and `graph.cypher_explain()` are
+separate SQL functions backed by `graph/src/cypher/` and `sql_facade/cypher.rs`.
+The frontend accepts the openCypher-shaped syntax that overlaps pgGraph's
+supported GQL subset, lowers compatible statements into the same logical and
+physical IR as `graph.gql()`, and rejects unmappable Cypher-only constructs
+such as `CALL`, `YIELD`, `UNWIND`, `FOREACH`, `LOAD CSV`, `START`, `UNION`, and
+Cypher DDL with stable unsupported-feature diagnostics. `graph.cypher_compatibility()`
+exposes a separate compatibility matrix that explicitly does not claim Neo4j
+compatibility.
+
 ## Cross-cutting, every slice
 
 - TDD: failing test first, then code (rust-planning rule 34a).

@@ -3,7 +3,8 @@
 Graph queries are normal SQL calls. The API has primitive functions for exact
 control, workflow wrappers for application-friendly search, expansion, paths,
 connections, and summaries, and a GQL-compatible subset for graph pattern
-queries and narrow mapped node creation over registered tables and edges.
+queries, an openCypher compatibility surface for the same supported graph
+patterns, and narrow mapped writes over registered tables and edges.
 
 ## Search
 
@@ -193,6 +194,33 @@ creating new PostgreSQL schema objects from GQL are future work.
 
 Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
 planning stages without executing the query.
+
+## openCypher Compatibility
+
+`graph.cypher()` is a separate compatibility surface for openCypher-shaped text
+that maps into the same pgGraph execution model as `graph.gql()`. It is not a
+Neo4j-compatible database API. Supported overlapping reads and mapped writes
+lower into the shared GQL IR, so labels still resolve to registered PostgreSQL
+source tables, relationship types still resolve to registered edge labels, and
+PostgreSQL remains authoritative for ACLs, RLS, constraints, triggers, and
+MVCC.
+
+```sql
+SELECT row
+FROM graph.cypher(
+  'MATCH (o:orders)-[:placed_by]->(c:customers)
+   RETURN o.id AS order_id, c.name AS customer
+   ORDER BY customer
+   LIMIT 20',
+  hydrate := true
+);
+```
+
+Use `graph.cypher_explain(query)` to inspect the shared plan selected for a
+Cypher-compatible query. Use `graph.cypher_compatibility()` to inspect the
+current compatibility matrix. Cypher-only constructs such as `CALL`, `YIELD`,
+`UNWIND`, `FOREACH`, `LOAD CSV`, `START`, `UNION`, and Cypher DDL are rejected
+because they do not map to pgGraph's PostgreSQL-first model.
 
 ## Search Modes
 

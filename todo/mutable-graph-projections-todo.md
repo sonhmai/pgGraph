@@ -90,8 +90,8 @@ openCypher compatibility.
 - Fast mutable snapshots may be considered later, but only if validated against
   PostgreSQL LSN and replayed forward safely after restart.
 - Introduce a shared planner layer. GQL, existing SQL functions, SQL/PGQ
-  adapters, and optional future openCypher compatibility should compile into
-  common logical and physical graph operators.
+  adapters, and openCypher compatibility should compile into common logical and
+  physical graph operators.
 - MVP GQL node inserts may only create rows for labels that map to registered
   source tables. Creating new labels/tables from GQL is out of scope.
 - Do not make CSR mutable. The committed base graph stays immutable CSR so it
@@ -556,6 +556,7 @@ Coverage values: `supported`, `required`, `reject`, `deferred`, `optional`.
 | `REMOVE` property/label | phase_4 | supported | supported | supported | supported | Single-node mapped property removal is supported for scalar columns and registered dotted JSONB paths; label removal is an explicit unsupported-shape rejection. |
 | `DETACH DELETE` | phase_4 | supported | supported | supported | supported | Single-node mapped detach delete is supported when incident relationships are backed by registered edge row tables. |
 | `MERGE` | phase_4 | supported | supported | supported | supported | Single-node mapped merge is supported by registered primary-key identity with lazy `ON CREATE`/`ON MATCH` branches and read-before-write locking. |
+| openCypher compatibility surface | phase_4 | supported | supported | supported | supported | `graph.cypher()` accepts the overlapping supported subset through the shared IR and exposes a separate no-Neo4j-claim compatibility matrix. |
 | GQL DDL/schema creation | out_of_scope | optional | required | reject | required | Do not create arbitrary tables from GQL. |
 
 ## Pre-Code Baselines
@@ -645,6 +646,11 @@ not be scaffolded before Phase 4.** **Justification:** scaffolding Cypher early,
 or promising it, implies Neo4j-shaped compatibility we cannot yet honor and
 invites "is this Neo4j?" confusion. Deferring keeps the public surface honest;
 see `phase-4-advanced-writes-opencypher-design.md`.
+
+Status, 2026-06-01: the optional compatibility surface is present as
+`graph.cypher()`, `graph.cypher_explain()`, and `graph.cypher_compatibility()`.
+It accepts only the supported overlap with pgGraph's GQL subset, rejects
+unmappable Cypher-only constructs, and does not claim Neo4j compatibility.
 
 ### Q5. Parser implementation strategy
 

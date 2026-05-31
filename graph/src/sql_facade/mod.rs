@@ -46,6 +46,7 @@ pub(crate) use std::time::Duration;
 
 mod admin;
 mod components;
+mod cypher;
 mod discovery;
 mod gql;
 mod runtime;

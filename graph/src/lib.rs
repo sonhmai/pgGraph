@@ -24,6 +24,7 @@ mod builder;
 mod catalog;
 mod config;
 mod connected_components;
+mod cypher;
 mod discover;
 mod edge_store;
 mod engine;
@@ -119,6 +120,12 @@ pub mod fuzz_support {
     /// targets and unit tests.
     pub fn parse_gql_query(query: &str) -> bool {
         crate::gql::parse(query).is_ok()
+    }
+
+    /// Parse an openCypher compatibility query without touching PostgreSQL.
+    /// Intended for fuzz targets and unit tests.
+    pub fn parse_cypher_query(query: &str) -> bool {
+        crate::cypher::parse_statement(query).is_ok()
     }
 }
 
@@ -237,4 +244,5 @@ mod tests {
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
     include!("pg_tests/gql.rs");
+    include!("pg_tests/cypher.rs");
 }

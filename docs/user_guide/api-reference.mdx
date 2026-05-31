@@ -555,6 +555,44 @@ Parses, binds, and lowers a GQL query and returns stable explain text for the
 frontend, logical-plan, and physical-plan stages. It performs the same catalog
 binding and ACL preflight as `graph.gql()` but does not execute the plan.
 
+### `graph.cypher()`
+
+```sql
+graph.cypher(
+  query text,
+  params jsonb DEFAULT NULL,
+  hydrate boolean DEFAULT true
+) RETURNS TABLE(row jsonb)
+```
+
+Executes the openCypher compatibility subset. This function is separate from
+`graph.gql()` and intentionally does not claim Neo4j compatibility. Supported
+overlapping read patterns and mapped writes lower into the same shared IR as
+GQL, so the same PostgreSQL catalog registration, ACL, RLS, constraint, trigger,
+MVCC, and mutable-overlay rules apply. Cypher-only procedure, DDL, import, and
+control-flow constructs are rejected with the GQL unsupported-feature SQLSTATE.
+
+### `graph.cypher_explain()`
+
+```sql
+graph.cypher_explain(query text) RETURNS text
+```
+
+Parses, binds, and lowers an openCypher-compatible query without executing it.
+The explain output is the same physical-plan shape used by `graph.gql_explain()`
+for equivalent supported queries.
+
+### `graph.cypher_compatibility()`
+
+```sql
+graph.cypher_compatibility()
+RETURNS TABLE(feature text, status text, notes text)
+```
+
+Returns the current openCypher compatibility matrix. Use it to distinguish
+supported overlapping syntax from rejected Cypher-only features and from the
+explicit non-claim of Neo4j compatibility.
+
 ## Search
 
 ### `graph.search()`

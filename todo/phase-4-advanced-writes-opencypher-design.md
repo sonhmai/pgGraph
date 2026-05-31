@@ -91,6 +91,15 @@ GQL/SQL-PGQ primary.
   SQLSTATE stability across both function surfaces, shared-IR equivalence with
   the GQL form of the same query.
 
+  Status, 2026-06-01: closed for a narrow openCypher compatibility surface.
+  `graph.cypher()` and `graph.cypher_explain()` parse the overlapping supported
+  syntax through `graph/src/cypher/`, bind/lower through the same GQL logical IR,
+  and execute through the existing SQL facade. `graph.cypher_compatibility()`
+  returns the separate compatibility matrix and explicitly records that Neo4j
+  compatibility is not claimed. Tests cover parser totality corpus entries,
+  unmappable feature rejection, shared logical-IR equivalence, matching explain
+  output, mapped write execution, and SQLSTATE stability.
+
 ## 5. Risk controls (Risk Register)
 
 - "openCypher implies Neo4j compatibility" → separate honest matrix; never

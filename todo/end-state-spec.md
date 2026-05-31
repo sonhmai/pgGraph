@@ -20,7 +20,7 @@ The completed system provides:
 - a GQL-compatible query surface where feasible;
 - an adapter path for PostgreSQL SQL/PGQ once PostgreSQL exposes stable graph
   query support;
-- optional future openCypher compatibility through the same planner;
+- optional openCypher compatibility through the same planner;
 - a shared graph query planner and execution runtime beneath those frontends;
 - selectable graph projection modes for read-heavy and mutable workloads.
 
@@ -85,8 +85,7 @@ FROM graph.gql_explain(
 );
 ```
 
-Optional future openCypher compatibility may use a parallel surface after the
-GQL/SQL-PGQ planner is proven:
+Optional openCypher compatibility uses a parallel surface:
 
 ```sql
 SELECT *
@@ -161,8 +160,8 @@ labels, or schema objects from GQL is out of scope unless a separate DDL
 contract is designed.
 
 Optional openCypher support should be treated as compatibility, not the primary
-standards path. It should lower into the same IR and should not force the engine
-to abandon PostgreSQL's table-authoritative model.
+standards path. It lowers into the same IR for supported overlapping syntax and
+does not force the engine to abandon PostgreSQL's table-authoritative model.
 
 ## Property Graph Model
 
@@ -385,8 +384,8 @@ explain:
 
 - pgGraph remains PostgreSQL-first;
 - GQL support is optional and projection-backed;
-- optional openCypher compatibility, if added, is a separate compatibility
-  layer over the same planner;
+- openCypher compatibility is a separate compatibility layer over the same
+  planner;
 - compatibility is a documented subset;
 - PostgreSQL source tables remain authoritative;
 - read-only CSR and mutable overlay modes have different tradeoffs;
