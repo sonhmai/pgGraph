@@ -400,13 +400,16 @@ SQL/PGQ remains non-public until PostgreSQL exposes stable graph-pattern hooks.
 2. Add optional openCypher compatibility only after GQL/SQL-PGQ direction is
    stable.
 
-Phase 4 status, 2026-05-31: `REMOVE` is closed for single-node mapped property
-removal. Scalar mapped columns are set to SQL `NULL`; registered dotted JSONB
-property paths remove the addressed key; repeated removal is idempotent. Label
-removal is rejected because labels map to registered source tables.
+Phase 4 status, 2026-06-01: all planned Phase 4 slices are closed for the
+current pgGraph scope. `REMOVE` is closed for single-node mapped property
+removal over scalar columns and registered dotted JSONB property paths.
 `DETACH DELETE` is closed for single-node mapped deletes over registered
-edge-row relationships. It deletes incident edge rows before the node row and
-records transaction-local edge and node tombstones for same-transaction reads.
+edge-row relationships. `MERGE` is closed for single-node mapped node identity
+matches with lazy `ON CREATE` / `ON MATCH` branches and same-key race coverage.
+The optional openCypher compatibility surface is present as separate
+`graph.cypher()`, `graph.cypher_explain()`, and `graph.cypher_compatibility()`
+functions, accepts only the supported overlap with pgGraph's GQL subset, and
+does not claim Neo4j compatibility.
 
 ## Implementation Tracks
 
