@@ -81,28 +81,132 @@ Supported read coverage:
 | Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns |
 | Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
+### GQL JSONB result format
+
+`graph.gql()` and `graph.cypher()` return graph values as ordinary
+PostgreSQL `jsonb`, not as a custom graph scalar type. Each SQL result row has
+one column named `row`. The value is a JSON object whose keys are the
+`RETURN` aliases, or the return expression text when no alias is provided:
+
+```json
+{
+  "person": {
+    "_id": { "table": "users", "id": "u1" },
+    "_labels": ["users"],
+    "id": "u1",
+    "name": "Alice"
+  },
+  "company_name": "Acme"
+}
+```
+
+When a query returns a node value, pgGraph serializes it as a JSON object with
+stable reserved keys:
+
+```json
+{
+  "_id": { "table": "users", "id": "u1" },
+  "_labels": ["users"],
+  "id": "u1",
+  "name": "Alice"
+}
+```
+
+`_id.table` is the registered source-table label and `_id.id` is the source
+primary-key value serialized as text. `_labels` currently contains the single
+registered table label. With `hydrate := true`, the readable source row is
+included as JSON alongside the reserved keys. If a required graph coordinate no
+longer has a readable backing source row, the query raises a GQL execution
+error instead of fabricating an empty node object. With `hydrate := false`, the
+node object contains only `_id` and `_labels`.
+
+Relationship values are coordinate identity objects in this release:
+
+```json
+{
+  "_type": "works_at",
+  "_start": { "table": "users", "id": "u1" },
+  "_end": { "table": "companies", "id": "c1" }
+}
+```
+
+`_type` is the registered edge label. `_start` and `_end` are endpoint graph
+coordinates. Relationship source-row hydration, relationship properties, and a
+separate relationship row identity are not part of the current JSONB contract.
+
+Path values are JSON objects with a `_path` member:
+
+```json
+{
+  "_path": {
+    "nodes": [
+      { "_id": { "table": "users", "id": "u1" }, "_labels": ["users"] },
+      { "_id": { "table": "companies", "id": "c1" }, "_labels": ["companies"] }
+    ],
+    "relationships": [
+      {
+        "_type": "works_at",
+        "_start": { "table": "users", "id": "u1" },
+        "_end": { "table": "companies", "id": "c1" }
+      }
+    ]
+  }
+}
+```
+
+The `nodes(path)` function returns the `_path.nodes` array directly,
+`relationships(path)` returns the `_path.relationships` array directly, and
+`length(path)` returns the relationship count as a JSON number.
+
+Scalar properties are returned as their JSON representation: strings,
+numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
+targets and relationships also project as JSON `null`. A missing key inside a
+registered JSONB property path projects as JSON `null`, but it does not satisfy
+`IS NULL`; explicit JSON `null` does.
+
+For SDKs and application code, graph values can be identified by their
+reserved-key shape: objects with `_path` are paths, objects with `_type`,
+`_start`, and `_end` are relationships, and objects with `_id` and `_labels`
+are nodes. Source columns that would collide with reserved graph keys are
+rejected during binding.
+
 By default, GQL returns hydrated node objects when a query returns a node value
 such as `RETURN o` or `RETURN c`; PostgreSQL ACL and RLS still decide whether
 the source row can be read. To return only identifiers, project the identifier
 property directly, for example `RETURN o.id AS order_id`, instead of returning
 the whole node. The optional `hydrate := false` SQL argument is a pgGraph
 escape hatch for coordinate-only node objects when callers intentionally want
-the compact `{table, id}` shape. Relationship values are coordinate identity
-objects in this release. `OPTIONAL MATCH` null-extends
-unmatched source rows for single-relationship patterns. Aggregate functions
-ignore JSON `null` inputs for `count(expr)`, `sum`, `avg`, `min`, and `max`;
-`count(*)` counts every input row, `collect` preserves values in row order, and
-aggregate-only empty inputs return one row with `0`, `null`, or `[]` according
-to the aggregate. `DISTINCT` query forms abort if their unique-key working set
-exceeds the GQL result cap. Bounded relationship variables return path objects
-with `_path.nodes` and `_path.relationships`; `nodes`, `relationships`, and
-`length` expose those components directly. Registered JSONB source columns can
-be addressed with dotted property paths such as `u.profile.plan`; returned
-JSONB arrays and objects keep their JSON shape. A missing key inside a JSONB
-property path projects as JSON `null`, but it does not satisfy `IS NULL`;
-explicit JSON `null` does. Relationship source-row hydration, path-function
-`WITH` projections, aggregate `WITH` projections, full path variable syntax,
-and multi-pattern optional joins are planned outside this subset.
+the compact `{table, id}` shape. Required hydration is fail-closed: a stale
+graph coordinate whose source row cannot be hydrated raises `PG017`.
+
+Other read semantics:
+
+- Relationship values are coordinate identity objects in this release.
+- `OPTIONAL MATCH` null-extends unmatched source rows for single-relationship
+  patterns.
+- Aggregate functions ignore JSON `null` inputs for `count(expr)`, `sum`,
+  `avg`, `min`, and `max`; `count(*)` counts every input row.
+- `collect` preserves values in row order.
+- Aggregate-only empty inputs return one row with `0`, `null`, or `[]`
+  according to the aggregate.
+- `DISTINCT` query forms abort if their unique-key working set exceeds the GQL
+  result cap.
+- Bounded relationship variables return path objects with `_path.nodes` and
+  `_path.relationships`.
+- `nodes`, `relationships`, and `length` expose path components directly.
+
+Registered JSONB source columns can be addressed with dotted property paths
+such as `u.profile.plan`; returned JSONB arrays and objects keep their JSON
+shape. A missing key inside a JSONB property path projects as JSON `null`, but
+it does not satisfy `IS NULL`; explicit JSON `null` does.
+
+Planned outside this subset:
+
+- Relationship source-row hydration.
+- Path-function `WITH` projections.
+- Aggregate `WITH` projections.
+- Full path variable syntax.
+- Multi-pattern optional joins.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on
@@ -191,8 +295,10 @@ identity, tenant scope participates when configured, `ON CREATE` values are
 evaluated only for inserted rows, and `ON MATCH` values are evaluated only for
 matched rows. pgGraph locks an existing row with `FOR UPDATE` and inserts with
 `ON CONFLICT DO NOTHING` on the registered identity, so concurrent sessions
-racing the same key converge on one PostgreSQL source row. `CREATE`, `SET`,
-`REMOVE`, `DELETE`, `DETACH DELETE`, and `MERGE` are rejected on `csr_readonly`
+racing the same key converge on one PostgreSQL source row. `MERGE` requires
+`SELECT` and `INSERT` on the mapped source table; `UPDATE` is required only when
+the statement includes `ON MATCH SET`. `CREATE`, `SET`, `REMOVE`, `DELETE`,
+`DETACH DELETE`, and `MERGE` are rejected on `csr_readonly`
 projections. Relationship creation, multi-row writes, dynamic labels, and
 creating new PostgreSQL schema objects from GQL are future work.
 
