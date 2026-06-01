@@ -100,7 +100,7 @@ pub static DATA_DIR: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
 /// Sync mode: 'manual', 'trigger', or reserved 'wal'.
-/// Default: "manual".
+/// Default: "trigger".
 pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
@@ -246,7 +246,7 @@ pub fn sync_mode() -> String {
         .get()
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("manual")
+        .unwrap_or("trigger")
         .to_string()
 }
 
@@ -289,7 +289,7 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
     let raw = binding
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("manual");
+        .unwrap_or("trigger");
 
     parse_sync_mode(raw)
 }

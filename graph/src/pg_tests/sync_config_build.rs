@@ -151,10 +151,10 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("RESET graph.max_exact_path_count").expect("reset max_exact_path_count failed");
     Spi::run("RESET graph.build_batch_size").expect("reset build_batch_size failed");
 
-    assert_eq!(crate::config::sync_mode(), "manual");
+    assert_eq!(crate::config::sync_mode(), "trigger");
     assert_eq!(
         crate::config::parsed_sync_mode(),
-        Some(crate::config::SyncMode::Manual)
+        Some(crate::config::SyncMode::Trigger)
     );
     assert_eq!(crate::config::oom_action(), crate::config::OomAction::Error);
     assert_eq!(

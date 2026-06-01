@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS graph._build_jobs (
     edges_loaded   BIGINT,
     build_time_ms  DOUBLE PRECISION,
     memory_used_mb DOUBLE PRECISION,
-    sync_mode      TEXT NOT NULL DEFAULT 'manual',
+    sync_mode      TEXT NOT NULL DEFAULT 'trigger',
     projection_mode TEXT NOT NULL DEFAULT 'csr_readonly'
         CHECK (projection_mode IN ('csr_readonly', 'mutable_overlay')),
     progress_phase TEXT NOT NULL DEFAULT 'queued',

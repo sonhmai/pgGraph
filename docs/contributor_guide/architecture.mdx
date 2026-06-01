@@ -175,8 +175,10 @@ between PostgreSQL coordinates and those internal indexes.
 
 ## Sync And Maintenance Flow
 
-Trigger sync is deliberately explicit. Query functions do not hide sync
-catch-up work.
+Trigger sync records source-table changes in `graph._sync_log`. Topology query
+functions apply pending trigger-sync rows by default up to a captured high-water
+mark; operators can set `graph.query_freshness = 'off'` for compatibility/manual
+catch-up or `error_on_pending` to fail instead of reading stale topology.
 
 <TreeDiagram>
   <TreeNode title="source table change">

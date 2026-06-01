@@ -123,7 +123,7 @@ $PGDATA/graph/main.pggraph.sync
 
 | GUC | Type | Default | Context | Range or values | Effect |
 |---|---:|---:|---|---|---|
-| `graph.sync_mode` | string | `manual` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
+| `graph.sync_mode` | string | `trigger` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
 | `graph.edge_buffer_size` | int | `100000` | `SUSET` | `1000` to `10000000` | Maximum pending edge mutations before read-only mode |
 | `graph.sync_batch_size` | int | `1000` | `SUSET` | `1` to `100000` | Maximum sync-log rows replayed in one internal batch |
 | `graph.vacuum_interval_secs` | int | `60` | `SUSET` | `5` to `86400` | Reserved maintenance interval setting; not scheduled by current code |
@@ -151,7 +151,7 @@ graph.default_hydrate = on
 graph.default_projection_mode = 'csr_readonly'
 graph.mutable_enabled = off
 graph.query_freshness = 'apply_pending_sync'
-graph.sync_mode = 'manual'
+graph.sync_mode = 'trigger'
 ```
 
 Use lower traversal circuit breakers on multi-tenant OLTP primaries, and raise

@@ -4,13 +4,32 @@ Release notes are ordered newest first.
 
 ## v0.1.5: GQL Mutable Projection Stabilization
 
-`v0.1.5` hardens the GQL mutable-overlay path, fixes several edge-case
-semantics found during review, and makes the Docker-backed playground release
-gate validate the current checkout instead of a stale container image. It keeps
-the `v0.1.4` installation and SQL function surface compatible.
+`v0.1.5` introduces pgGraph's GQL surface and the mutable projection path that
+lets mapped GQL writes update PostgreSQL source rows while keeping the in-memory
+graph view transactionally consistent. This release turns GQL from an internal
+planning target into a documented SQL entry point, adds node and relationship
+mutability through the overlay engine, and keeps the `v0.1.4` installation and
+SQL function surface compatible.
 
 ### Highlights
 
+- Added `graph.gql()` as the primary standards-oriented graph query surface for
+  pgGraph, with `graph.gql_explain()` for stable plan inspection.
+- Added mutable GQL support for mapped source tables, including `CREATE`,
+  `MERGE`, `SET`, `REMOVE`, relationship `DELETE`, and `DETACH DELETE` paths
+  backed by PostgreSQL row changes and transaction-local projection deltas.
+- Preserved PostgreSQL as the source of truth for mutable graph data: GQL writes
+  honor table mappings, ACL/RLS checks, tenant scope, rollback behavior, and
+  overlay limits.
+- Added transaction lifecycle coverage for GQL create, set/remove, delete, and
+  merge race paths in the release gate.
+- Made trigger sync the default sync mode, so a normal `graph.build()` installs
+  source-table sync triggers and topology reads catch up to pending rows by
+  default unless operators opt into `graph.sync_mode = 'manual'`.
+- Upgrade note: deployments that relied on implicit manual refresh should set
+  `graph.sync_mode = 'manual'` before running `graph.build()`. When trigger
+  mode is active, `graph.build()` emits a warning that sync triggers were
+  installed on registered source tables.
 - Fixed mapped dynamic-label edge deletes so rows with `NULL` or blank
   `label_column` values fall back to the registered relationship label.
 - Preserved transaction-local nodes for non-tenanted tables even when a session

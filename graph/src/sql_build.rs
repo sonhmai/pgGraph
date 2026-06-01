@@ -147,7 +147,7 @@ fn execute_build_inner(
             edges_loaded: 0,
             build_time_ms: 0.0,
             memory_used_mb: 0.0,
-            sync_mode: "manual".to_string(),
+            sync_mode: sync_mode.as_str().to_string(),
             projection_mode: projection_mode.as_str().to_string(),
         });
     }
@@ -182,7 +182,11 @@ fn execute_build_inner(
             remove_sync_triggers()?;
         }
         config::SyncMode::Trigger => {
-            install_sync_triggers()?;
+            let installed = install_sync_triggers()?;
+            pgrx::warning!(
+                "graph.build(): graph.sync_mode = 'trigger' installed graph sync triggers on {} registered table(s); set graph.sync_mode = 'manual' before graph.build() to opt out",
+                installed
+            );
         }
         config::SyncMode::Wal => unreachable!("current_sync_mode rejects reserved wal mode"),
     }

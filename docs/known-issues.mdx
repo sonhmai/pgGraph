@@ -65,16 +65,15 @@ writes moved to a streaming writer for fixed graph sections.
 
 ### Sync, Jobs, and Operator Semantics
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after scheduler
-ownership and background-job failure handling were completed.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-004 | pgGraph has a scheduler-safe `graph.run_scheduled_maintenance()` entry point, but no always-on internal scheduler for trigger-sync apply and overlay compaction in non-Docker installs. | Planned operational hardening | Docker installs can use the bundled `pg_cron` schedule, and other deployments can call `graph.run_scheduled_maintenance()` from `pg_cron`, cron, or an application scheduler. A future built-in scheduler should make the default trigger-sync experience require less external orchestration while preserving operator control over rebuild cost. |
 
 ### Internal Construction and Performance
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
+| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
 
 ## P0: Operational Visibility and Resource Predictability
 
@@ -96,7 +95,7 @@ not changes to the public SQL contract.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-004 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
+| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
@@ -105,15 +104,15 @@ not block use of the current documented SQL surface.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-005 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
-| KI-006 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
+| KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
+| KI-007 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
 
 ## P3: Internals and Maintainability
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-007 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
-| KI-008 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Planned test hardening | Current release-gate coverage includes GQL transaction lifecycle scripts, pgrx GQL tests, playground fixtures, and unit tests. Additional weak paths should be added close to the code they constrain. |
+| KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
+| KI-009 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Planned test hardening | Current release-gate coverage includes GQL transaction lifecycle scripts, pgrx GQL tests, playground fixtures, and unit tests. Additional weak paths should be added close to the code they constrain. |
 
 ## Roadmap-Owned Future Work
 
