@@ -174,8 +174,9 @@ The script works on macOS and Linux from a normal terminal, and on Windows from
 WSL2 or Git Bash with Docker Desktop. It is not a native PowerShell or Command
 Prompt script.
 
-The root Docker image currently runs PostgreSQL 17. Package scripts can build
-extension artifacts for officially supported PostgreSQL 14 through 18 targets.
+Pre-built Docker release images are available for officially supported
+PostgreSQL 14 through 18 targets. The unqualified Docker tags, such as
+`0.1.5` and `latest`, point to the default PostgreSQL 17 image.
 PostgreSQL 13 is no longer an official support target after upstream EOL, though
 the legacy `pg13` pgrx feature remains available on a best-effort basis. The
 PostgreSQL major version of the extension package must match the target server.

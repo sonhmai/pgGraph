@@ -156,7 +156,7 @@ scripts/quickstart.sh playground panama
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。
 
-基础 Docker 镜像目前运行 PostgreSQL 17。打包脚本可以为官方支持的 PostgreSQL 14 到 18 目标构建扩展构建产物。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
+预构建的 Docker 发布镜像覆盖官方支持的 PostgreSQL 14 到 18 目标。未限定 PostgreSQL 主版本的 Docker tag（例如 `0.1.5` 和 `latest`）指向默认的 PostgreSQL 17 镜像。PostgreSQL 13 已到上游 EOL，不再是官方支持目标，但旧的 `pg13` pgrx feature 仍可按 best-effort 方式使用。扩展的 PostgreSQL 主版本必须与目标服务器匹配。
 
 ## PGXN 源码安装
 
