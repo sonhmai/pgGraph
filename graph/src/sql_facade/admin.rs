@@ -66,6 +66,7 @@ pub(crate) struct ScheduledMaintenanceInputs {
     pub(crate) needs_vacuum: bool,
     pub(crate) needs_rebuild: bool,
     pub(crate) read_only: bool,
+    pub(crate) compaction_recommended: bool,
 }
 
 impl From<&crate::types::EngineStatus> for ScheduledMaintenanceInputs {
@@ -77,6 +78,7 @@ impl From<&crate::types::EngineStatus> for ScheduledMaintenanceInputs {
             needs_vacuum: status.needs_vacuum,
             needs_rebuild: status.needs_rebuild,
             read_only: status.read_only,
+            compaction_recommended: status.compaction_recommended,
         }
     }
 }
@@ -97,7 +99,8 @@ pub(crate) fn scheduled_maintenance_decision(
     let start_maintenance = inputs.read_only
         || inputs.needs_rebuild
         || inputs.needs_vacuum
-        || inputs.edge_buffer_used > 0;
+        || inputs.edge_buffer_used > 0
+        || inputs.compaction_recommended;
 
     ScheduledMaintenanceDecision {
         apply_sync,
@@ -120,6 +123,7 @@ mod scheduled_maintenance_tests {
             needs_vacuum: false,
             needs_rebuild: false,
             read_only: false,
+            compaction_recommended: false,
         });
 
         assert_eq!(
@@ -141,6 +145,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 2,
@@ -149,6 +154,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: true,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 2,
@@ -157,6 +163,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: true,
+                compaction_recommended: false,
             },
         ] {
             let decision = scheduled_maintenance_decision(inputs);
@@ -178,6 +185,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -186,6 +194,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: true,
                 needs_rebuild: false,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -194,6 +203,7 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: true,
                 read_only: false,
+                compaction_recommended: false,
             },
             ScheduledMaintenanceInputs {
                 pending_sync_rows: 0,
@@ -202,6 +212,16 @@ mod scheduled_maintenance_tests {
                 needs_vacuum: false,
                 needs_rebuild: false,
                 read_only: true,
+                compaction_recommended: false,
+            },
+            ScheduledMaintenanceInputs {
+                pending_sync_rows: 0,
+                disabled_trigger_count: 0,
+                edge_buffer_used: 0,
+                needs_vacuum: false,
+                needs_rebuild: false,
+                read_only: false,
+                compaction_recommended: true,
             },
         ] {
             let decision = scheduled_maintenance_decision(inputs);
@@ -243,6 +263,16 @@ fn status() -> TableIterator<
         name!(disabled_trigger_count, i32),
         name!(read_only, bool),
         name!(read_only_reason, Option<String>),
+        name!(projection_mode, String),
+        name!(overlay_tombstone_count, i32),
+        name!(overlay_memory_bytes, i64),
+        name!(compaction_recommended, bool),
+        name!(tx_delta_dirty, bool),
+        name!(tx_delta_added_nodes, i32),
+        name!(tx_delta_deleted_nodes, i32),
+        name!(tx_delta_added_edges, i32),
+        name!(tx_delta_deleted_edges, i32),
+        name!(tx_delta_memory_bytes, i64),
     ),
 > {
     with_panic_boundary("status()", || {
@@ -270,6 +300,60 @@ fn status() -> TableIterator<
             s.disabled_trigger_count,
             s.read_only,
             s.read_only_reason,
+            s.projection_mode,
+            s.overlay_tombstone_count,
+            s.overlay_memory_bytes,
+            s.compaction_recommended,
+            s.tx_delta_dirty,
+            s.tx_delta_added_nodes,
+            s.tx_delta_deleted_nodes,
+            s.tx_delta_added_edges,
+            s.tx_delta_deleted_edges,
+            s.tx_delta_memory_bytes,
+        )])
+    })
+}
+
+/// Return backend-local and projected instance memory estimates.
+///
+/// `concurrent_backends` is an operator-supplied sizing assumption, not a live
+/// backend count. Shared mmap bytes are counted once; backend-private heap is
+/// multiplied by the supplied backend count.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn memory_profile(
+    concurrent_backends: default!(i32, 1),
+) -> TableIterator<
+    'static,
+    (
+        name!(active_backend_private_mb, f64),
+        name!(active_backend_shared_mb, f64),
+        name!(active_backend_total_mb, f64),
+        name!(estimated_instance_private_mb, f64),
+        name!(estimated_instance_shared_mb, f64),
+        name!(estimated_instance_total_mb, f64),
+        name!(memory_limit_mb, i32),
+        name!(assumed_concurrent_backends, i32),
+    ),
+> {
+    with_panic_boundary("memory_profile()", || {
+        let memory_limit_mb = config::MEMORY_LIMIT_MB.get();
+        let profile = ENGINE.with(|e| {
+            e.borrow()
+                .memory_profile(concurrent_backends, memory_limit_mb)
+        });
+        TableIterator::new(vec![(
+            profile.active_backend_private_mb,
+            profile.active_backend_shared_mb,
+            profile.active_backend_total_mb,
+            profile.estimated_instance_private_mb,
+            profile.estimated_instance_shared_mb,
+            profile.estimated_instance_total_mb,
+            profile.memory_limit_mb,
+            profile.assumed_concurrent_backends,
         )])
     })
 }
@@ -295,6 +379,16 @@ fn sync_health() -> TableIterator<
         name!(needs_rebuild, bool),
         name!(read_only, bool),
         name!(read_only_reason, Option<String>),
+        name!(projection_mode, String),
+        name!(overlay_tombstone_count, i32),
+        name!(overlay_memory_bytes, i64),
+        name!(compaction_recommended, bool),
+        name!(tx_delta_dirty, bool),
+        name!(tx_delta_added_nodes, i32),
+        name!(tx_delta_deleted_nodes, i32),
+        name!(tx_delta_added_edges, i32),
+        name!(tx_delta_deleted_edges, i32),
+        name!(tx_delta_memory_bytes, i64),
         name!(apply_sync_recommended, bool),
         name!(maintenance_recommended, bool),
     ),
@@ -319,6 +413,16 @@ fn sync_health() -> TableIterator<
             s.needs_rebuild,
             s.read_only,
             s.read_only_reason,
+            s.projection_mode,
+            s.overlay_tombstone_count,
+            s.overlay_memory_bytes,
+            s.compaction_recommended,
+            s.tx_delta_dirty,
+            s.tx_delta_added_nodes,
+            s.tx_delta_deleted_nodes,
+            s.tx_delta_added_edges,
+            s.tx_delta_deleted_edges,
+            s.tx_delta_memory_bytes,
             decision.apply_sync,
             decision.start_maintenance,
         )])
@@ -412,6 +516,7 @@ pub(super) fn build() -> TableIterator<
         name!(build_time_ms, f64),
         name!(memory_used_mb, f64),
         name!(sync_mode, String),
+        name!(projection_mode, String),
     ),
 > {
     with_panic_boundary("build()", || {
@@ -423,6 +528,7 @@ pub(super) fn build() -> TableIterator<
             result.build_time_ms,
             result.memory_used_mb,
             result.sync_mode,
+            result.projection_mode,
         )])
     })
 }
@@ -565,12 +671,14 @@ fn build_with_concurrently(
         name!(build_time_ms, Option<f64>),
         name!(memory_used_mb, Option<f64>),
         name!(sync_mode, String),
+        name!(projection_mode, String),
     ),
 > {
     with_panic_boundary("build(concurrently)", || {
         require_graph_admin_result().unwrap_or_else(|err| err.report());
         if concurrently {
-            let build_id = create_build_job().unwrap_or_else(|err| err.report());
+            let projection_mode = configured_projection_mode().unwrap_or_else(|err| err.report());
+            let build_id = create_build_job(projection_mode).unwrap_or_else(|err| err.report());
             if let Err(err) = launch_build_worker(&build_id) {
                 let _ = update_build_job_failed(&build_id, &err.to_string());
                 err.report();
@@ -587,6 +695,7 @@ fn build_with_concurrently(
                     sync_mode: current_sync_mode()
                         .map(|mode| mode.as_str().to_string())
                         .unwrap_or_else(|_| "manual".to_string()),
+                    projection_mode: projection_mode.as_str().to_string(),
                     progress_phase: JobStatus::Queued.as_str().to_string(),
                     progress_message: Some("queued for background build".to_string()),
                     started_at: None,
@@ -601,11 +710,18 @@ fn build_with_concurrently(
                 row.build_time_ms,
                 row.memory_used_mb,
                 row.sync_mode,
+                row.projection_mode,
             )]);
         }
         let rows = build().collect::<Vec<_>>();
-        let Some((nodes_loaded, edges_loaded, build_time_ms, memory_used_mb, sync_mode)) =
-            rows.into_iter().next()
+        let Some((
+            nodes_loaded,
+            edges_loaded,
+            build_time_ms,
+            memory_used_mb,
+            sync_mode,
+            projection_mode,
+        )) = rows.into_iter().next()
         else {
             return TableIterator::new(Vec::new());
         };
@@ -617,6 +733,49 @@ fn build_with_concurrently(
             Some(build_time_ms),
             Some(memory_used_mb),
             sync_mode,
+            projection_mode,
+        )])
+    })
+}
+
+/// Overload for `graph.build(mode := text)`.
+#[pg_extern(schema = "graph", name = "build")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn build_with_mode(
+    mode: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(nodes_loaded, i64),
+        name!(edges_loaded, i64),
+        name!(build_time_ms, f64),
+        name!(memory_used_mb, f64),
+        name!(sync_mode, String),
+        name!(projection_mode, String),
+    ),
+> {
+    with_panic_boundary("build(mode)", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let projection_mode = config::parse_projection_mode(mode).unwrap_or_else(|| {
+            safety::GraphError::InvalidFilter {
+                reason: format!(
+                    "unsupported graph projection mode '{mode}'; expected 'csr_readonly' or 'mutable_overlay'"
+                ),
+            }
+            .report()
+        });
+        let result =
+            execute_build_with_mode(false, projection_mode).unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            result.nodes_loaded,
+            result.edges_loaded,
+            result.build_time_ms,
+            result.memory_used_mb,
+            result.sync_mode,
+            result.projection_mode,
         )])
     })
 }

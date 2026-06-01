@@ -24,10 +24,12 @@ Commands:
   pgrx [PG_MAJOR]       Source build and install pgGraph with pgrx into local
                          PostgreSQL (defaults to pg17). Optionally pass major only;
                          DB target flags are env-driven (see docs below).
-  playground [DATASET]   Start the Streamlit playground preloaded with a preset
+  playground [DATASET] [MODE]
+                         Start the Streamlit playground preloaded with a preset
                          dataset. Supported dataset values: panama, ldbc.
+                         Supported mode values: csr, mutable.
                          Example:
-                         scripts/quickstart.sh playground panama
+                         scripts/quickstart.sh playground panama mutable
   clean                  Stop the Compose database and remove its volume.
 
 Legacy:
@@ -270,6 +272,14 @@ install_with_local_pgrx() {
 
 start_playground() {
   local dataset="${1:-panama}"
+  local mode="${2:-${PGGRAPH_PLAYGROUND_MODE:-csr}}"
+
+  case "${dataset}" in
+    csr|csr_readonly|mutable|mutable_overlay)
+      mode="${dataset}"
+      dataset="panama"
+      ;;
+  esac
 
   case "${dataset}" in
     panama|ldbc)
@@ -280,7 +290,17 @@ start_playground() {
       ;;
   esac
 
+  case "${mode}" in
+    csr|csr_readonly|mutable|mutable_overlay)
+      ;;
+    *)
+      echo "Error: unsupported playground mode '${mode}'. Use csr or mutable." >&2
+      exit 2
+      ;;
+  esac
+
   PGGRAPH_PLAYGROUND_DATASET="${dataset}" \
+  PGGRAPH_PLAYGROUND_MODE="${mode}" \
     "${ROOT_DIR}/sandbox/start_playground.sh"
 }
 
@@ -314,7 +334,7 @@ main() {
       install_with_local_pgrx "${2:-17}" "${3:-}"
       ;;
     playground)
-      start_playground "${2:-panama}"
+      start_playground "${2:-panama}" "${3:-${PGGRAPH_PLAYGROUND_MODE:-csr}}"
       ;;
     psql)
       start_postgres

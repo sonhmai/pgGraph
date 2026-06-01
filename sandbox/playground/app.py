@@ -13,11 +13,20 @@ from queries import (
     DEFAULT_SQL,
     PLAYGROUND_CONTEXT,
     QUERY_QUESTIONS,
-    QUERY_SECTIONS,
+    normalize_playground_mode,
+    query_sections,
 )
 
 GRAPH_BUSY_SQLSTATE = "PG006"
 GRAPH_BUILD_WAIT_SECONDS = 600
+
+
+def playground_mode() -> str:
+    return normalize_playground_mode(os.environ.get("PGGRAPH_PLAYGROUND_MODE"))
+
+
+def build_mode() -> str:
+    return "mutable_overlay" if playground_mode() == "mutable" else "csr_readonly"
 
 
 def asset_path(name: str) -> Path:
@@ -50,9 +59,9 @@ def is_graph_busy(exc: Exception) -> bool:
 
 
 def graph_status(cur: psycopg.Cursor) -> dict:
-    cur.execute("SELECT node_count, edge_count FROM graph.status();")
+    cur.execute("SELECT node_count, edge_count, projection_mode FROM graph.status();")
     row = cur.fetchone()
-    return dict(row) if row else {"node_count": 0, "edge_count": 0}
+    return dict(row) if row else {"node_count": 0, "edge_count": 0, "projection_mode": ""}
 
 
 def ensure_active_graph(cur: psycopg.Cursor) -> None:
@@ -61,11 +70,17 @@ def ensure_active_graph(cur: psycopg.Cursor) -> None:
 
     while True:
         status = graph_status(cur)
-        if status["node_count"] > 0 and status["edge_count"] > 0:
+        if (
+            status["node_count"] > 0
+            and status["edge_count"] > 0
+            and status["projection_mode"] == build_mode()
+        ):
             return
 
         try:
-            cur.execute("SELECT * FROM graph.build();")
+            if build_mode() == "mutable_overlay":
+                cur.execute("SET graph.mutable_enabled = on;")
+            cur.execute("SELECT * FROM graph.build(%s);", (build_mode(),))
             if cur.description:
                 cur.fetchall()
             return
@@ -82,6 +97,8 @@ def ensure_graph_loaded(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS graph;")
         cur.execute("SELECT graph.test_enabled();")
+        if build_mode() == "mutable_overlay":
+            cur.execute("SET graph.mutable_enabled = on;")
         cur.execute("SELECT count(*) AS nodes FROM panama.nodes;")
         source_nodes = cur.fetchone()["nodes"]
         if source_nodes == 0:
@@ -464,9 +481,10 @@ def sidebar() -> None:
         """,
         unsafe_allow_html=True,
     )
+    st.sidebar.caption(f"Mode: {build_mode()}")
     filter_text = st.sidebar.text_input("Filter queries...", label_visibility="collapsed", placeholder="Filter queries...")
     normalized_filter = filter_text.strip().lower()
-    for section, queries in QUERY_SECTIONS:
+    for section, queries in query_sections(playground_mode()):
         visible_queries = {
             label: sql
             for label, sql in queries.items()

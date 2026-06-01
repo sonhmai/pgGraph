@@ -101,8 +101,9 @@ because it reads source-table properties through SQL rather than graph topology.
 
 `graph.sync_health()` is the operator-facing read model for this state. It
 combines backend-local replay progress, durable `_sync_log` high-water state,
-freshness configuration, trigger health, and overlay pressure into one row for
-external schedulers and monitoring checks.
+freshness configuration, trigger health, projection mode, transaction-delta
+counts, and overlay pressure into one row for external schedulers and
+monitoring checks.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence
@@ -119,9 +120,16 @@ to the indexed `resolution_delta`; deleted nodes are tombstoned through
 
 ## Edge Changes
 
-The base `EdgeStore` remains immutable. Edge mutations are appended to
-`engine.edge_buffer` as `EdgeMutation` values. Traversal reduces this buffer
-into insert and delete overlays for the selected direction.
+The base `EdgeStore` remains immutable. Committed sync edge mutations are
+appended to `engine.edge_buffer` as `EdgeMutation` values. Transaction-local
+edge deltas live in `TxGraphDelta`. Overlay-aware graph algorithms reduce both
+sources into insert and delete overlays for the selected direction, with
+transaction-local deltas applied last for read-your-own-writes semantics.
+Traversal, unweighted shortest path, and connected components consume the
+shared neighbor-source abstraction. Read-only GQL relationship expansion uses
+the same overlay-aware neighbor path. Weighted shortest path rejects a dirty
+edge overlay until vacuum or maintenance merges committed weights into the base
+CSR.
 
 When the buffer reaches `graph.edge_buffer_size`, the engine enters read-only
 mode with `read_only_reason = 'edge_buffer_full'` and returns

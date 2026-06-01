@@ -65,7 +65,7 @@ violations AS (
     FROM exported
     WHERE proname IN (
         'add_table', 'add_edge', 'reset', 'build', 'vacuum', 'maintenance',
-        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable'
+        'apply_sync', 'enable_sync', 'disable_sync', 'enable', 'disable', 'gql'
     )
       AND provolatile <> 'v'
 )

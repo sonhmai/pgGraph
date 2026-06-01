@@ -30,12 +30,15 @@ beside it in the crate tree.
 | `edge_store.rs` | CSR edge store with owned and mmap backings |
 | `resolution_index.rs` | Build-time and finalized table+PK lookup index |
 | `filter_index.rs` | Typed filter column encoding and hybrid dense/sparse storage |
+| `gql/` | pgrx-free frontend for the supported GQL subset |
+| `query/` | GQL binding, logical planning, physical lowering, execution, and JSON projection |
 | `builder.rs` | SPI cursor build pipeline and temp spool loading |
 | `catalog.rs` | Catalog module boundary for registration reads, writes, and validation |
 | `catalog/read.rs` | Registered table, edge, and filter-column catalog reads |
 | `catalog/validate.rs` | Source table, key, edge, and filter-column validation |
 | `catalog/write.rs` | Catalog inserts and updates for registered graph metadata |
 | `persistence.rs` | `.pggraph` writer/loader, CRC, bounds checks, mmap setup |
+| `projection/` | Clean CSR and overlay-aware projection read helpers |
 | `bfs.rs` | BFS and DFS traversal hot loops |
 | `path_finder.rs` | Shortest path and weighted shortest path algorithms |
 | `connected_components.rs` | Union-find connected component analysis |
@@ -64,6 +67,8 @@ and keeps shared facade imports local to the SQL boundary:
 | `search.rs` | Search and search-then-traverse entrypoints |
 | `workflow.rs` | App-friendly workflow wrappers |
 | `components.rs` | Connected component entrypoints |
+| `gql.rs` | `graph.gql()` and `graph.gql_explain()` SQL entrypoints |
+| `cypher.rs` | `graph.cypher()`, `graph.cypher_explain()`, and compatibility matrix entrypoints |
 | `runtime.rs` | Reset, auto-load, current graph validation |
 
 Contributor changes to SQL behavior usually touch one facade file plus one or

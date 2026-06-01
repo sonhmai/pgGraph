@@ -18,9 +18,11 @@ This page documents known alpha limitations, next-update hardening work, and
 lower-priority follow-up items. The list is ranked by expected user impact, not
 by implementation difficulty.
 
-This page remains the authoritative issue register. Higher-priority hardening
-work from the previous completion plan is now recorded in the completed-items
-table below.
+This page is the authoritative register for known limitations and correctness,
+operational, performance, or maintainability risks. Future product direction,
+new APIs, and feature expansion belong in [Roadmap](./roadmap). Completed
+hardening work remains documented in historical release notes and the resolved
+summaries below.
 
 Low-level PostgreSQL extension work involves real tradeoffs. Some optimizations
 make a query faster by keeping more data in memory, while others reduce memory
@@ -36,20 +38,16 @@ production use.
 
 ### Data Correctness and Corruption
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after `v0.1.2`.
-The previously listed edge endpoint validation and hydration numeric comparison
-issues were completed: invalid edge endpoints now fail as structural errors, and
-large JSON integers preserve exactness without implicit string/number matches.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Planned hardening | Current narrow writes use PostgreSQL-first DML and row-level behavior, but the remaining hardening item is to make stale-match drift explicit for `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` weak paths. |
 
 ### SQL Contract and Query Semantics
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after the filter
-model and legacy numeric filter work moved public traversal filtering onto the
-structured typed-filter path only.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-002 | Transaction-created nodes are visible to node-only GQL reads, but traversal/path entry-point behavior for those tx-local nodes remains intentionally narrow. | Planned clarification | Either reject unsupported traversal/path use with a typed error or add temporary-ID traversal support. Keep the documented mutable-overlay contract aligned with the implemented policy. |
+| KI-003 | The GQL and Cypher parser surfaces need dedicated fuzz targets beyond unit and pgrx coverage. | Planned test hardening | Parser totality has unit coverage for representative corpora, but fuzz targets should be added for sustained random input coverage before broadening language syntax. |
 
 ### SQL Safety and Schema Plumbing
 
@@ -67,18 +65,15 @@ writes moved to a streaming writer for fixed graph sections.
 
 ### Sync, Jobs, and Operator Semantics
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after scheduler
-ownership and background-job failure handling were completed.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-004 | pgGraph has a scheduler-safe `graph.run_scheduled_maintenance()` entry point, but no always-on internal scheduler for trigger-sync apply and overlay compaction in non-Docker installs. | Planned operational hardening | Docker installs can use the bundled `pg_cron` schedule, and other deployments can call `graph.run_scheduled_maintenance()` from `pg_cron`, cron, or an application scheduler. A future built-in scheduler should make the default trigger-sync experience require less external orchestration while preserving operator control over rebuild cost. |
 
 ### Internal Construction and Performance
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after traversal
-result metadata became adaptive for sparse visit budgets while retaining dense
-metadata for high-coverage result conversion.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Current behavior is correctness-gated. Future work should use benchmarks before changing duplicate suppression, overlay indexing, or transaction delta snapshotting. |
 
 ## P0: Operational Visibility and Resource Predictability
 
@@ -86,8 +81,11 @@ These are the highest-priority public follow-ups because they affect operators
 running larger graphs or higher sync volume.
 
 <Callout type="info">
-No currently tracked P0 items remain after persistence status phases and
-interrupt checks were added while preserving synchronous durability.
+No currently tracked P0 rows remain after `graph.memory_profile()` added
+instance-level sizing visibility for concurrent graph-using backends. Memory
+limits remain per backend; use `graph.memory_profile(concurrent_backends)` for
+capacity planning rather than treating `graph.memory_limit_mb` as a
+cluster-wide hard cap.
 </Callout>
 
 ## P1: Query Performance Follow-Ups
@@ -95,31 +93,40 @@ interrupt checks were added while preserving synchronous durability.
 These items are expected to improve latency or memory pressure, but they are
 not changes to the public SQL contract.
 
-<Callout type="info">
-No currently tracked P1 query-performance rows remain after source-search
-rechecks, aggregation hydration lookup ownership, and traversal result metadata
-were completed.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-005 | Overlay neighbor merging and transaction-delta lookups still have optimization opportunities in traversal hot paths. | Measure before optimizing | Duplicated here because it is an internal construction item with user-visible latency implications on dirty mutable projections. |
 
 ## P2: SQL Ergonomics and Documented Semantics
 
 These items clarify behavior or broaden the API. They are planned, but should
 not block use of the current documented SQL surface.
 
-<Callout type="info">
-No currently tracked P2 rows remain after structured traversal filters gained
-text substring and prefix predicates alongside equality, membership, range, and
-null checks.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-006 | `graph.cypher()` is a narrow openCypher compatibility preview over pgGraph's supported GQL subset, not full openCypher compatibility. | Documented limitation | Keep compatibility rows honest and route broader openCypher expansion through [Roadmap](./roadmap), not this register. |
+| KI-007 | SQL/PGQ remains an internal adapter seam, not a public SQL API. | Deferred public surface | Track public SQL/PGQ exposure in [Roadmap](./roadmap) after PostgreSQL graph-pattern hooks stabilize. |
 
 ## P3: Internals and Maintainability
 
-These are mostly contributor-facing improvements. They help long-term velocity,
-but they do not change core user behavior.
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-008 | Several implementation and test files exceed 1,000 lines, making review and focused weak-path testing harder. | Planned refactor | Highest-priority split candidates are `graph/src/pg_tests/gql.rs`, `graph/src/sql_facade/gql.rs`, `graph/src/query/tests.rs`, `graph/src/engine.rs`, `graph/src/query/semantics.rs`, `graph/src/query/value.rs`, `graph/src/bfs.rs`, and `graph/src/gql/parser.rs`. |
+| KI-009 | GQL write weak-path tests can be expanded for more SQLSTATE and rollback scenarios. | Planned test hardening | Current release-gate coverage includes GQL transaction lifecycle scripts, pgrx GQL tests, playground fixtures, and unit tests. Additional weak paths should be added close to the code they constrain. |
 
-| Area | Current limitation | Planned direction |
-|---|---|---|
-| pg test layout | Some PostgreSQL integration test files are still included textually from `lib.rs` because pgrx `#[pg_schema]` currently requires an inline `mod {}` body for generated SQL tests. | Revisit when the pgrx macro supports out-of-line modules or when the pg test harness is reorganized around macro-compatible test modules. |
+## Roadmap-Owned Future Work
+
+Do not use this known-issues register for broad feature wishes that are not
+current limitations. Track these in [Roadmap](./roadmap) instead:
+
+- broader GQL syntax and multi-pattern planning;
+- public SQL/PGQ exposure;
+- broader openCypher compatibility;
+- semantic-guided search and pgVector ranking;
+- WAL-driven sync;
+- COPY build scanning;
+- additional graph analytics;
+- distributed graph execution.
 
 ## Lower-Priority Optimizations
 

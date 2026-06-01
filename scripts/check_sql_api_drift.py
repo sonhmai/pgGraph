@@ -39,7 +39,9 @@ CONFIG_RS = GRAPH_SRC / "config.rs"
 def implemented_functions() -> set[str]:
     """Return SQL function names exposed in the graph schema."""
     pg_extern = re.compile(
-        r"#\[pg_extern\((.*?)\)\](?:\s*#\[[^\]]*\])*\s*fn\s+(\w+)",
+        r"#\[pg_extern\((.*?)\)\]"
+        r"(?:\s*#\[[^\]]*\])*"
+        r"\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)",
         re.DOTALL,
     )
     names: set[str] = set()

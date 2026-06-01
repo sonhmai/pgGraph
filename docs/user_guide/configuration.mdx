@@ -49,12 +49,20 @@ SELECT pg_reload_conf();
 | `graph.enforce_tenant_scope` | bool | `true` | `USERSET` | `on`, `off` | Tenanted graph queries |
 | `graph.tenant_setting` | string | empty | `USERSET` | Any session GUC name | Tenant fallback |
 | `graph.build_scan_mode` | string | `select` | `USERSET` | `select`; `copy` is reserved | Build scanner |
+| `graph.default_projection_mode` | string | `csr_readonly` | `USERSET` | `csr_readonly`, `mutable_overlay` | Default `graph.build()` projection mode |
+| `graph.mutable_enabled` | bool | `false` | `USERSET` | `on`, `off` | Allows `mutable_overlay` builds |
 
 <Callout type="warning">
 `graph.build_scan_mode = 'copy'` is present as a reserved mode, but the current
 code returns an error because safe server-side COPY hooks are not available
 through the pgrx path used here. Use `select`.
 </Callout>
+
+`graph.default_projection_mode = 'csr_readonly'` preserves the immutable
+read-mostly engine. `mutable_overlay` is an opt-in build mode for
+transaction-local GQL writes such as single-node mapped `CREATE` and mapped
+property `SET`/`REMOVE`, mapped edge-row `DELETE`, and mapped node
+`DETACH DELETE`/`MERGE`; selecting it requires `graph.mutable_enabled = on`.
 
 ## Memory And Build Settings
 
@@ -63,11 +71,32 @@ through the pgrx path used here. Use `select`.
 | `graph.memory_limit_mb` | int | `2048` | `SUSET` | `64` to `32768` | Pre-build OOM guard and status limit |
 | `graph.build_batch_size` | int | `10000` | `SUSET` | `1` to `1000000` | SPI cursor fetch size and spool batch size |
 | `graph.oom_action` | string | `error` | `SUSET` | `error`, `readonly`, `read_only`, `read-only` | Behavior when estimated build memory exceeds the limit |
+| `graph.max_tx_delta_nodes` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local node deltas before a mapped GQL write aborts |
+| `graph.max_tx_delta_edges` | int | `100000` | `USERSET` | `0` to `10000000` | Maximum transaction-local edge deltas before a mapped GQL write aborts |
+| `graph.max_overlay_memory_mb` | int | `256` | `USERSET` | `1` to `32768` | Maximum estimated transaction-overlay heap before a mapped GQL write aborts |
+| `graph.compaction_threshold` | int | `50000` | `USERSET` | `1` to `10000000` | Delta or tombstone count at which status surfaces recommend compaction |
 
 `graph.build()` estimates memory from registered tables and edges before
 constructing the active engine. With `graph.oom_action = 'error'`, it raises `PG001`.
 With `graph.oom_action = 'readonly'`, it logs a warning and marks the built
 engine read-only.
+
+`graph.memory_limit_mb` is enforced per PostgreSQL backend. To size a database
+where multiple sessions may load or build the graph, build or load the graph in
+one representative backend and run:
+
+```sql
+SELECT *
+FROM graph.memory_profile(concurrent_backends := 8);
+```
+
+The result separates backend-private heap from mmap-backed bytes that are
+physically shareable through the OS page cache, then projects an instance total
+for the supplied backend count.
+
+Mapped GQL writes use transaction-local overlays. If a node, edge, or overlay
+memory limit would be exceeded, the current SQL statement aborts with `PG019`
+and PostgreSQL rolls back the source-table DML for that statement.
 
 ```sql
 ALTER SYSTEM SET graph.memory_limit_mb = 8192;
@@ -94,7 +123,7 @@ $PGDATA/graph/main.pggraph.sync
 
 | GUC | Type | Default | Context | Range or values | Effect |
 |---|---:|---:|---|---|---|
-| `graph.sync_mode` | string | `manual` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
+| `graph.sync_mode` | string | `trigger` | `SUSET` | `manual`, `trigger`, `wal` | Sync strategy selector |
 | `graph.edge_buffer_size` | int | `100000` | `SUSET` | `1000` to `10000000` | Maximum pending edge mutations before read-only mode |
 | `graph.sync_batch_size` | int | `1000` | `SUSET` | `1` to `100000` | Maximum sync-log rows replayed in one internal batch |
 | `graph.vacuum_interval_secs` | int | `60` | `SUSET` | `5` to `86400` | Reserved maintenance interval setting; not scheduled by current code |
@@ -119,8 +148,10 @@ graph.max_frontier = 100000
 graph.default_max_depth = 5
 graph.default_search_mode = 'contains'
 graph.default_hydrate = on
+graph.default_projection_mode = 'csr_readonly'
+graph.mutable_enabled = off
 graph.query_freshness = 'apply_pending_sync'
-graph.sync_mode = 'manual'
+graph.sync_mode = 'trigger'
 ```
 
 Use lower traversal circuit breakers on multi-tenant OLTP primaries, and raise

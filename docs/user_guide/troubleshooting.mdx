@@ -109,6 +109,26 @@ Likely causes:
 | Tenant scope excludes nodes | Pass correct `tenant` or session tenant |
 | Filter column not registered/rebuilt | Register filter column and rebuild |
 
+## Unsupported Operation With Pending Overlays
+
+Symptom:
+
+```text
+SQLSTATE PG018
+Unsupported graph operation
+```
+
+Likely cause:
+
+| Cause | Fix |
+|---|---|
+| `graph.weighted_shortest_path()` ran while `edge_buffer_used > 0` | Run `graph.vacuum()` or `graph.maintenance()` to merge pending edge overlays, then retry |
+
+Unweighted traversal, unweighted shortest path, and connected components include
+pending edge overlays after `graph.apply_sync()`. Weighted shortest path fails
+closed while overlays are pending because pending edge mutations do not carry
+edge weights.
+
 ## Schema Invalid Or Needs Rebuild
 
 Symptoms:

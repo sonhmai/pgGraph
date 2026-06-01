@@ -2,7 +2,9 @@
 //!
 //! `graph` is a PostgreSQL extension written in Rust (via pgrx) that lets you
 //! query your existing relational tables as a graph. No external services.
-//! No ETL pipelines. No separate graph database. No new query language.
+//! No ETL pipelines. No separate graph database. The current public API is
+//! PostgreSQL SQL functions, including a GQL-compatible subset exposed through
+//! `graph.gql()`.
 //!
 //! See: `docs/user_guide/index.mdx` and `docs/contributor_guide/index.mdx`
 
@@ -22,13 +24,17 @@ mod builder;
 mod catalog;
 mod config;
 mod connected_components;
+mod cypher;
 mod discover;
 mod edge_store;
 mod engine;
 mod filter_index;
+mod gql;
 mod node_store;
 mod path_finder;
 mod persistence;
+mod projection;
+mod query;
 mod quote;
 mod resolution_index;
 mod safety;
@@ -64,9 +70,10 @@ use sql_facade::ensure_current_graph;
 use sql_filters::validate_structured_operator_shape;
 #[cfg(feature = "pg_test")]
 use sql_jobs::{
-    create_build_job, create_maintenance_job, update_build_job_completed, update_build_job_failed,
-    update_build_job_progress, update_build_job_started, update_maintenance_job_completed,
-    update_maintenance_job_failed, update_maintenance_job_progress, update_maintenance_job_started,
+    create_build_job, create_maintenance_job, run_build_job, update_build_job_completed,
+    update_build_job_failed, update_build_job_progress, update_build_job_started,
+    update_maintenance_job_completed, update_maintenance_job_failed,
+    update_maintenance_job_progress, update_maintenance_job_started,
 };
 #[cfg(feature = "pg_test")]
 use sql_sync::current_sync_mode;
@@ -107,6 +114,18 @@ pub mod fuzz_support {
     /// through Postgres. Intended for fuzz targets.
     pub fn parse_node_ref_json_parts(value: &serde_json::Value) -> bool {
         crate::parse_node_ref_json_parts(value).is_ok()
+    }
+
+    /// Parse a GQL query through the pgrx-free frontend. Intended for fuzz
+    /// targets and unit tests.
+    pub fn parse_gql_query(query: &str) -> bool {
+        crate::gql::parse(query).is_ok()
+    }
+
+    /// Parse an openCypher compatibility query without touching PostgreSQL.
+    /// Intended for fuzz targets and unit tests.
+    pub fn parse_cypher_query(query: &str) -> bool {
+        crate::cypher::parse_statement(query).is_ok()
     }
 }
 
@@ -161,6 +180,7 @@ thread_local! {
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     config::register_gucs();
+    projection::tx_delta::register_transaction_callbacks();
 
     // Eagerly pre-warm the OS page cache for the .pggraph file.
     let Ok(path) = persistence::graph_file_path() else {
@@ -223,4 +243,6 @@ mod tests {
     include!("pg_tests/workflow_relationship_api.rs");
     include!("pg_tests/workflow_validation.rs");
     include!("pg_tests/synthetic_release.rs");
+    include!("pg_tests/gql.rs");
+    include!("pg_tests/cypher.rs");
 }

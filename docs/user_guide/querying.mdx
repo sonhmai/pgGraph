@@ -1,8 +1,10 @@
 # Querying
 
 Graph queries are normal SQL calls. The API has primitive functions for exact
-control and workflow wrappers for application-friendly search, expansion, paths,
-connections, and summaries.
+control, workflow wrappers for application-friendly search, expansion, paths,
+connections, and summaries, and a GQL-compatible subset for graph pattern
+queries, an openCypher compatibility surface for the same supported graph
+patterns, and narrow mapped writes over registered tables and edges.
 
 ## Search
 
@@ -43,6 +45,293 @@ Search results are verified against source rows, deduplicated by
 `(node_table, node_id)`, sorted by table OID then node ID, and then paginated.
 Each source-table scan is bounded to `row_offset + max_rows` candidates before
 the final global merge.
+
+## GQL
+
+`graph.gql()` executes the documented GQL-compatible subset and returns one
+JSONB object per row. Node labels resolve to registered source-table names, and
+relationship types resolve to registered edge labels.
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (o:orders)-[:placed_by]->(c:customers)
+   WHERE o.status = $status
+   RETURN o.id AS order_id, o.status AS status, c.name AS customer
+   ORDER BY customer
+   LIMIT 20',
+  params := '{"status":"paid"}'::jsonb,
+  hydrate := true
+);
+```
+
+Supported read coverage:
+
+| Area | Supported behavior |
+|---|---|
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, or top-level single-relationship `OPTIONAL MATCH` |
+| Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
+| Direction | Outbound, inbound, and undirected relationship patterns |
+| Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
+| Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
+| Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
+| Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
+| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported with a bounded in-memory key set |
+| Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
+| Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns |
+| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT`, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
+
+### GQL JSONB result format
+
+`graph.gql()` and `graph.cypher()` return graph values as ordinary
+PostgreSQL `jsonb`, not as a custom graph scalar type. Each SQL result row has
+one column named `row`. The value is a JSON object whose keys are the
+`RETURN` aliases, or the return expression text when no alias is provided:
+
+```json
+{
+  "person": {
+    "_id": { "table": "users", "id": "u1" },
+    "_labels": ["users"],
+    "id": "u1",
+    "name": "Alice"
+  },
+  "company_name": "Acme"
+}
+```
+
+When a query returns a node value, pgGraph serializes it as a JSON object with
+stable reserved keys:
+
+```json
+{
+  "_id": { "table": "users", "id": "u1" },
+  "_labels": ["users"],
+  "id": "u1",
+  "name": "Alice"
+}
+```
+
+`_id.table` is the registered source-table label and `_id.id` is the source
+primary-key value serialized as text. `_labels` currently contains the single
+registered table label. With `hydrate := true`, the readable source row is
+included as JSON alongside the reserved keys. If a required graph coordinate no
+longer has a readable backing source row, the query raises a GQL execution
+error instead of fabricating an empty node object. With `hydrate := false`, the
+node object contains only `_id` and `_labels`.
+
+Relationship values are coordinate identity objects in this release:
+
+```json
+{
+  "_type": "works_at",
+  "_start": { "table": "users", "id": "u1" },
+  "_end": { "table": "companies", "id": "c1" }
+}
+```
+
+`_type` is the registered edge label. `_start` and `_end` are endpoint graph
+coordinates. Relationship source-row hydration, relationship properties, and a
+separate relationship row identity are not part of the current JSONB contract.
+
+Path values are JSON objects with a `_path` member:
+
+```json
+{
+  "_path": {
+    "nodes": [
+      { "_id": { "table": "users", "id": "u1" }, "_labels": ["users"] },
+      { "_id": { "table": "companies", "id": "c1" }, "_labels": ["companies"] }
+    ],
+    "relationships": [
+      {
+        "_type": "works_at",
+        "_start": { "table": "users", "id": "u1" },
+        "_end": { "table": "companies", "id": "c1" }
+      }
+    ]
+  }
+}
+```
+
+The `nodes(path)` function returns the `_path.nodes` array directly,
+`relationships(path)` returns the `_path.relationships` array directly, and
+`length(path)` returns the relationship count as a JSON number.
+
+Scalar properties are returned as their JSON representation: strings,
+numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
+targets and relationships also project as JSON `null`. A missing key inside a
+registered JSONB property path projects as JSON `null`, but it does not satisfy
+`IS NULL`; explicit JSON `null` does.
+
+For SDKs and application code, graph values can be identified by their
+reserved-key shape: objects with `_path` are paths, objects with `_type`,
+`_start`, and `_end` are relationships, and objects with `_id` and `_labels`
+are nodes. Source columns that would collide with reserved graph keys are
+rejected during binding.
+
+By default, GQL returns hydrated node objects when a query returns a node value
+such as `RETURN o` or `RETURN c`; PostgreSQL ACL and RLS still decide whether
+the source row can be read. To return only identifiers, project the identifier
+property directly, for example `RETURN o.id AS order_id`, instead of returning
+the whole node. The optional `hydrate := false` SQL argument is a pgGraph
+escape hatch for coordinate-only node objects when callers intentionally want
+the compact `{table, id}` shape. Required hydration is fail-closed: a stale
+graph coordinate whose source row cannot be hydrated raises `PG017`.
+
+Other read semantics:
+
+- Relationship values are coordinate identity objects in this release.
+- `OPTIONAL MATCH` null-extends unmatched source rows for single-relationship
+  patterns.
+- Aggregate functions ignore JSON `null` inputs for `count(expr)`, `sum`,
+  `avg`, `min`, `max`, and `collect`; `count(*)` counts every input row.
+- `collect` preserves non-null values in row order.
+- Aggregate-only empty inputs return one row with `0`, `null`, or `[]`
+  according to the aggregate.
+- `DISTINCT` query forms abort if their unique-key working set exceeds the GQL
+  result cap.
+- Bounded relationship variables return path objects with `_path.nodes` and
+  `_path.relationships`.
+- `nodes`, `relationships`, and `length` expose path components directly.
+
+Registered JSONB source columns can be addressed with dotted property paths
+such as `u.profile.plan`; returned JSONB arrays and objects keep their JSON
+shape. A missing key inside a JSONB property path projects as JSON `null`, but
+it does not satisfy `IS NULL`; explicit JSON `null` does.
+
+Planned outside this subset:
+
+- Relationship source-row hydration.
+- Path-function `WITH` projections.
+- Aggregate `WITH` projections.
+- Full path variable syntax.
+- Multi-pattern optional joins.
+
+Supported write coverage is intentionally narrow. `CREATE` can insert one node
+row into a registered source table, `SET` can update one mapped property on
+one matched node, `REMOVE` can clear one mapped property on one matched node,
+and directed `DELETE` can remove one matched relationship backed by a
+registered edge row table. `DETACH DELETE` can remove one matched node and its
+incident registered edge-row relationships. `MERGE` can insert one mapped node
+or match one mapped node by registered primary-key identity and run one branch update. These
+writes require that the active graph was built with
+`mode := 'mutable_overlay'` and `graph.mutable_enabled = on`:
+
+```sql
+SELECT row
+FROM graph.gql(
+  'CREATE (c:customers {id: $id, name: $name}) RETURN c',
+  params := '{"id":"c-42","name":"Ada"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (c:customers {id: $id}) SET c.status = $status RETURN c.status AS status',
+  params := '{"id":"c-42","status":"active"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (c:customers {id: $id}) REMOVE c.status RETURN c.status AS status',
+  params := '{"id":"c-42"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (a:customers {id: $from})-[r:purchased]->(b:products {id: $to})
+   DELETE r
+   RETURN a.id AS customer_id, b.id AS product_id',
+  params := '{"from":"c-42","to":"p-9"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MATCH (c:customers {id: $id}) DETACH DELETE c RETURN c.id AS customer_id',
+  params := '{"id":"c-42"}'::jsonb
+);
+```
+
+```sql
+SELECT row
+FROM graph.gql(
+  'MERGE (c:customers {id: $id, name: $name})
+   ON CREATE SET c.status = ''new''
+   ON MATCH SET c.last_seen_at = $seen_at
+   RETURN c.id AS customer_id, c.status AS status',
+  params := '{"id":"c-42","name":"Ava","seen_at":"2026-05-31T12:00:00Z"}'::jsonb
+);
+```
+
+The write is PostgreSQL-first: pgGraph inserts, updates, or deletes the mapped
+source row through SPI, PostgreSQL enforces table privileges, constraints,
+RLS, triggers, and MVCC, and the GQL result is built from the affected row or
+matched graph coordinates.
+Within the same transaction, node-only `MATCH` queries can read newly created
+nodes through the backend-local transaction delta. `SET` updates registered
+non-key, non-tenant property columns and refreshes any registered typed filter index value
+for that backend. `REMOVE` sets a mapped scalar column to SQL `NULL` or removes
+a registered dotted key from a JSONB property column; repeated `REMOVE` calls
+are idempotent. Labels map to registered source tables, so label removal is not
+part of the supported write model. `DELETE` tombstones the matching graph edge
+in the current backend after PostgreSQL deletes exactly one edge row; endpoint
+nodes are not deleted. `DETACH DELETE` enumerates registered incident edge-row
+tables, deletes matching forward and reverse edge rows first, then deletes the
+matched node row and tombstones the node and deleted graph edges in the current
+backend. If any step fails, PostgreSQL aborts the statement and the source rows
+remain authoritative. `DETACH DELETE` rejects incident relationships that are
+not backed by registered edge row tables because pgGraph has no safe generic
+policy for rewriting arbitrary endpoint-table foreign keys. `MERGE` is
+supported for one mapped node. The registered primary key columns are the match
+identity, tenant scope participates when configured, `ON CREATE` values are
+evaluated only for inserted rows, and `ON MATCH` values are evaluated only for
+matched rows. pgGraph locks an existing matched row with `FOR UPDATE` only when
+`ON MATCH SET` can update it; insert races use PostgreSQL
+`ON CONFLICT DO NOTHING` on the registered identity, so concurrent sessions
+racing the same key converge on one PostgreSQL source row. `MERGE` requires
+`SELECT` and `INSERT` on the mapped source table; `UPDATE` is required only when
+the statement includes `ON MATCH SET`. `CREATE`, `SET`, `REMOVE`, `DELETE`,
+`DETACH DELETE`, and `MERGE` are rejected on `csr_readonly`
+projections. Relationship creation, multi-row writes, dynamic labels, and
+creating new PostgreSQL schema objects from GQL are future work.
+
+Use `graph.gql_explain(query)` to inspect parse, bind, logical, and physical
+planning stages without executing the query.
+
+## openCypher Compatibility
+
+`graph.cypher()` is a separate compatibility surface for openCypher-shaped text
+that maps into the same pgGraph execution model as `graph.gql()`. It is not a
+full openCypher-compatible database API. Supported overlapping reads and mapped writes
+lower into the shared GQL IR, so labels still resolve to registered PostgreSQL
+source tables, relationship types still resolve to registered edge labels, and
+PostgreSQL remains authoritative for ACLs, RLS, constraints, triggers, and
+MVCC.
+
+```sql
+SELECT row
+FROM graph.cypher(
+  'MATCH (o:orders)-[:placed_by]->(c:customers)
+   RETURN o.id AS order_id, c.name AS customer
+   ORDER BY customer
+   LIMIT 20',
+  hydrate := true
+);
+```
+
+Use `graph.cypher_explain(query)` to inspect the shared plan selected for a
+Cypher-compatible query. Use `graph.cypher_compatibility()` to inspect the
+current compatibility matrix. Cypher-only constructs such as `CALL`, `YIELD`,
+`UNWIND`, `FOREACH`, `LOAD CSV`, `START`, `UNION`, and Cypher DDL are rejected
+because they do not map to pgGraph's PostgreSQL-first model.
 
 ## Search Modes
 
@@ -327,6 +616,11 @@ FROM graph.weighted_shortest_path(
   'd'
 );
 ```
+
+Unweighted shortest path includes pending trigger-sync edge overlays after
+`graph.apply_sync()`. Weighted shortest path requires merged weighted CSR data;
+when edge overlays are pending, it fails with `PG018` until `graph.vacuum()` or
+`graph.maintenance()` rebuilds the weighted graph.
 
 Weighted path return columns:
 

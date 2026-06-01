@@ -380,6 +380,20 @@ impl NodeStore {
         }
     }
 
+    /// Estimate bytes borrowed from an mmap-backed graph artifact.
+    pub fn estimated_mmap_bytes(&self) -> usize {
+        match &self.backing {
+            ArrayBacking::Owned { .. } => 0,
+            ArrayBacking::Mmap { arrays } => arrays
+                .active_byte_count
+                .saturating_add(arrays.node_count as usize * std::mem::size_of::<u32>())
+                .saturating_add(
+                    (arrays.node_count as usize + 1).saturating_mul(std::mem::size_of::<u64>()),
+                )
+                .saturating_add(arrays.pk_bytes_len),
+        }
+    }
+
     /// Return an owned, mutable copy of this store.
     ///
     /// Sync overlays use this to accept node tombstones and inserts after a

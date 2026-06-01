@@ -20,6 +20,9 @@ use roaring::RoaringBitmap;
 use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
+use crate::projection::neighbors::{
+    NeighborSource, OverlayDeletes, OverlayInserts, OverlayNeighbors,
+};
 use crate::types::{FilterOp, PathCoordinate, TableOid, TraversalResult};
 
 const SPARSE_METADATA_MIN_NODES: usize = 4_096;
@@ -46,9 +49,9 @@ pub struct BfsConfig {
     /// Per-tenant bitmap of allowed node indices.
     pub tenant_membership: HashMap<String, RoaringBitmap>,
     /// Sync overlay edges inserted after the last base build, keyed by source node.
-    pub overlay_insert_edges: HashMap<u32, Vec<(u32, u8)>>,
+    pub overlay_insert_edges: OverlayInserts,
     /// Sync overlay edges deleted after the last base build, keyed by source node.
-    pub overlay_deleted_edges: HashMap<u32, HashSet<(u32, u8)>>,
+    pub overlay_deleted_edges: OverlayDeletes,
 }
 
 /// Result of BFS: discovered nodes with parent tracking for path reconstruction.
@@ -266,6 +269,11 @@ pub fn execute(
     }
 
     let has_filters = !config.filter_ops.is_empty();
+    let neighbors = OverlayNeighbors::new(
+        edge_store,
+        &config.overlay_insert_edges,
+        &config.overlay_deleted_edges,
+    );
 
     // BFS loop — traversal state is allocated before this point.
     while let Some(current) = frontier.pop_front() {
@@ -276,23 +284,23 @@ pub fn execute(
             continue;
         }
 
-        for (neighbor, edge_type) in neighbors_iter(edge_store, current, config) {
+        for neighbor in neighbors.neighbors(current) {
             if !candidate_allowed(
                 node_store,
                 filter_index,
                 config,
-                neighbor,
-                edge_type,
+                neighbor.target,
+                neighbor.type_id,
                 &visited,
                 has_filters,
             ) {
                 continue;
             }
 
-            visited.insert(neighbor);
-            depth_map.set(neighbor, current_depth + 1);
-            parent.set(neighbor, current);
-            parent_edge_type.set(neighbor, edge_type);
+            visited.insert(neighbor.target);
+            depth_map.set(neighbor.target, current_depth + 1);
+            parent.set(neighbor.target, current);
+            parent_edge_type.set(neighbor.target, neighbor.type_id);
             nodes_visited += 1;
 
             // Circuit breakers
@@ -307,7 +315,7 @@ pub fn execute(
 
             // Only add to frontier if we haven't hit the depth limit
             if current_depth + 1 < config.max_depth {
-                frontier.push_back(neighbor);
+                frontier.push_back(neighbor.target);
 
                 // Frontier size circuit breaker
                 if frontier.len() as u32 >= config.max_frontier {
@@ -415,79 +423,6 @@ pub fn execute_dfs(
     }
 }
 
-struct NeighborIter<'a> {
-    targets: &'a [u32],
-    type_ids: &'a [u8],
-    deleted: Option<&'a HashSet<(u32, u8)>>,
-    inserted: Option<&'a [(u32, u8)]>,
-    base_pos: usize,
-    insert_pos: usize,
-}
-
-impl<'a> NeighborIter<'a> {
-    fn new(edge_store: &'a EdgeStore, node_idx: u32, config: &'a BfsConfig) -> Self {
-        let (targets, type_ids) = edge_store.neighbors(node_idx);
-        Self {
-            targets,
-            type_ids,
-            deleted: config.overlay_deleted_edges.get(&node_idx),
-            inserted: config
-                .overlay_insert_edges
-                .get(&node_idx)
-                .map(Vec::as_slice),
-            base_pos: 0,
-            insert_pos: 0,
-        }
-    }
-
-    fn base_contains(&self, target: u32, type_id: u8) -> bool {
-        self.targets
-            .iter()
-            .zip(self.type_ids.iter())
-            .any(|(&base_target, &base_type)| base_target == target && base_type == type_id)
-    }
-}
-
-impl Iterator for NeighborIter<'_> {
-    type Item = (u32, u8);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.base_pos < self.targets.len() {
-            let pos = self.base_pos;
-            self.base_pos += 1;
-            let target = self.targets[pos];
-            let type_id = self.type_ids[pos];
-            if self
-                .deleted
-                .is_some_and(|deleted| deleted.contains(&(target, type_id)))
-            {
-                continue;
-            }
-            return Some((target, type_id));
-        }
-
-        let inserted = self.inserted?;
-        while self.insert_pos < inserted.len() {
-            let (target, type_id) = inserted[self.insert_pos];
-            self.insert_pos += 1;
-            if self.base_contains(target, type_id) {
-                continue;
-            }
-            return Some((target, type_id));
-        }
-
-        None
-    }
-}
-
-fn neighbors_iter<'a>(
-    edge_store: &'a EdgeStore,
-    node_idx: u32,
-    config: &'a BfsConfig,
-) -> NeighborIter<'a> {
-    NeighborIter::new(edge_store, node_idx, config)
-}
-
 fn candidate_allowed(
     node_store: &NodeStore,
     filter_index: &FilterIndex,
@@ -505,7 +440,7 @@ fn candidate_allowed(
             return false;
         }
     }
-    if !node_store.is_active(neighbor) {
+    if !node_store.is_active(neighbor) || crate::projection::tx_delta::node_deleted(neighbor) {
         return false;
     }
     if let Some(tenant) = config.tenant.as_deref() {
@@ -525,13 +460,6 @@ fn candidate_allowed(
     true
 }
 
-fn base_contains(targets: &[u32], type_ids: &[u8], target: u32, type_id: u8) -> bool {
-    targets
-        .iter()
-        .zip(type_ids.iter())
-        .any(|(&base_target, &base_type)| base_target == target && base_type == type_id)
-}
-
 struct DfsPushContext<'a> {
     node_store: &'a NodeStore,
     edge_store: &'a EdgeStore,
@@ -548,29 +476,13 @@ struct DfsPushContext<'a> {
 
 impl DfsPushContext<'_> {
     fn push_neighbors(&mut self, current: u32, current_depth: i32) -> bool {
-        let (targets, type_ids) = self.edge_store.neighbors(current);
-
-        if let Some(inserted) = self.config.overlay_insert_edges.get(&current) {
-            for insert_pos in (0..inserted.len()).rev() {
-                let (neighbor, edge_type) = inserted[insert_pos];
-                if base_contains(targets, type_ids, neighbor, edge_type)
-                    || inserted[..insert_pos].contains(&(neighbor, edge_type))
-                    || self.push_candidate(current, current_depth, neighbor, edge_type)
-                {
-                    continue;
-                }
-                return true;
-            }
-        }
-
-        for (&neighbor, &edge_type) in targets.iter().zip(type_ids.iter()).rev() {
-            if self
-                .config
-                .overlay_deleted_edges
-                .get(&current)
-                .is_some_and(|deleted| deleted.contains(&(neighbor, edge_type)))
-                || self.push_candidate(current, current_depth, neighbor, edge_type)
-            {
+        let neighbors = OverlayNeighbors::new(
+            self.edge_store,
+            &self.config.overlay_insert_edges,
+            &self.config.overlay_deleted_edges,
+        );
+        for neighbor in neighbors.neighbors_reversed(current) {
+            if self.push_candidate(current, current_depth, neighbor.target, neighbor.type_id) {
                 continue;
             }
             return true;

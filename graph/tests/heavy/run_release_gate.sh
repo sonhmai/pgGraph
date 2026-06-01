@@ -18,6 +18,11 @@ RUN_METADATA="${RUN_METADATA:-1}"
 RUN_RSS="${RUN_RSS:-0}"
 RUN_SYNTHETIC="${RUN_SYNTHETIC:-1}"
 RUN_PLAYGROUND="${RUN_PLAYGROUND:-1}"
+RUN_GQL_CREATE_TX="${RUN_GQL_CREATE_TX:-1}"
+RUN_GQL_SET_TX="${RUN_GQL_SET_TX:-1}"
+RUN_GQL_DELETE_TX="${RUN_GQL_DELETE_TX:-1}"
+RUN_GQL_MERGE_RACE="${RUN_GQL_MERGE_RACE:-1}"
+RUN_TX_DELTA_CRASH="${RUN_TX_DELTA_CRASH:-0}"
 
 if [[ "$RUN_FULL_MATRIX" == "1" ]]; then
   ./tests/heavy/run_pg_matrix.sh
@@ -73,11 +78,27 @@ if [[ "$RUN_SYNTHETIC" == "1" ]]; then
 fi
 
 if [[ "$RUN_PLAYGROUND" == "1" ]]; then
-  ./tests/heavy/playground_release_gate.sh
+  PGGRAPH_REBUILD_IMAGE=1 PGGRAPH_RECREATE_CONTAINER=1 ./tests/heavy/playground_release_gate.sh
 fi
 
 if [[ "$RUN_PGBENCH" == "1" ]]; then
   DBNAME="${DB_PREFIX}_pgbench" CLIENTS="${CLIENTS:-4}" JOBS="${JOBS:-2}" TIME="${TIME:-30}" ./tests/heavy/run_pgbench_sync.sh
+fi
+
+if [[ "$RUN_GQL_CREATE_TX" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_create_tx" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_create_tx_lifecycle.sh
+fi
+
+if [[ "$RUN_GQL_SET_TX" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_set_tx" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_set_tx_lifecycle.sh
+fi
+
+if [[ "$RUN_GQL_DELETE_TX" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_delete_tx" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_delete_tx_lifecycle.sh
+fi
+
+if [[ "$RUN_GQL_MERGE_RACE" == "1" ]]; then
+  DBNAME="${DB_PREFIX}_gql_merge_race" PG_VERSION_FEATURE="$PG_VERSION_FEATURE" ./tests/heavy/gql_merge_race.sh
 fi
 
 if [[ "$RUN_RSS" == "1" ]]; then
@@ -87,6 +108,11 @@ fi
 if [[ "$RUN_CRASH" == "1" ]]; then
   : "${PGDATA:?PGDATA must point at a disposable cluster when RUN_CRASH=1}"
   DBNAME="${DB_PREFIX}_crash" PGDATA="$PGDATA" ./tests/heavy/crash_recovery.sh
+fi
+
+if [[ "$RUN_TX_DELTA_CRASH" == "1" ]]; then
+  : "${PGDATA:?PGDATA must point at a disposable cluster when RUN_TX_DELTA_CRASH=1}"
+  DBNAME="${DB_PREFIX}_tx_delta_crash" PGDATA="$PGDATA" ./tests/heavy/tx_delta_crash_recovery.sh
 fi
 
 if [[ "$RUN_DOCKER" == "1" ]]; then

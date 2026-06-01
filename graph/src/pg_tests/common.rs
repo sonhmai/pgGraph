@@ -17,6 +17,23 @@ fn create_error_capture_helper() {
     .expect("create error capture helper failed");
 }
 
+fn create_error_sqlstate_helper() {
+    Spi::run(
+        "CREATE OR REPLACE FUNCTION public.graph_test_sqlstate(statement text)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 EXECUTE statement;
+                 RETURN NULL;
+             EXCEPTION WHEN others THEN
+                 RETURN SQLSTATE;
+             END
+             $$",
+    )
+    .expect("create SQLSTATE capture helper failed");
+}
+
 fn sql_raises(statement: &str) -> bool {
     create_error_capture_helper();
     Spi::get_one::<bool>(&format!(
@@ -25,6 +42,15 @@ fn sql_raises(statement: &str) -> bool {
     ))
     .expect("error capture query failed")
     .unwrap_or(false)
+}
+
+fn sqlstate_for_error(statement: &str) -> Option<String> {
+    create_error_sqlstate_helper();
+    Spi::get_one::<String>(&format!(
+        "SELECT public.graph_test_sqlstate({})",
+        super::sql_literal(statement)
+    ))
+    .expect("SQLSTATE capture query failed")
 }
 
 fn explain_source_search_query(property_value: &str, mode: &str, table_oid: u32) -> String {
@@ -86,6 +112,9 @@ fn reset_and_create_fixtures() {
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'manual'").expect("reset sync_mode failed");
     Spi::run("SET graph.build_scan_mode = 'select'").expect("reset build_scan_mode failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("reset default_projection_mode failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("reset mutable_enabled failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_junction_pgtest CASCADE")
         .expect("drop junction failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_test_friendships_pgtest CASCADE")
@@ -195,6 +224,9 @@ fn reset_and_create_synthetic_fixture(node_count: i32, hub_fanout: i32, persist:
     Spi::run("SET graph.enabled = on").expect("enable graph failed");
     Spi::run("SET graph.sync_mode = 'manual'").expect("reset sync_mode failed");
     Spi::run("SET graph.build_scan_mode = 'select'").expect("reset build_scan_mode failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("reset default_projection_mode failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("reset mutable_enabled failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_synth_edges_pgtest CASCADE")
         .expect("drop synthetic edges failed");
     Spi::run("DROP TABLE IF EXISTS public.graph_synth_nodes_pgtest CASCADE")

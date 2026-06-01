@@ -958,6 +958,23 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
+             VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
+    )
+    .expect("insert pending weighted node failed");
+    let weighted_cost = Spi::get_one::<i64>(
+        "SELECT total_cost
+             FROM graph.weighted_shortest_path(
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node',
+                'graph_test_topology_auto_sync_pgtest'::regclass,
+                'weighted-node'
+             )",
+    )
+    .expect("weighted path failed")
+    .unwrap_or(0);
+
+    Spi::run(
+        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
              VALUES ('multi-start-child', 'root', 'Multi Start Child', 7)",
     )
     .expect("insert pending multi-start child failed");
@@ -995,23 +1012,6 @@ fn topology_reads_auto_sync_traversal_and_paths() {
 
     Spi::run(
         "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
-             VALUES ('weighted-node', NULL, 'Weighted Node', 1)",
-    )
-    .expect("insert pending weighted node failed");
-    let weighted_cost = Spi::get_one::<i64>(
-        "SELECT total_cost
-             FROM graph.weighted_shortest_path(
-                'graph_test_topology_auto_sync_pgtest'::regclass,
-                'weighted-node',
-                'graph_test_topology_auto_sync_pgtest'::regclass,
-                'weighted-node'
-             )",
-    )
-    .expect("weighted path failed")
-    .unwrap_or(0);
-
-    Spi::run(
-        "INSERT INTO public.graph_test_topology_auto_sync_pgtest (id, parent_id, name, cost)
              VALUES ('search-node', NULL, 'Search Node', 1)",
     )
     .expect("insert pending search node failed");
@@ -1034,6 +1034,24 @@ fn topology_reads_auto_sync_traversal_and_paths() {
     assert_eq!(shortest_rows, 1);
     assert_eq!(weighted_cost, 0);
     assert_eq!(traverse_search_sees_child, 1);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+}
+
+#[pg_test]
+fn weighted_shortest_path_rejects_pending_edge_overlay_with_pg018() {
+    setup_topology_auto_sync_fixture();
+
+    insert_topology_auto_sync_node("pending-weighted-child", Some("root"), "Pending Weighted Child");
+    let sqlstate = sqlstate_for_error(
+        "SELECT * FROM graph.weighted_shortest_path(
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'root',
+            'graph_test_topology_auto_sync_pgtest'::regclass,
+            'pending-weighted-child'
+         )",
+    );
+
+    assert_eq!(sqlstate.as_deref(), Some("PG018"));
     Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
 }
 
@@ -1449,7 +1467,7 @@ fn sync_health_exposes_operator_contract_field_names() {
     let signature_matches = Spi::get_one::<bool>(
             "WITH expected(result_type) AS (
                 VALUES (
-                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, apply_sync_recommended boolean, maintenance_recommended boolean)'
+                    'TABLE(sync_mode text, query_freshness text, sync_batch_size integer, applied_sync_id bigint, max_sync_log_id bigint, pending_sync_rows bigint, disabled_trigger_count integer, edge_buffer_used integer, edge_buffer_size integer, needs_vacuum boolean, needs_rebuild boolean, read_only boolean, read_only_reason text, projection_mode text, overlay_tombstone_count integer, overlay_memory_bytes bigint, compaction_recommended boolean, tx_delta_dirty boolean, tx_delta_added_nodes integer, tx_delta_deleted_nodes integer, tx_delta_added_edges integer, tx_delta_deleted_edges integer, tx_delta_memory_bytes bigint, apply_sync_recommended boolean, maintenance_recommended boolean)'
                 )
              )
              SELECT pg_get_function_result(p.oid) = expected.result_type

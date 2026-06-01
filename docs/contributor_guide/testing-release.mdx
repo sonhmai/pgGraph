@@ -73,6 +73,8 @@ Module-local Rust tests cover:
 | File | Scope |
 |---|---|
 | `discovery.rs` | schema and table-set discovery |
+| `gql.rs` | GQL SQL facade, mapped `CREATE`, ACL, tenant, and internal overlay proof tests |
+| `cypher.rs` | openCypher compatibility facade and shared-plan SQL behavior |
 | `traversal_api.rs` | traversal helpers, labels, weights, directions, strategies |
 | `traversal_paths.rs` | paths, aggregation, strict specs |
 | `filters.rs` | typed filter behavior |
@@ -152,6 +154,12 @@ Heavy suites:
 | Script | Purpose |
 |---|---|
 | `run_sqlstate_acl_boundary.sh` | Client-visible SQLSTATEs and restricted-role ACL behavior |
+| `tx_delta_lifecycle.sh` | Internal mutable-overlay transaction lifecycle proof |
+| `gql_create_tx_lifecycle.sh` | Public mapped GQL `CREATE` rollback and commit lifecycle proof |
+| `gql_set_tx_lifecycle.sh` | Public mapped GQL property `SET` rollback and filter-delta lifecycle proof |
+| `gql_delete_tx_lifecycle.sh` | Public mapped GQL edge-row `DELETE` rollback and bidirectional tombstone lifecycle proof |
+| `gql_merge_race.sh` | Public mapped GQL `MERGE` same-key race proof |
+| `tx_delta_crash_recovery.sh` | Internal mutable-overlay crash/reload proof |
 | `run_pgbench_sync.sh` | Concurrent DML and trigger sync stress |
 | `crash_recovery.sh` | Persisted graph recovery and corruption rejection after postmaster kill |
 | `run_memory_sanitizers.sh` | pgrx suite plus optional ASan/Valgrind |
@@ -249,6 +257,18 @@ PG_VERSION_FEATURE=pg17 DBNAME=pggraph_crash PGDATA=/path/to/disposable/pgdata \
 When the instance needs custom server options, pass the same restart options
 with `POSTGRES_OPTS`, for example `POSTGRES_OPTS="-p 55433 -k /tmp"`.
 
+`tx_delta_crash_recovery.sh` uses the same disposable-cluster pattern but
+installs the extension with the internal `pg_test` surface. It opens an
+uncommitted transaction-local edge overlay, kills the postmaster, restarts the
+cluster, and verifies the persisted base graph reloads without the uncommitted
+overlay.
+
+```bash
+cd graph
+PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta_crash \
+  PGDATA=/path/to/disposable/pgdata ./tests/heavy/tx_delta_crash_recovery.sh
+```
+
 ### Memory And FFI Boundary
 
 `run_memory_sanitizers.sh` runs the pgrx SQL suite and a long-lived pgbench sync
@@ -340,12 +360,16 @@ counts.
 ```bash
 cd graph
 ./tests/heavy/playground_release_gate.sh
+PGGRAPH_PLAYGROUND_MODE=mutable ./tests/heavy/playground_release_gate.sh
 ```
 
 By default the script uses the sandbox Docker container and PostgreSQL port
-`55432`. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when validating an
-already-prepared playground database. Set `PGGRAPH_PLAYGROUND_YES=1` only when
-release automation is allowed to approve the first Panama dataset download.
+`55432` and validates the `csr_readonly` playground catalog. Set
+`PGGRAPH_PLAYGROUND_MODE=mutable` to prepare `mutable_overlay` and validate the
+mutable GQL examples. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when
+validating an already-prepared playground database. Set
+`PGGRAPH_PLAYGROUND_YES=1` only when release automation is allowed to approve
+the first Panama dataset download.
 
 ## Release Gate
 

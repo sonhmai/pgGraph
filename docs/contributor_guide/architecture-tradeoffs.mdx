@@ -97,6 +97,11 @@ The long-term fit may be complementary:
 - General graph patterns should continue to use PostgreSQL's relational planning
   and execution path when that is the better fit.
 
+Today that complement is represented only as an internal typed adapter seam.
+pgGraph does not parse `GRAPH_TABLE` SQL text or expose a public SQL/PGQ API;
+it can lower eligible PostgreSQL-owned graph-pattern shapes into the shared IR
+once PostgreSQL exposes stable hooks for that handoff.
+
 ## Where We May Be Wrong
 
 pgGraph is young. These are the areas where critique is especially useful:

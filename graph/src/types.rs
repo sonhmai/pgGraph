@@ -175,17 +175,6 @@ impl SearchMode {
     }
 }
 
-/// Build result summary returned by `graph.build()`.
-#[cfg(feature = "development")]
-#[derive(Debug, Clone)]
-pub struct BuildResult {
-    pub nodes_loaded: i64,
-    pub edges_loaded: i64,
-    pub build_time_ms: f64,
-    pub memory_used_mb: f64,
-    pub sync_mode: String,
-}
-
 /// Engine status returned by `graph.status()`.
 #[derive(Debug, Clone)]
 pub struct EngineStatus {
@@ -210,6 +199,30 @@ pub struct EngineStatus {
     pub disabled_trigger_count: i32,
     pub read_only: bool,
     pub read_only_reason: Option<String>,
+    pub projection_mode: String,
+    pub overlay_tombstone_count: i32,
+    pub overlay_memory_bytes: i64,
+    pub compaction_recommended: bool,
+    pub tx_delta_dirty: bool,
+    pub tx_delta_added_nodes: i32,
+    pub tx_delta_deleted_nodes: i32,
+    pub tx_delta_added_edges: i32,
+    pub tx_delta_deleted_edges: i32,
+    pub tx_delta_memory_bytes: i64,
+}
+
+/// Backend and instance memory sizing estimate returned by
+/// `graph.memory_profile()`.
+#[derive(Debug, Clone)]
+pub struct MemoryProfile {
+    pub active_backend_private_mb: f64,
+    pub active_backend_shared_mb: f64,
+    pub active_backend_total_mb: f64,
+    pub estimated_instance_private_mb: f64,
+    pub estimated_instance_shared_mb: f64,
+    pub estimated_instance_total_mb: f64,
+    pub memory_limit_mb: i32,
+    pub assumed_concurrent_backends: i32,
 }
 
 /// Edge type filter for traversal.

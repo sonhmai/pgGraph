@@ -13,7 +13,10 @@ pub(crate) use crate::catalog::{
 };
 pub(crate) use crate::engine::Engine;
 pub(crate) use crate::sql_aggregation::{aggregate_impl, path_count_estimate_impl};
-pub(crate) use crate::sql_build::{execute_build, execute_maintenance_rebuild, execute_vacuum};
+pub(crate) use crate::sql_build::{
+    configured_projection_mode, execute_build, execute_build_with_mode,
+    execute_maintenance_rebuild, execute_vacuum,
+};
 pub(crate) use crate::sql_filters::filter_helper;
 pub(crate) use crate::sql_hydration::{hydrate_node, hydrate_nodes};
 pub(crate) use crate::sql_jobs::{
@@ -43,7 +46,9 @@ pub(crate) use std::time::Duration;
 
 mod admin;
 mod components;
+mod cypher;
 mod discovery;
+mod gql;
 mod runtime;
 mod search;
 mod traversal;

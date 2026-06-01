@@ -145,24 +145,35 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     Spi::run("RESET graph.oom_action").expect("reset oom_action failed");
     Spi::run("RESET graph.tenant_setting").expect("reset tenant_setting failed");
     Spi::run("RESET graph.build_scan_mode").expect("reset build_scan_mode failed");
+    Spi::run("RESET graph.default_projection_mode").expect("reset default_projection_mode failed");
+    Spi::run("RESET graph.mutable_enabled").expect("reset mutable_enabled failed");
     Spi::run("RESET graph.enforce_tenant_scope").expect("reset enforce_tenant_scope failed");
     Spi::run("RESET graph.max_exact_path_count").expect("reset max_exact_path_count failed");
     Spi::run("RESET graph.build_batch_size").expect("reset build_batch_size failed");
 
-    assert_eq!(crate::config::sync_mode(), "manual");
+    assert_eq!(crate::config::sync_mode(), "trigger");
     assert_eq!(
         crate::config::parsed_sync_mode(),
-        Some(crate::config::SyncMode::Manual)
+        Some(crate::config::SyncMode::Trigger)
     );
     assert_eq!(crate::config::oom_action(), crate::config::OomAction::Error);
     assert_eq!(
         crate::config::build_scan_mode(),
         crate::config::BuildScanMode::Select
     );
+    assert_eq!(
+        crate::config::default_projection_mode(),
+        Some(crate::config::ProjectionMode::CsrReadonly)
+    );
+    assert!(!crate::config::MUTABLE_ENABLED.get());
     assert_eq!(crate::config::tenant_setting(), "");
     assert!(crate::config::ENFORCE_TENANT_SCOPE.get());
     assert_eq!(crate::config::MAX_EXACT_PATH_COUNT.get(), 100_000);
     assert_eq!(crate::config::BUILD_BATCH_SIZE.get(), 10_000);
+    assert_eq!(crate::config::MAX_TX_DELTA_NODES.get(), 100_000);
+    assert_eq!(crate::config::MAX_TX_DELTA_EDGES.get(), 100_000);
+    assert_eq!(crate::config::MAX_OVERLAY_MEMORY_MB.get(), 256);
+    assert_eq!(crate::config::COMPACTION_THRESHOLD.get(), 50_000);
 
     let registered = Spi::get_one::<bool>(
         "WITH expected(name, context, min_val, max_val) AS (
@@ -174,7 +185,11 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.max_exact_path_count', 'user', '1', '10000000'),
                     ('graph.build_batch_size', 'superuser', '1', '1000000'),
                     ('graph.edge_buffer_size', 'superuser', '1000', '10000000'),
-                    ('graph.vacuum_interval_secs', 'superuser', '5', '86400')
+                    ('graph.vacuum_interval_secs', 'superuser', '5', '86400'),
+                    ('graph.max_tx_delta_nodes', 'user', '0', '10000000'),
+                    ('graph.max_tx_delta_edges', 'user', '0', '10000000'),
+                    ('graph.max_overlay_memory_mb', 'user', '1', '32768'),
+                    ('graph.compaction_threshold', 'user', '1', '10000000')
              ),
              matched AS (
                 SELECT e.name,
@@ -184,7 +199,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 8 AND bool_and(ok)
+             SELECT count(*) = 12 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -194,6 +209,83 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(sql_raises("SET graph.max_exact_path_count = 0"));
     assert!(sql_raises("SET graph.build_batch_size = 0"));
     assert!(sql_raises("SET graph.edge_buffer_size = 999"));
+    assert!(sql_raises("SET graph.max_tx_delta_nodes = -1"));
+    assert!(sql_raises("SET graph.max_tx_delta_edges = -1"));
+    assert!(sql_raises("SET graph.max_overlay_memory_mb = 0"));
+    assert!(sql_raises("SET graph.compaction_threshold = 0"));
+}
+
+#[pg_test]
+fn projection_mode_build_and_status_contract() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name']
+            )",
+    )
+    .expect("add users table failed");
+
+    let readonly_mode = Spi::get_one::<String>(
+        "SELECT projection_mode FROM graph.build(mode := 'csr_readonly')",
+    )
+    .expect("csr build failed")
+    .expect("csr build row missing");
+    let status_readonly_mode = Spi::get_one::<String>("SELECT projection_mode FROM graph.status()")
+        .expect("status projection mode failed")
+        .expect("status row missing");
+    let delta_clean = Spi::get_one::<bool>(
+        "SELECT NOT tx_delta_dirty
+                AND overlay_tombstone_count = 0
+                AND overlay_memory_bytes = 0
+                AND NOT compaction_recommended
+                AND tx_delta_added_nodes = 0
+                AND tx_delta_deleted_nodes = 0
+                AND tx_delta_added_edges = 0
+                AND tx_delta_deleted_edges = 0
+                AND tx_delta_memory_bytes = 0
+         FROM graph.status()",
+    )
+    .expect("status delta fields failed")
+    .unwrap_or(false);
+
+    assert_eq!(readonly_mode, "csr_readonly");
+    assert_eq!(status_readonly_mode, "csr_readonly");
+    assert!(delta_clean);
+    assert!(sql_raises(
+        "SELECT projection_mode FROM graph.build(mode := 'mutable_overlay')"
+    ));
+
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    let mutable_job_id = super::create_build_job(crate::config::ProjectionMode::MutableOverlay)
+        .expect("create mutable build job failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("disable mutable projection failed");
+    super::run_build_job(&mutable_job_id).expect("run queued mutable build job failed");
+    let completed_mutable_job = Spi::get_one::<bool>(&format!(
+        "SELECT status = 'completed'
+                AND projection_mode = 'mutable_overlay'
+         FROM graph._build_jobs
+         WHERE build_id = {}",
+        super::sql_literal(&mutable_job_id)
+    ))
+    .expect("completed mutable job mode failed")
+    .unwrap_or(false);
+
+    Spi::run("SET graph.mutable_enabled = on").expect("re-enable mutable projection failed");
+    let mutable_mode = Spi::get_one::<String>(
+        "SELECT projection_mode FROM graph.build(mode := 'mutable_overlay')",
+    )
+    .expect("mutable build failed")
+    .expect("mutable build row missing");
+    let health_mode = Spi::get_one::<String>("SELECT projection_mode FROM graph.sync_health()")
+        .expect("sync_health projection mode failed")
+        .expect("sync_health row missing");
+
+    assert!(completed_mutable_job);
+    assert_eq!(mutable_mode, "mutable_overlay");
+    assert_eq!(health_mode, "mutable_overlay");
+    Spi::run("SET graph.mutable_enabled = off").expect("restore mutable projection failed");
 }
 
 #[pg_test]

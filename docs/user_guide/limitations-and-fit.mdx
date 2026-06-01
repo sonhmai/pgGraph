@@ -11,7 +11,7 @@ data into another system.
 |---|---|
 | Local relationship traversal | Bounded BFS/DFS with depth, node, and frontier circuit breakers |
 | Path explanation | Shortest path functions return source table/primary-key coordinates and edge labels |
-| SQL-first applications | The public API is PostgreSQL SQL functions in the `graph` schema |
+| SQL-first applications | The current public API is PostgreSQL SQL functions in the `graph` schema, including the `graph.gql()` SQL function for the documented GQL subset |
 | Existing relational schemas | Tables, primary keys, unique keys, and foreign keys are enough to model many graphs |
 | Operational Postgres teams | Source tables, ACLs, RLS, backups, and observability remain PostgreSQL concerns |
 | Fast backend startup | Persisted immutable forward graph arrays and resolution bytes can be mapped read-only and shared through the OS page cache |
@@ -21,9 +21,10 @@ data into another system.
 | Need | Better fit |
 |---|---|
 | Distributed graph execution across databases | A distributed graph system or application-level federation |
-| Cypher, Gremlin, SPARQL, or GQL compatibility | A database that implements that query language |
+| Full GQL or SQL/PGQ compatibility | A database that implements those query languages completely today |
+| Cypher, Gremlin, or SPARQL compatibility | A database that implements that query language |
 | External graph storage as source of truth | A graph database or graph service |
-| Online mutable graph topology with no rebuild/maintenance phase | A mutable graph store |
+| Online mutable graph topology with no rebuild/maintenance phase today | A mutable graph store |
 | Large global analytics in the OLTP query path | A read replica, batch job, or dedicated analytics engine |
 | Cross-database graph joins | ETL/materialization into one database or a federation layer |
 
@@ -33,13 +34,16 @@ data into another system.
 |---|---|
 | WAL sync | `graph.sync_mode = 'wal'` is parsed but reserved; use `manual` or `trigger` |
 | Build scanner | `graph.build_scan_mode = 'copy'` is reserved; use `select` |
+| GQL and openCypher | `graph.gql()` supports the documented read subset, including node-only `MATCH`, top-level single-relationship `OPTIONAL MATCH`, projection-stage `WITH`, bounded `DISTINCT`, `RETURN` aggregates, JSONB list/map property paths, bounded relationship path values and path functions, single-node mapped `CREATE`, single-node mapped property `SET`, mapped property `REMOVE`, single-edge mapped `DELETE`, single-node `DETACH DELETE` over registered edge-row relationships, and single-node mapped `MERGE`; `graph.cypher()` accepts the overlapping openCypher-shaped subset through the same planner and explicitly does not claim full openCypher compatibility; full path variable syntax and broader writes are future work |
+| SQL/PGQ | Internal typed adapter seam only; no public SQL/PGQ API is exposed until PostgreSQL provides stable graph-pattern hooks pgGraph can consume |
+| Projection modes | `graph.build()` defaults to `csr_readonly`; `mutable_overlay` can be selected when `graph.mutable_enabled = on` and is required for GQL writes |
 | Edge labels | Edge label IDs are stored in `u8`; user-facing labels are limited to 254 distinct labels |
 | Base topology | The base CSR stores are immutable; edge mutations use overlays until vacuum/maintenance rebuild |
 | Backend state | Each PostgreSQL backend owns its own active `Engine`; Rust heap state is not shared across connections |
 | mmap sharing | Forward graph arrays and resolution bytes are read-only mmap-backed derived artifact sections; reverse CSR and bincode metadata are per-backend heap |
 | Query catch-up | Topology reads auto-apply pending trigger sync rows by default up to a captured high-water mark; set `graph.query_freshness = 'off'` for compatibility/manual catch-up |
 | Search | Search runs against registered source-table columns through PostgreSQL, not against a full-text graph artifact |
-| Hydration | Hydrated rows come from source tables and require source-table privileges |
+| Hydration | Hydrated rows come from source tables and require source-table privileges; required GQL hydration fails closed with `PG017` if a graph coordinate no longer has a readable source row |
 | Components | Connected component functions are global admin operations and touch the whole active graph |
 
 ## Data Freshness Model
@@ -87,7 +91,11 @@ recovery.
 | Sync overlays | backend-local heap |
 
 Use `graph.estimate()` before large builds and watch `memory_used_mb`,
-`edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`.
+`edge_buffer_used`, `needs_vacuum`, and `read_only` in `graph.status()`. For
+instance sizing, run `graph.memory_profile(concurrent_backends := N)` with the
+number of sessions that may actively use the graph; pgGraph reports
+backend-private heap separately from mmap-backed bytes that can be shared
+through the OS page cache.
 
 ## Operational Guidance
 

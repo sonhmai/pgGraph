@@ -19,9 +19,9 @@ sys.path.insert(0, str(PLAYGROUND_DIR))
 from queries import QUERY_QUESTIONS, query_catalog  # noqa: E402
 
 
-EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
+EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "Status + Catalog": [
-        {"hash": "f33c0357e2a340c3d5f0b83156e42a3c", "row_count": 1},
+        {"hash": "da21ad3278cbf648389f1be32503f1b8", "row_count": 1},
         {"hash": "181a173a49cdbb4b9100e7b8ec693411", "row_count": 1},
         {"hash": "1f56018065f8f7688f33d312b976afd9", "row_count": 1},
     ],
@@ -30,6 +30,20 @@ EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
     "Traverse Neighborhood": [{"hash": "8838da4bf5f4f4741822d8646deafe68", "row_count": 100}],
     "Expand Neighborhood": [{"hash": "625782ba027f4a5ace8308363816a3ac", "row_count": 100}],
     "Shortest Path": [{"hash": "0273f33efa04c4ba2bf45e57e703e58d", "row_count": 2}],
+    "GQL Parameterized Match": [{"hash": "2d77220992fd54f4cd7150bb9bb984dc", "row_count": 1}],
+    "GQL Scalar Projection": [{"hash": "bdb8fabf93f84ef1c80dacef37133512", "row_count": 4}],
+    "GQL One-Hop Relationships": [{"hash": "cc43fef5258a696fee573d7ce63d3161", "row_count": 1}],
+    "GQL Relationship Projection": [{"hash": "cc72c65d52a818ea016148855db5d83a", "row_count": 1}],
+    "GQL Inbound Relationships": [{"hash": "8667d6872adef948f4cd19a6d418af56", "row_count": 1}],
+    "GQL Undirected Relationships": [{"hash": "471d8f696e537993a8f1e8a9be703095", "row_count": 1}],
+    "GQL Distinct Labels": [{"hash": "2e9e4f9151f7e0f5d63cd7a1f38533ab", "row_count": 1}],
+    "GQL Aggregated Neighbors": [{"hash": "e17964650e3a49bd449fcb1569ac5c31", "row_count": 1}],
+    "GQL Aggregate By Label": [{"hash": "672202fe114050577e9ea56668f354bc", "row_count": 1}],
+    "GQL Collect Neighbor Labels": [{"hash": "60c9a3b2e3efa2d06f11bbfbff41e9b1", "row_count": 1}],
+    "GQL Variable-Length Paths": [{"hash": "27db82ea68fe6f630e0705bf080e742d", "row_count": 4}],
+    "GQL Path Functions": [{"hash": "493d0a2278c85391d60c6e1645911745", "row_count": 3}],
+    "GQL Hydration Off": [{"hash": "e4b9e13b69f2e410f2729fa40b208524", "row_count": 1}],
+    "GQL Explain": [{"hash": "0c52392c32dab707c82a82edb79d1a1c", "row_count": 1}],
     "Component Stats": [
         {"hash": "4d337f672574a60eaa19f44639f30553", "row_count": 1},
         {"hash": "3addbef5dca49ab0f0592d0e69be5b17", "row_count": 20},
@@ -56,6 +70,20 @@ EXPECTED_RESULTS: dict[str, list[dict[str, object]]] = {
 }
 
 
+EXPECTED_RESULTS_MUTABLE: dict[str, list[dict[str, object]]] = {
+    **EXPECTED_RESULTS_CSR,
+    "Status + Catalog": [
+        {"hash": "d1427afc6ed07bf69332eea22aa72ac3", "row_count": 1},
+        {"hash": "181a173a49cdbb4b9100e7b8ec693411", "row_count": 1},
+        {"hash": "1f56018065f8f7688f33d312b976afd9", "row_count": 1},
+    ],
+    "Mutable GQL Merge Node": [{"hash": "ec7299e8a08b19f8202d48f113f0c37a", "row_count": 1}],
+    "Mutable GQL Merge Update": [{"hash": "90d1e0d59d2c10b8ca6ac1edd9985a9b", "row_count": 1}],
+    "Table Sizes": [{"hash": "a1005853cb0ad369d9598975b7654122", "row_count": 6}],
+}
+EXPECTED_RESULTS_MUTABLE.pop("Build Graph Concurrently", None)
+
+
 VOLATILE_HASH_LABELS = {
     "Build Graph",
     "Build Graph Concurrently",
@@ -68,6 +96,10 @@ VOLATILE_HASH_LABELS = {
     "Maintenance Status",
 }
 
+VOLATILE_HASH_STATEMENTS = {
+    "Status + Catalog": {0},
+}
+
 SAME_SESSION_SETUP_LABELS = {
     "Apply Sync",
     "Scheduled Maintenance",
@@ -76,9 +108,13 @@ SAME_SESSION_SETUP_LABELS = {
 }
 
 
-SETUP_SQL = """
+def setup_sql(mode: str) -> str:
+    build_mode = "mutable_overlay" if mode == "mutable" else "csr_readonly"
+    mutable_setup = "SET graph.mutable_enabled = on;" if mode == "mutable" else ""
+    return f"""
 CREATE EXTENSION IF NOT EXISTS graph;
 SELECT graph.test_enabled();
+{mutable_setup}
 SELECT graph.reset();
 TRUNCATE graph._registered_filter_columns,
          graph._registered_edges,
@@ -102,8 +138,13 @@ SELECT graph.add_edge(
   bidirectional := true,
   label_column := 'rel_type'
 );
+DELETE FROM panama.edges
+WHERE start_id LIKE 'pggraph-playground-%'
+   OR end_id LIKE 'pggraph-playground-%';
+DELETE FROM panama.nodes
+WHERE node_id LIKE 'pggraph-playground-%';
 SET graph.persist_on_build = on;
-SELECT * FROM graph.build();
+SELECT * FROM graph.build('{build_mode}');
 """
 
 
@@ -135,6 +176,10 @@ def split_sql(sql: str) -> list[str]:
     )
     statements = [part.strip() for part in uncommented.split(";")]
     return [part for part in statements if part]
+
+
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def summarize_statement(
@@ -177,10 +222,55 @@ def summarize_query(
     ]
 
 
-def validate_catalog(expected: dict[str, list[dict[str, object]]]) -> dict[str, str]:
-    queries = query_catalog()
+def summarize_catalog_session(
+    dsn: str,
+    mode: str,
+    timeout: int,
+) -> dict[str, list[dict[str, object]]]:
+    setup = setup_sql(mode)
+    quiet_setup = f"\\o /dev/null\n{setup}\n\\o\n"
+    chunks = [quiet_setup]
+    for label, sql in query_catalog(mode).items():
+        if label in SAME_SESSION_SETUP_LABELS:
+            chunks.append(quiet_setup)
+        for index, statement in enumerate(split_sql(sql)):
+            chunks.append(f"\\warn pggraph playground gate: {label} [{index}]")
+            chunks.append(
+                f"""
+WITH __pggraph_playground_query AS (
+{textwrap.indent(statement, "  ")}
+),
+__pggraph_numbered AS (
+  SELECT row_number() OVER () AS row_number,
+         to_jsonb(__pggraph_playground_query) AS row_json
+  FROM __pggraph_playground_query
+)
+SELECT jsonb_build_object(
+  'label', {sql_literal(label)},
+  'statement_index', {index},
+  'row_count', count(*),
+  'hash', md5(coalesce(string_agg(row_json::text, E'\\n' ORDER BY row_number), ''))
+)::text
+FROM __pggraph_numbered;
+"""
+            )
+    raw = run_psql(dsn, "\n".join(chunks), timeout)
+    actual: dict[str, list[dict[str, object]]] = {}
+    for line in raw.splitlines():
+        if not line:
+            continue
+        result = json.loads(line)
+        label = result.pop("label")
+        result.pop("statement_index", None)
+        actual.setdefault(label, []).append(result)
+    return actual
+
+
+def validate_catalog(expected: dict[str, list[dict[str, object]]], mode: str) -> dict[str, str]:
+    queries = query_catalog(mode)
     query_labels = set(queries)
     question_labels = set(QUERY_QUESTIONS)
+    all_query_labels = set(query_catalog("csr")) | set(query_catalog("mutable"))
     expected_labels = set(expected)
     errors: dict[str, str] = {}
 
@@ -188,7 +278,7 @@ def validate_catalog(expected: dict[str, list[dict[str, object]]]) -> dict[str, 
     if missing_questions:
         errors["questions"] = f"missing questions for: {', '.join(missing_questions)}"
 
-    stale_questions = sorted(question_labels - query_labels)
+    stale_questions = sorted(question_labels - all_query_labels)
     if stale_questions:
         errors["stale_questions"] = f"questions without queries: {', '.join(stale_questions)}"
 
@@ -205,7 +295,11 @@ def validate_catalog(expected: dict[str, list[dict[str, object]]]) -> dict[str, 
 
 def comparable(label: str, summary: list[dict[str, object]]) -> list[dict[str, object]]:
     if label not in VOLATILE_HASH_LABELS:
-        return summary
+        volatile_indexes = VOLATILE_HASH_STATEMENTS.get(label, set())
+        return [
+            {"row_count": result["row_count"]} if index in volatile_indexes else result
+            for index, result in enumerate(summary)
+        ]
     return [{"row_count": result["row_count"]} for result in summary]
 
 
@@ -218,32 +312,42 @@ def main() -> int:
         action="store_true",
         help="Print the current catalog result summary as Python literals.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["csr", "csr_readonly", "mutable", "mutable_overlay"],
+        default=os.environ.get("PGGRAPH_PLAYGROUND_MODE", "csr"),
+        help="Playground mode to validate.",
+    )
     args = parser.parse_args()
+    args.mode = "mutable" if args.mode in {"mutable", "mutable_overlay"} else "csr"
 
+    expected_results = EXPECTED_RESULTS_MUTABLE if args.mode == "mutable" else EXPECTED_RESULTS_CSR
     expected = {
         label: comparable(label, summary)
-        for label, summary in EXPECTED_RESULTS.items()
+        for label, summary in expected_results.items()
     }
     if not args.dump_expectations:
-        catalog_errors = validate_catalog(expected)
+        catalog_errors = validate_catalog(expected, args.mode)
         if catalog_errors:
             for key, message in catalog_errors.items():
                 print(f"Catalog mismatch [{key}]: {message}", file=sys.stderr)
             return 1
 
-    run_psql(args.dsn, "SELECT count(*) FROM panama.nodes; SELECT count(*) FROM panama.edges;", args.timeout)
-    run_psql(args.dsn, SETUP_SQL, args.timeout)
-
-    actual: dict[str, list[dict[str, object]]] = {}
     failures: list[str] = []
-    for label, sql in query_catalog().items():
-        try:
-            prelude = SETUP_SQL if label in SAME_SESSION_SETUP_LABELS else ""
-            summary = summarize_query(args.dsn, sql, args.timeout, prelude=prelude)
-        except Exception as exc:  # noqa: BLE001
-            failures.append(f"{label}: {exc}")
+    run_psql(args.dsn, "SELECT count(*) FROM panama.nodes; SELECT count(*) FROM panama.edges;", args.timeout)
+    try:
+        actual = {
+            label: comparable(label, summary)
+            for label, summary in summarize_catalog_session(args.dsn, args.mode, args.timeout).items()
+        }
+    except Exception as exc:  # noqa: BLE001
+        failures.append(str(exc))
+        actual = {}
+
+    for label in query_catalog(args.mode):
+        if label not in actual:
+            failures.append(f"{label}: no summary produced")
             continue
-        actual[label] = comparable(label, summary)
         if not args.dump_expectations and actual[label] != expected[label]:
             failures.append(
                 f"{label}: expected {json.dumps(expected[label], sort_keys=True)} "
@@ -268,7 +372,7 @@ def main() -> int:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
-    print(f"Playground release gate passed: {len(actual)} queries validated")
+    print(f"Playground release gate passed: {len(actual)} {args.mode} queries validated")
     return 0
 
 

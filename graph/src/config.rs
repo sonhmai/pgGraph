@@ -100,7 +100,7 @@ pub static DATA_DIR: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
 /// Sync mode: 'manual', 'trigger', or reserved 'wal'.
-/// Default: "manual".
+/// Default: "trigger".
 pub static SYNC_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
 
@@ -123,6 +123,31 @@ pub static TENANT_SETTING: GucSetting<Option<std::ffi::CString>> =
 /// Default: "select".
 pub static BUILD_SCAN_MODE: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// Default projection mode for graph.build().
+/// Default: "csr_readonly".
+pub static DEFAULT_PROJECTION_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// Whether mutable projection mode may be selected.
+/// Default: false.
+pub static MUTABLE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Maximum transaction-local node deltas accepted by one backend.
+/// Default: 100000. Range: 0-10000000.
+pub static MAX_TX_DELTA_NODES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+/// Maximum transaction-local edge deltas accepted by one backend.
+/// Default: 100000. Range: 0-10000000.
+pub static MAX_TX_DELTA_EDGES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+/// Maximum estimated transaction-overlay heap, in MB, accepted by one backend.
+/// Default: 256. Range: 1-32768.
+pub static MAX_OVERLAY_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
+
+/// Delta or tombstone count at which compaction is recommended.
+/// Default: 50000. Range: 1-10000000.
+pub static COMPACTION_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(50_000);
 
 /// Whether tenanted graphs require a query or session tenant.
 /// Default: true.
@@ -173,12 +198,31 @@ pub enum QueryFreshness {
     ErrorOnPending,
 }
 
+/// Runtime projection mode selected for a built graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectionMode {
+    /// Immutable CSR-backed projection optimized for read-heavy workloads.
+    #[default]
+    CsrReadonly,
+    /// Mutable overlay projection for transaction-local graph writes.
+    MutableOverlay,
+}
+
 impl SyncMode {
     pub fn as_str(self) -> &'static str {
         match self {
             SyncMode::Manual => "manual",
             SyncMode::Trigger => "trigger",
             SyncMode::Wal => "wal",
+        }
+    }
+}
+
+impl ProjectionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectionMode::CsrReadonly => "csr_readonly",
+            ProjectionMode::MutableOverlay => "mutable_overlay",
         }
     }
 }
@@ -202,7 +246,7 @@ pub fn sync_mode() -> String {
         .get()
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("manual")
+        .unwrap_or("trigger")
         .to_string()
 }
 
@@ -245,7 +289,7 @@ pub fn parsed_sync_mode() -> Option<SyncMode> {
     let raw = binding
         .as_ref()
         .and_then(|c| c.to_str().ok())
-        .unwrap_or("manual");
+        .unwrap_or("trigger");
 
     parse_sync_mode(raw)
 }
@@ -271,6 +315,39 @@ pub fn parsed_query_freshness() -> Option<QueryFreshness> {
         .unwrap_or("apply_pending_sync");
 
     parse_query_freshness(raw)
+}
+
+/// Return the configured default projection mode.
+pub fn default_projection_mode() -> Option<ProjectionMode> {
+    let binding = DEFAULT_PROJECTION_MODE.get();
+    let raw = binding
+        .as_ref()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("csr_readonly");
+
+    parse_projection_mode(raw)
+}
+
+/// Return the configured transaction-local node delta limit.
+#[cfg_attr(test, allow(dead_code))]
+pub fn max_tx_delta_nodes() -> usize {
+    MAX_TX_DELTA_NODES.get().max(0) as usize
+}
+
+/// Return the configured transaction-local edge delta limit.
+#[cfg_attr(test, allow(dead_code))]
+pub fn max_tx_delta_edges() -> usize {
+    MAX_TX_DELTA_EDGES.get().max(0) as usize
+}
+
+/// Return the configured transaction-overlay memory limit in bytes.
+pub fn max_overlay_memory_bytes() -> usize {
+    (MAX_OVERLAY_MEMORY_MB.get().max(1) as usize).saturating_mul(1_048_576)
+}
+
+/// Return the delta/tombstone threshold at which compaction is recommended.
+pub fn compaction_threshold() -> usize {
+    COMPACTION_THRESHOLD.get().max(1) as usize
 }
 
 /// Return the bounded sync replay batch size.
@@ -329,6 +406,16 @@ fn parse_query_freshness(raw: &str) -> Option<QueryFreshness> {
         "off" | "compat" | "compatibility" => Some(QueryFreshness::Off),
         "apply_pending_sync" | "apply" | "auto" | "on" => Some(QueryFreshness::ApplyPendingSync),
         "error_on_pending" | "error" => Some(QueryFreshness::ErrorOnPending),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_projection_mode(raw: &str) -> Option<ProjectionMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "csr_readonly" | "csr-readonly" | "readonly" | "read_only" => {
+            Some(ProjectionMode::CsrReadonly)
+        }
+        "mutable_overlay" | "mutable-overlay" | "mutable" => Some(ProjectionMode::MutableOverlay),
         _ => None,
     }
 }
@@ -556,6 +643,68 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_string_guc(
+        c"graph.default_projection_mode",
+        c"Default graph projection mode.",
+        c"Supported values: 'csr_readonly' and 'mutable_overlay'. Mutable mode also requires graph.mutable_enabled = on.",
+        &DEFAULT_PROJECTION_MODE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"graph.mutable_enabled",
+        c"Allow building mutable_overlay projections.",
+        c"Default off. Enable only when using transaction-local graph-write features.",
+        &MUTABLE_ENABLED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_tx_delta_nodes",
+        c"Maximum transaction-local node deltas per backend.",
+        c"Mapped GQL writes abort the current statement when the limit would be exceeded.",
+        &MAX_TX_DELTA_NODES,
+        0,
+        10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_tx_delta_edges",
+        c"Maximum transaction-local edge deltas per backend.",
+        c"Mapped GQL writes abort the current statement when the limit would be exceeded.",
+        &MAX_TX_DELTA_EDGES,
+        0,
+        10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.max_overlay_memory_mb",
+        c"Maximum transaction-overlay memory per backend.",
+        c"Mapped GQL writes abort the current statement when estimated overlay memory would exceed this limit.",
+        &MAX_OVERLAY_MEMORY_MB,
+        1,
+        32768,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.compaction_threshold",
+        c"Delta or tombstone count at which graph.sync_health() recommends compaction.",
+        c"Run graph.maintenance() or graph.vacuum() when compaction is recommended.",
+        &COMPACTION_THRESHOLD,
+        1,
+        10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_bool_guc(
         c"graph.enforce_tenant_scope",
         c"Require tenant scope for tenanted graphs.",
@@ -572,8 +721,8 @@ mod tests {
     //! semantics for invalid GUC input.
 
     use super::{
-        parse_build_scan_mode, parse_oom_action, parse_query_freshness, parse_sync_mode,
-        BuildScanMode, OomAction, QueryFreshness, SyncMode,
+        parse_build_scan_mode, parse_oom_action, parse_projection_mode, parse_query_freshness,
+        parse_sync_mode, BuildScanMode, OomAction, ProjectionMode, QueryFreshness, SyncMode,
     };
 
     #[test]
@@ -639,5 +788,31 @@ mod tests {
     fn parse_query_freshness_rejects_unknown_modes() {
         assert_eq!(parse_query_freshness("fresh"), None);
         assert_eq!(parse_query_freshness(""), None);
+    }
+
+    #[test]
+    fn parse_projection_mode_accepts_documented_modes_and_aliases() {
+        assert_eq!(
+            parse_projection_mode("csr_readonly"),
+            Some(ProjectionMode::CsrReadonly)
+        );
+        assert_eq!(
+            parse_projection_mode(" READONLY "),
+            Some(ProjectionMode::CsrReadonly)
+        );
+        assert_eq!(
+            parse_projection_mode("mutable_overlay"),
+            Some(ProjectionMode::MutableOverlay)
+        );
+        assert_eq!(
+            parse_projection_mode("mutable-overlay"),
+            Some(ProjectionMode::MutableOverlay)
+        );
+    }
+
+    #[test]
+    fn parse_projection_mode_rejects_unknown_modes() {
+        assert_eq!(parse_projection_mode("csr"), None);
+        assert_eq!(parse_projection_mode(""), None);
     }
 }

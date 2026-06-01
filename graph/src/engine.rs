@@ -10,6 +10,10 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
+use crate::projection::neighbors::{
+    CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
+};
+use crate::projection::tx_delta;
 use crate::resolution_index::{ResolutionDeltaIndex, ResolutionIndex, ResolutionIndexBuilder};
 use crate::safety::{GraphError, GraphResult};
 use crate::types::*;
@@ -17,10 +21,6 @@ use crate::types::*;
 use pgrx::prelude::TimestampWithTimeZone;
 use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
-
-type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
-type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
-type TraversalEdgeOverlay = (OverlayInserts, OverlayDeletes);
 
 /// Resolution storage backend.
 ///
@@ -90,6 +90,8 @@ pub struct Engine {
     /// Edge mutation buffer for trigger sync.
     /// Pending edge mutations that haven't been merged into CSR yet.
     pub(crate) edge_buffer: Vec<EdgeMutation>,
+    /// Runtime projection mode selected at build/load time.
+    pub(crate) projection_mode: crate::config::ProjectionMode,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
@@ -210,6 +212,7 @@ impl Engine {
             resolution_delta: ResolutionDeltaIndex::new(),
             _mmap: None,
             edge_buffer: Vec::new(),
+            projection_mode: crate::config::ProjectionMode::CsrReadonly,
             is_read_only: false,
             read_only_reason: None,
             applied_sync_id: 0,
@@ -308,6 +311,11 @@ impl Engine {
         self.last_vacuum = source.last_vacuum;
         self.applied_sync_id = source.applied_sync_id;
         self.needs_vacuum = source.needs_vacuum;
+        self.projection_mode = source.projection_mode;
+    }
+
+    pub fn set_projection_mode(&mut self, projection_mode: crate::config::ProjectionMode) {
+        self.projection_mode = projection_mode;
     }
 
     pub fn record_applied_sync_id(&mut self, sync_id: i64) {
@@ -384,6 +392,7 @@ impl Engine {
         let verify = |idx: u32| {
             idx < self.node_store.node_count()
                 && self.node_store.is_active(idx)
+                && !tx_delta::node_deleted(idx)
                 && self.node_store.table_oid(idx) == table_oid
                 && self.node_store.primary_key(idx) == pk
         };
@@ -668,7 +677,11 @@ impl Engine {
         }
     }
 
-    fn traversal_edge_overlay(&self, direction: TraversalDirection) -> TraversalEdgeOverlay {
+    pub(crate) fn has_edge_overlay(&self) -> bool {
+        !self.edge_buffer.is_empty() || tx_delta::edge_delta_dirty()
+    }
+
+    pub(crate) fn traversal_edge_overlay(&self, direction: TraversalDirection) -> EdgeOverlay {
         let mut inserts: HashSet<(u32, u32, u8)> = HashSet::new();
         let mut deletes: HashSet<(u32, u32, u8)> = HashSet::new();
 
@@ -688,6 +701,22 @@ impl Engine {
                     inserts.remove(&key);
                     deletes.insert(key);
                 }
+            }
+        }
+
+        let (tx_inserts, tx_deletes) = tx_delta::edge_overlay(direction);
+        for (source, targets) in tx_deletes {
+            for (target, type_id) in targets {
+                let key = (source, target, type_id);
+                inserts.remove(&key);
+                deletes.insert(key);
+            }
+        }
+        for (source, targets) in tx_inserts {
+            for (target, type_id) in targets {
+                let key = (source, target, type_id);
+                deletes.remove(&key);
+                inserts.insert(key);
             }
         }
 
@@ -735,15 +764,35 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
-        let result = path_finder::shortest_path(
-            &self.node_store,
-            &self.edge_store,
-            source,
-            target,
-            max_depth,
-            self.has_unidirectional_edges,
-            &self.edge_type_registry,
-        );
+        let result = if !self.has_edge_overlay() {
+            let neighbors = CsrNeighbors::new(&self.edge_store);
+            path_finder::shortest_path_with_neighbors(
+                &self.node_store,
+                &neighbors,
+                source,
+                target,
+                max_depth,
+                self.has_unidirectional_edges,
+                &self.edge_type_registry,
+            )
+        } else {
+            let (overlay_insert_edges, overlay_deleted_edges) =
+                self.traversal_edge_overlay(TraversalDirection::Out);
+            let neighbors = OverlayNeighbors::new(
+                &self.edge_store,
+                &overlay_insert_edges,
+                &overlay_deleted_edges,
+            );
+            path_finder::shortest_path_with_neighbors(
+                &self.node_store,
+                &neighbors,
+                source,
+                target,
+                max_depth,
+                self.has_unidirectional_edges,
+                &self.edge_type_registry,
+            )
+        };
 
         Ok(result.unwrap_or_default())
     }
@@ -758,6 +807,13 @@ impl Engine {
     ) -> GraphResult<Vec<WeightedPathStep>> {
         if !self.built {
             return Err(GraphError::NotBuilt);
+        }
+        if self.has_edge_overlay() {
+            return Err(GraphError::UnsupportedOperation {
+                operation: "graph.weighted_shortest_path() with pending edge overlays"
+                    .to_string(),
+                reason: "pending edge overlays do not carry stable edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
+            });
         }
 
         let source =
@@ -786,6 +842,29 @@ impl Engine {
 
     /// Get engine status.
     pub fn status(&self) -> EngineStatus {
+        let tx_delta_stats = tx_delta::stats();
+        let edge_buffer_tombstones = self
+            .edge_buffer
+            .iter()
+            .filter(|mutation| mutation.kind == MutationKind::Delete)
+            .count();
+        let tx_delta_tombstones = tx_delta_stats
+            .deleted_nodes
+            .saturating_add(tx_delta_stats.deleted_edges);
+        let overlay_tombstones = edge_buffer_tombstones.saturating_add(tx_delta_tombstones);
+        let edge_buffer_memory_bytes = self
+            .edge_buffer
+            .capacity()
+            .saturating_mul(std::mem::size_of::<EdgeMutation>());
+        let overlay_memory_bytes = tx_delta_stats
+            .memory_bytes
+            .saturating_add(edge_buffer_memory_bytes);
+        let durable_overlay_memory_bytes = edge_buffer_memory_bytes;
+        let compaction_threshold = crate::config::compaction_threshold();
+        let compaction_recommended = self.needs_vacuum
+            || self.edge_buffer.len() >= compaction_threshold
+            || edge_buffer_tombstones >= compaction_threshold
+            || durable_overlay_memory_bytes >= crate::config::max_overlay_memory_bytes();
         EngineStatus {
             node_count: self.node_store.node_count() as i32,
             edge_count: self.edge_store.edge_count() as i32,
@@ -808,6 +887,16 @@ impl Engine {
             disabled_trigger_count: self.disabled_trigger_count,
             read_only: self.is_read_only,
             read_only_reason: self.read_only_reason.map(|reason| reason.to_string()),
+            projection_mode: self.projection_mode.as_str().to_string(),
+            overlay_tombstone_count: overlay_tombstones.min(i32::MAX as usize) as i32,
+            overlay_memory_bytes: overlay_memory_bytes.min(i64::MAX as usize) as i64,
+            compaction_recommended,
+            tx_delta_dirty: tx_delta_stats.dirty,
+            tx_delta_added_nodes: tx_delta_stats.added_nodes.min(i32::MAX as usize) as i32,
+            tx_delta_deleted_nodes: tx_delta_stats.deleted_nodes.min(i32::MAX as usize) as i32,
+            tx_delta_added_edges: tx_delta_stats.added_edges.min(i32::MAX as usize) as i32,
+            tx_delta_deleted_edges: tx_delta_stats.deleted_edges.min(i32::MAX as usize) as i32,
+            tx_delta_memory_bytes: tx_delta_stats.memory_bytes.min(i64::MAX as usize) as i64,
         }
     }
 
@@ -815,6 +904,25 @@ impl Engine {
         self.estimated_heap_bytes()
             .max(self.estimated_logical_bytes()) as f64
             / 1_048_576.0
+    }
+
+    pub fn memory_profile(&self, concurrent_backends: i32, memory_limit_mb: i32) -> MemoryProfile {
+        let private_bytes = self.estimated_heap_bytes();
+        let shared_bytes = self.estimated_mmap_bytes();
+        let backend_count = concurrent_backends.max(1) as usize;
+        let instance_private_bytes = private_bytes.saturating_mul(backend_count);
+        let instance_total_bytes = instance_private_bytes.saturating_add(shared_bytes);
+
+        MemoryProfile {
+            active_backend_private_mb: bytes_to_mb(private_bytes),
+            active_backend_shared_mb: bytes_to_mb(shared_bytes),
+            active_backend_total_mb: bytes_to_mb(private_bytes.saturating_add(shared_bytes)),
+            estimated_instance_private_mb: bytes_to_mb(instance_private_bytes),
+            estimated_instance_shared_mb: bytes_to_mb(shared_bytes),
+            estimated_instance_total_mb: bytes_to_mb(instance_total_bytes),
+            memory_limit_mb,
+            assumed_concurrent_backends: backend_count.min(i32::MAX as usize) as i32,
+        }
     }
 
     pub fn estimated_heap_bytes(&self) -> usize {
@@ -874,6 +982,22 @@ impl Engine {
             + edge_buffer_bytes
     }
 
+    fn estimated_mmap_bytes(&self) -> usize {
+        if let Some(mmap) = &self._mmap {
+            return mmap.len();
+        }
+
+        let resolution_bytes = match &self.resolution_store {
+            ResolutionStore::MmapBacked(state) => state.len,
+            ResolutionStore::Builder(_) | ResolutionStore::Finalized(_) => 0,
+        };
+
+        self.node_store
+            .estimated_mmap_bytes()
+            .saturating_add(self.edge_store.estimated_mmap_bytes())
+            .saturating_add(resolution_bytes)
+    }
+
     /// Compute connected components.
     pub fn connected_components(
         &self,
@@ -881,11 +1005,30 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        Ok(crate::connected_components::compute_components(
-            &self.node_store,
+        if !self.has_edge_overlay() {
+            return Ok(crate::connected_components::compute_components(
+                &self.node_store,
+                &self.edge_store,
+            ));
+        }
+        let (overlay_insert_edges, overlay_deleted_edges) =
+            self.traversal_edge_overlay(TraversalDirection::Out);
+        let neighbors = OverlayNeighbors::new(
             &self.edge_store,
-        ))
+            &overlay_insert_edges,
+            &overlay_deleted_edges,
+        );
+        Ok(
+            crate::connected_components::compute_components_with_neighbors(
+                &self.node_store,
+                &neighbors,
+            ),
+        )
     }
+}
+
+fn bytes_to_mb(bytes: usize) -> f64 {
+    bytes as f64 / 1_048_576.0
 }
 
 impl Default for Engine {
@@ -974,6 +1117,39 @@ mod tests {
             "edges should increase memory: no_edges={} with_edges={}",
             no_edges,
             with_edges
+        );
+    }
+
+    #[test]
+    fn memory_profile_multiplies_private_heap_but_not_shared_mapping() {
+        let mut engine = Engine::new();
+        for i in 0..10u32 {
+            engine.node_store.add_node(1, format!("n-{}", i));
+        }
+        engine.edge_store = crate::edge_store::EdgeStore::from_edges(
+            10,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            }],
+            false,
+        );
+
+        let one_backend = engine.memory_profile(1, 2048);
+        let four_backends = engine.memory_profile(4, 2048);
+
+        assert!(one_backend.active_backend_private_mb > 0.0);
+        assert_eq!(one_backend.active_backend_shared_mb, 0.0);
+        assert_eq!(four_backends.assumed_concurrent_backends, 4);
+        assert!(
+            four_backends.estimated_instance_private_mb
+                >= one_backend.active_backend_private_mb * 4.0
+        );
+        assert_eq!(
+            four_backends.estimated_instance_shared_mb,
+            one_backend.active_backend_shared_mb
         );
     }
 
@@ -1391,6 +1567,65 @@ mod tests {
     }
 
     #[test]
+    fn traverse_uses_transaction_delta_edge_insert() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record tx edge insert");
+
+        let results = eng
+            .traverse(
+                100,
+                "E",
+                1,
+                100000,
+                100000,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(results.iter().any(|row| row.node_id == "D"));
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn traverse_hides_transaction_delta_edge_delete() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+
+        let results = eng
+            .traverse(
+                100,
+                "A",
+                10,
+                100000,
+                100000,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(!results.iter().any(|row| row.node_id == "C"));
+        assert!(!results.iter().any(|row| row.node_id == "D"));
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
     fn traverse_invalid_filter_returns_error() {
         let eng = build_test_engine();
         let result = eng.traverse(
@@ -1486,6 +1721,84 @@ mod tests {
         assert_eq!(steps.last().unwrap().node_id, "D");
     }
 
+    #[test]
+    fn shortest_path_uses_pending_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        eng.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "E", "D"]
+        );
+    }
+
+    #[test]
+    fn shortest_path_hides_deleted_overlay_edges() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        eng.edge_buffer.push(EdgeMutation {
+            source: 1,
+            target: 2,
+            type_id: 1,
+            kind: MutationKind::Delete,
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn shortest_path_uses_transaction_delta_edge_insert() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            4,
+            tx_delta::DeltaEdge {
+                target: 3,
+                type_id: 1,
+                weight: None,
+            },
+        )
+        .expect("record tx edge insert");
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "E", "D"]
+        );
+        tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn shortest_path_hides_transaction_delta_edge_delete() {
+        let mut eng = build_test_engine();
+        eng.has_unidirectional_edges = true;
+        tx_delta::clear_for_test();
+        tx_delta::record_deleted_edge(1, 2, 1).expect("record tx edge delete");
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert!(steps.is_empty());
+        tx_delta::clear_for_test();
+    }
+
     // ─── weighted_shortest_path() ───
 
     #[test]
@@ -1500,6 +1813,67 @@ mod tests {
         let eng = build_test_engine(); // unweighted
         let result = eng.weighted_shortest_path(100, "A", 100, "D").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn weighted_shortest_path_rejects_pending_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+            }],
+            true,
+        );
+        eng.edge_buffer.push(EdgeMutation {
+            source: 1,
+            target: 2,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let result = eng.weighted_shortest_path(100, "A", 100, "C");
+
+        assert!(matches!(
+            result,
+            Err(GraphError::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn weighted_shortest_path_rejects_transaction_delta_edge_overlay() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(1),
+            }],
+            true,
+        );
+        tx_delta::clear_for_test();
+        tx_delta::record_added_edge(
+            1,
+            tx_delta::DeltaEdge {
+                target: 2,
+                type_id: 1,
+                weight: Some(1),
+            },
+        )
+        .expect("record tx edge insert");
+
+        let result = eng.weighted_shortest_path(100, "A", 100, "C");
+
+        assert!(matches!(
+            result,
+            Err(GraphError::UnsupportedOperation { .. })
+        ));
+        tx_delta::clear_for_test();
     }
 
     // ─── connected_components() ───
@@ -1517,6 +1891,37 @@ mod tests {
         let result = eng.connected_components().unwrap();
         assert_eq!(result.num_components, 1);
         assert_eq!(result.largest_component_size, 5);
+    }
+
+    #[test]
+    fn connected_components_honor_pending_edge_deletes() {
+        let mut eng = build_test_engine();
+        for (source, target) in [(1, 2), (2, 1)] {
+            eng.edge_buffer.push(EdgeMutation {
+                source,
+                target,
+                type_id: 1,
+                kind: MutationKind::Delete,
+            });
+        }
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
+    }
+
+    #[test]
+    fn connected_components_honor_transaction_delta_edge_deletes() {
+        let eng = build_test_engine();
+        tx_delta::clear_for_test();
+        for (source, target) in [(1, 2), (2, 1)] {
+            tx_delta::record_deleted_edge(source, target, 1).expect("record tx edge delete");
+        }
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
+        tx_delta::clear_for_test();
     }
 
     // ─── register_edge_type() ───

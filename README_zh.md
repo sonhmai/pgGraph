@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/github/stars/evokoa/pggraph?style=flat-square&logo=github&label=stars" alt="GitHub stars">
   </a>
   <a href="https://github.com/evokoa/pggraph/releases">
-    <img src="https://img.shields.io/badge/version-0.1.4-2ea44f?style=flat-square" alt="Version 0.1.4">
+    <img src="https://img.shields.io/badge/version-0.1.5-2ea44f?style=flat-square" alt="Version 0.1.5">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0">
@@ -91,12 +91,12 @@ pgGraph 在你现有的 PostgreSQL 表之上添加图查询，不需要单独的
 Windows（通过 Docker Desktop）上运行。
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.4
+docker pull ghcr.io/evokoa/pggraph:0.1.5
 docker run -d --rm \
   --name pggraph \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.4
+  ghcr.io/evokoa/pggraph:0.1.5
 ```
 
 默认数据库是 `graph`，已预配置 `pg_cron` 和维护定时任务。
@@ -136,8 +136,9 @@ scripts/quickstart.sh docker my-postgres 17 appdb postgres
 # 使用 pgrx 从源码构建并安装到本地 PostgreSQL
 scripts/quickstart.sh pgrx
 
-# 使用预设数据集启动 Streamlit playground（panama|ldbc）
-scripts/quickstart.sh playground panama
+# 使用预设数据集和模式启动 Streamlit playground（panama|ldbc，csr|mutable）
+scripts/quickstart.sh playground panama csr
+scripts/quickstart.sh playground panama mutable
 ```
 
 支持的模式：
@@ -151,7 +152,8 @@ scripts/quickstart.sh playground panama
   Postgres Docker 容器。
 - `pgrx [PG_MAJOR]`：使用 `cargo pgrx install` 构建 pgGraph，并安装到本地
   PostgreSQL。
-- `playground [panama|ldbc]`：使用预设数据集启动 Streamlit playground。
+- `playground [panama|ldbc] [csr|mutable]`：使用预设数据集和投影模式启动
+  Streamlit playground。
 - `clean`：停止 Compose 数据库并删除其 volume。
 
 该脚本可在 macOS 和 Linux 的普通终端中运行，也可在 Windows 上通过 WSL2 或带有 Docker Desktop 的 Git Bash 运行。它不是原生 PowerShell 或命令提示符脚本。

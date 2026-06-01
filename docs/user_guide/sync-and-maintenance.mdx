@@ -10,22 +10,25 @@ into the core stores.
 | Mode | Current behavior |
 |---|---|
 | `manual` | No automatic trigger install. Use `graph.build()` to refresh from source tables. |
-| `trigger` | `graph.enable_sync()` installs triggers that write to `graph._sync_log`; use `graph.apply_sync()` or `graph.maintenance()` to apply/rebuild. |
+| `trigger` | Default. `graph.build()` and `graph.enable_sync()` install triggers that write to `graph._sync_log`; topology reads auto-apply pending rows by default, and `graph.apply_sync()` or `graph.maintenance()` remain available for explicit operator workflows. |
 | `wal` | Reserved and rejected by current sync code. |
 
 ```sql
-ALTER SYSTEM SET graph.sync_mode = 'trigger';
+ALTER SYSTEM SET graph.sync_mode = 'manual';
 SELECT pg_reload_conf();
 ```
 
-## Enable Trigger Sync
+## Trigger Sync
 
 ```sql
 SELECT graph.enable_sync();
 ```
 
-This creates trigger functions and attaches INSERT, UPDATE, DELETE, and TRUNCATE
-triggers to registered tables. Trigger rows are durable in `graph._sync_log`.
+With the default `graph.sync_mode = 'trigger'`, `graph.build()` creates trigger
+functions and attaches INSERT, UPDATE, DELETE, and TRUNCATE triggers to
+registered tables. `graph.enable_sync()` is still available when operators want
+to install or reinstall those triggers explicitly. Trigger rows are durable in
+`graph._sync_log`.
 
 ```text
 source table DML
@@ -116,6 +119,14 @@ FROM graph.sync_health();
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `edge_buffer_size` | Configured edge overlay capacity |
+| `projection_mode` | Built projection mode: `csr_readonly` or `mutable_overlay` |
+| `overlay_tombstone_count` | Pending overlay delete/tombstone count |
+| `overlay_memory_bytes` | Estimated backend-local overlay heap memory |
+| `compaction_recommended` | `true` when durable overlay count, tombstones, memory, or vacuum state crosses the configured compaction policy |
+| `tx_delta_dirty` | Whether this backend has transaction-local graph deltas |
+| `tx_delta_added_nodes` / `tx_delta_deleted_nodes` | Transaction-local node delta counts |
+| `tx_delta_added_edges` / `tx_delta_deleted_edges` | Transaction-local edge delta counts |
+| `tx_delta_memory_bytes` | Estimated transaction-delta heap memory |
 | `read_only_reason` | Typed reason such as `memory_limit` or `edge_buffer_full` when read-only |
 | `apply_sync_recommended` | Pending rows can be replayed by `graph.apply_sync()` while the engine is writable |
 | `maintenance_recommended` | Overlay, read-only, vacuum, or rebuild state should be compacted |
@@ -244,6 +255,8 @@ SELECT
   edge_buffer_used,
   needs_vacuum,
   needs_rebuild,
+  projection_mode,
+  tx_delta_dirty,
   applied_sync_id,
   pending_sync_rows,
   disabled_trigger_count,
@@ -257,6 +270,8 @@ FROM graph.status();
 | `edge_buffer_used` | Pending edge overlay mutations |
 | `needs_vacuum` | Overlay/tombstone state should be merged |
 | `needs_rebuild` | Catalog/schema drift requires full rebuild |
+| `projection_mode` | Built projection mode |
+| `tx_delta_dirty` | Whether this backend has transaction-local graph deltas |
 | `applied_sync_id` | Last durable sync log row applied by this backend-local engine |
 | `pending_sync_rows` | Durable sync rows newer than `applied_sync_id` |
 | `disabled_trigger_count` | Registered graph triggers currently disabled |
@@ -266,17 +281,16 @@ FROM graph.status();
 Small manual graph:
 
 ```sql
+ALTER SYSTEM SET graph.sync_mode = 'manual';
+SELECT pg_reload_conf();
 SELECT * FROM graph.build();
 -- periodically:
 SELECT * FROM graph.build();
 ```
 
-Trigger-sync graph:
+Default trigger-sync graph:
 
 ```sql
-ALTER SYSTEM SET graph.sync_mode = 'trigger';
-SELECT pg_reload_conf();
-SELECT graph.enable_sync();
 SELECT * FROM graph.build();
 
 -- after workload:

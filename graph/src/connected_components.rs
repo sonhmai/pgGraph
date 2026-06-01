@@ -17,6 +17,7 @@
 
 use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
+use crate::projection::neighbors::{CsrNeighbors, NeighborSource};
 use crate::types::TableOid;
 use std::collections::HashMap;
 
@@ -96,6 +97,15 @@ impl UnionFind {
 /// # Returns
 /// ComponentResult with per-node component labels and summary stats.
 pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> ComponentResult {
+    let neighbors = CsrNeighbors::new(edge_store);
+    compute_components_with_neighbors(node_store, &neighbors)
+}
+
+/// Compute connected components over a supplied neighbor source.
+pub(crate) fn compute_components_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
+) -> ComponentResult {
     let node_count = node_store.node_count() as usize;
 
     if node_count == 0 {
@@ -111,14 +121,15 @@ pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> Com
 
     // Iterate through all edges in the CSR — sequential, cache-friendly
     for node in 0..node_count as u32 {
-        if !node_store.is_active(node) {
+        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
             continue;
         }
 
-        let (targets, _type_ids) = edge_store.neighbors(node);
-        for &target in targets {
-            if node_store.is_active(target) {
-                uf.union(node, target);
+        for edge in neighbors.neighbors(node) {
+            if node_store.is_active(edge.target)
+                && !crate::projection::tx_delta::node_deleted(edge.target)
+            {
+                uf.union(node, edge.target);
             }
         }
     }
@@ -128,7 +139,7 @@ pub fn compute_components(node_store: &NodeStore, edge_store: &EdgeStore) -> Com
     let mut component_sizes = HashMap::new();
 
     for node in 0..node_count as u32 {
-        if !node_store.is_active(node) {
+        if !node_store.is_active(node) || crate::projection::tx_delta::node_deleted(node) {
             component[node as usize] = u32::MAX; // inactive
             continue;
         }

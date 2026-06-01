@@ -30,8 +30,8 @@ PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
 ```
 
 The heavy inventory includes `playground_release_gate.sh`, which prepares the
-Docker-backed Panama playground and verifies every shared playground SQL example
-against fixed release-gate result summaries.
+Docker-backed Panama playground in CSR or mutable mode and verifies every shared
+playground SQL example against fixed release-gate result summaries.
 
 For PostgreSQL-major matrix validation:
 
