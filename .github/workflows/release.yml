@@ -1,0 +1,454 @@
+name: Publish Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag in vX.Y.Z form
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/pggraph
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      short_sha: ${{ steps.commit.outputs.short_sha }}
+    steps:
+      - name: Resolve release tag
+        id: release
+        run: |
+          tag="${{ inputs.tag }}"
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use vX.Y.Z form: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release view "${{ steps.release.outputs.tag }}" >/dev/null
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        run: scripts/validate_release.py --tag "${{ steps.release.outputs.tag }}" --check-main
+
+      - name: Capture release commit
+        id: commit
+        run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+  docker-smoke:
+    name: Test Docker image PG${{ matrix.pg }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Smoke test image
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+          IMAGE: pggraph:release-smoke-pg${{ matrix.pg }}
+          CONTAINER: pggraph-release-smoke-pg${{ matrix.pg }}
+        run: graph/tests/heavy/docker_smoke.sh
+
+  pgxn-artifact:
+    name: Build PGXN artifact
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Build PGXN source archive
+        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
+
+      - name: Verify PGXN source archive
+        run: |
+          python3 - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+
+          version = "${{ needs.validate.outputs.version }}"
+          archive = Path(f"dist/pgGraph-{version}.zip")
+          prefix = f"pgGraph-{version}/"
+
+          with zipfile.ZipFile(archive) as package:
+              names = set(package.namelist())
+              required = {
+                  f"{prefix}META.json",
+                  f"{prefix}Makefile",
+                  f"{prefix}README.md",
+                  f"{prefix}LICENSE",
+                  f"{prefix}graph/Cargo.toml",
+                  f"{prefix}graph/graph.control",
+              }
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"PGXN archive is missing: {', '.join(missing)}")
+
+              meta = json.loads(package.read(f"{prefix}META.json"))
+
+          if meta.get("version") != version:
+              raise SystemExit(
+                  f"PGXN archive META.json version {meta.get('version')!r} "
+                  f"does not match {version!r}"
+              )
+          PY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgxn-source-${{ needs.validate.outputs.version }}
+          path: dist/pgGraph-${{ needs.validate.outputs.version }}.zip
+          if-no-files-found: error
+
+  approve-publishing:
+    name: Approve package publishing
+    needs:
+      - validate
+      - docker-smoke
+      - pgxn-artifact
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Approved
+        run: echo "Approved PGXN and Docker package publishing."
+
+  publish-pgxn:
+    name: Publish PGXN package
+    needs:
+      - validate
+      - approve-publishing
+    runs-on: ubuntu-latest
+    container: pgxn/pgxn-tools
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Build PGXN source archive
+        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
+
+      - name: Publish to PGXN
+        env:
+          PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+          PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+        run: pgxn-release "dist/pgGraph-${{ needs.validate.outputs.version }}.zip"
+
+  pgxn-verify:
+    name: Verify PGXN package
+    needs:
+      - validate
+      - publish-pgxn
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify PGXN metadata is visible
+        run: |
+          url="https://api.pgxn.org/dist/pggraph/${{ needs.validate.outputs.version }}/META.json"
+
+          for _ in {1..30}; do
+            if curl --fail --silent --show-error --location "$url" >/tmp/pgxn-meta.json; then
+              break
+            fi
+            sleep 10
+          done
+
+          test -s /tmp/pgxn-meta.json
+
+      - name: Verify PGXN version metadata
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = "${{ needs.validate.outputs.version }}"
+          meta = json.loads(Path("/tmp/pgxn-meta.json").read_text(encoding="utf-8"))
+          actual = meta.get("version")
+
+          if actual != expected:
+              raise SystemExit(f"Expected PGXN version {expected}, got {actual!r}")
+          PY
+
+  attach-pgxn-artifact:
+    name: Attach PGXN artifact to GitHub Release
+    needs:
+      - validate
+      - approve-publishing
+      - pgxn-verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Build PGXN source archive
+        run: scripts/build_pgxn_dist.sh "${{ needs.validate.outputs.tag }}" dist
+
+      - name: Attach archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "${{ needs.validate.outputs.tag }}" \
+            "dist/pgGraph-${{ needs.validate.outputs.version }}.zip" \
+            --clobber
+
+  docker:
+    name: Publish Docker image PG${{ matrix.pg }}
+    needs:
+      - validate
+      - approve-publishing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}
+            type=raw,value=pg${{ matrix.pg }}-${{ needs.validate.outputs.version }}
+            type=raw,value=pg${{ matrix.pg }}
+            type=raw,value=pg${{ matrix.pg }}-sha-${{ needs.validate.outputs.short_sha }}
+            type=raw,value=${{ needs.validate.outputs.tag }},enable=${{ matrix.pg == 17 }}
+            type=raw,value=${{ needs.validate.outputs.version }},enable=${{ matrix.pg == 17 }}
+            type=raw,value=latest,enable=${{ matrix.pg == 17 }}
+            type=raw,value=sha-${{ needs.validate.outputs.short_sha }},enable=${{ matrix.pg == 17 }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+            org.opencontainers.image.postgresql.major=${{ matrix.pg }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            POSTGRES_IMAGE=postgres:${{ matrix.pg }}-bookworm
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  docker-verify:
+    name: Verify published image PG${{ matrix.pg }}
+    needs:
+      - validate
+      - docker
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull and start release image
+        run: |
+          image="${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-${{ needs.validate.outputs.tag }}"
+          docker pull "$image"
+          docker run -d --rm \
+            --name pggraph-release-verify-pg${{ matrix.pg }} \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 55432:5432 \
+            "$image"
+
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in {1..60}; do
+            if docker exec pggraph-release-verify-pg${{ matrix.pg }} pg_isready -U postgres >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pggraph-release-verify-pg${{ matrix.pg }}
+          exit 1
+
+      - name: Verify extensions
+        run: |
+          count="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+
+          if [[ "$count" != "2" ]]; then
+            echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
+            exit 1
+          fi
+
+          server_version_num="$(docker exec pggraph-release-verify-pg${{ matrix.pg }} \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SHOW server_version_num;")"
+
+          if [[ "${server_version_num:0:2}" != "${{ matrix.pg }}" ]]; then
+            echo "Expected PostgreSQL ${{ matrix.pg }}, got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f pggraph-release-verify-pg${{ matrix.pg }} >/dev/null 2>&1 || true
+
+  docker-verify-default:
+    name: Verify default published image
+    needs:
+      - validate
+      - docker
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull and start default release image
+        run: |
+          image="${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}"
+          docker pull "$image"
+          docker run -d --rm \
+            --name pggraph-release-verify-default \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 55432:5432 \
+            "$image"
+
+      - name: Wait for PostgreSQL
+        run: |
+          for _ in {1..60}; do
+            if docker exec pggraph-release-verify-default pg_isready -U postgres >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pggraph-release-verify-default
+          exit 1
+
+      - name: Verify extensions and default PostgreSQL major
+        run: |
+          count="$(docker exec pggraph-release-verify-default \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('graph', 'pg_cron');")"
+
+          if [[ "$count" != "2" ]]; then
+            echo "Expected graph and pg_cron extensions, found $count" >&2
+            docker exec pggraph-release-verify-default \
+              psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+              -c "SELECT extname, extversion FROM pg_extension ORDER BY extname;"
+            exit 1
+          fi
+
+          server_version_num="$(docker exec pggraph-release-verify-default \
+            psql -U postgres -d graph -v ON_ERROR_STOP=1 \
+            -tAc "SHOW server_version_num;")"
+
+          if [[ "${server_version_num:0:2}" != "17" ]]; then
+            echo "Expected default PostgreSQL 17 image, got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f pggraph-release-verify-default >/dev/null 2>&1 || true
+
+  publish-summary:
+    name: Publish summary
+    needs:
+      - validate
+      - pgxn-verify
+      - attach-pgxn-artifact
+      - docker-verify
+      - docker-verify-default
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize published packages
+        run: |
+          {
+            echo "## Published packages"
+            echo
+            echo "- PGXN: pggraph ${{ needs.validate.outputs.version }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.tag }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg14-${{ needs.validate.outputs.tag }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg15-${{ needs.validate.outputs.tag }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg16-${{ needs.validate.outputs.tag }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg17-${{ needs.validate.outputs.tag }}"
+            echo "- Docker: ${{ env.IMAGE_NAME }}:pg18-${{ needs.validate.outputs.tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"
