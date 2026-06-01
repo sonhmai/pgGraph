@@ -62,8 +62,9 @@ Dependencies are intentionally pinned for release reproducibility:
 - direct Rust dependencies use exact Cargo requirements and committed
   `Cargo.lock` files;
 - Python sandbox requirements use exact `==` versions;
-- Docker base images use versioned tags plus digests and must be reviewed before
-  moving to a new digest or tag.
+- Docker base images use reviewed versioned tags, and pinned digests where the
+  image is fixed in the Dockerfile. Matrix-selected runtime images must be
+  reviewed before moving to a new tag family.
 - Nix flake inputs are pinned in `flake.lock`; GitHub input updates are reported
   for manual lockfile review.
 
@@ -87,8 +88,8 @@ python3 scripts/check_dependency_updates.py --update pypi:streamlit --yes
 ```
 
 Docker and Nix flake input updates are reported but not rewritten automatically.
-Review the upstream image, changelog, digest, or locked Git revision manually
-before changing `Dockerfile` or `flake.lock`.
+Review the upstream image, changelog, digest when present, or locked Git
+revision manually before changing `Dockerfile` or `flake.lock`.
 
 ## Cleanup Script
 
