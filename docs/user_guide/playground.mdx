@@ -19,6 +19,20 @@ The script creates a Python virtualenv under `sandbox/playground/.venv` when
 needed and installs the playground dependencies there. It also starts or reuses
 the `pggraph-sandbox` PostgreSQL container.
 
+By default, the playground starts in `csr_readonly` mode. To start the same
+dataset with mutable GQL writes enabled:
+
+```bash
+PGGRAPH_PLAYGROUND_MODE=mutable sandbox/start_playground.sh
+```
+
+The quickstart wrapper accepts the same mode as an argument:
+
+```bash
+scripts/quickstart.sh playground panama csr
+scripts/quickstart.sh playground panama mutable
+```
+
 The first run may take time because it downloads and prepares the Panama Papers
 dataset:
 
@@ -90,13 +104,15 @@ the build to complete or reports the build error.
 ## Built-In Query Catalog
 
 The sidebar query catalog is shared with the playground release gate. It
-currently validates 29 examples:
+currently validates 40 CSR examples and 41 mutable examples:
 
 | Section | Queries |
 |---|---|
-| Core Functions | Status + Catalog; Search Mossack; Find Mossack; Traverse Neighborhood; Expand Neighborhood; Shortest Path; GQL One-Hop Relationships; GQL Aggregated Neighbors; GQL Explain; Component Stats; Largest Component |
+| Core Functions | Status + Catalog; Search Mossack; Find Mossack; Traverse Neighborhood; Expand Neighborhood; Shortest Path; Component Stats; Largest Component |
+| GQL Examples | GQL Parameterized Match; GQL Scalar Projection; GQL One-Hop Relationships; GQL Relationship Projection; GQL Inbound Relationships; GQL Undirected Relationships; GQL Distinct Labels; GQL Aggregated Neighbors; GQL Aggregate By Label; GQL Collect Neighbor Labels; GQL Variable-Length Paths; GQL Path Functions; GQL Hydration Off; GQL Explain |
+| Mutable GQL Writes | Mutable GQL Merge Node; Mutable GQL Merge Update |
 | Sample Workflows | Table Sizes; Relationship Label Counts; Top Connected Officers; Top Connected Entities; Entity Direct Relationships; Officer Context Packet; Search Entity Then Expand; Relationship Filtered Walk; Capped 3-Hop Investigation |
-| Admin | Build Graph; Build Graph Concurrently; Build Status; Sync Health; Apply Sync; Scheduled Maintenance; Vacuum Graph; Maintenance; Maintenance Status |
+| Admin | Build Graph; Build Graph Concurrently in CSR mode; Build Status; Sync Health; Apply Sync; Scheduled Maintenance; Vacuum Graph; Maintenance; Maintenance Status |
 
 The GQL examples use the registered Panama `nodes` label and dynamic
 relationship labels from `panama.edges.rel_type`. You can edit those examples
@@ -121,8 +137,9 @@ Supported GQL in the playground includes:
   relationship `DELETE` backed by a registered edge row table, and single-node
   `DETACH DELETE`.
 
-The playground examples run against the default read-only Panama build, so the
-sidebar focuses on read queries and admin/operator checks.
+The CSR sidebar focuses on read queries and admin/operator checks. The mutable
+sidebar adds idempotent MERGE examples and rebuilds the graph with
+`mutable_overlay`.
 
 ## Release Gate
 
@@ -133,6 +150,7 @@ against fixed result summaries for the Panama dataset:
 ```bash
 cd graph
 ./tests/heavy/playground_release_gate.sh
+PGGRAPH_PLAYGROUND_MODE=mutable ./tests/heavy/playground_release_gate.sh
 ```
 
 If a playground query is added, removed, or changed, update the gate

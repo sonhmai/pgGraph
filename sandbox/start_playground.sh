@@ -12,6 +12,22 @@ PG_PORT="${PGGRAPH_PG_PORT:-55432}"
 CONTAINER_NAME="${PGGRAPH_CONTAINER_NAME:-pggraph-sandbox}"
 IMAGE_NAME="${PGGRAPH_IMAGE_NAME:-pggraph-postgres:17}"
 PLAYGROUND_DATASET="${PGGRAPH_PLAYGROUND_DATASET:-panama}"
+PLAYGROUND_MODE="${PGGRAPH_PLAYGROUND_MODE:-csr}"
+
+case "${PLAYGROUND_MODE}" in
+  csr|csr_readonly)
+    PLAYGROUND_MODE="csr"
+    BUILD_MODE="csr_readonly"
+    ;;
+  mutable|mutable_overlay)
+    PLAYGROUND_MODE="mutable"
+    BUILD_MODE="mutable_overlay"
+    ;;
+  *)
+    echo "Error: unsupported playground mode '${PLAYGROUND_MODE}'. Use csr or mutable." >&2
+    exit 2
+    ;;
+esac
 
 require_docker
 ensure_pggraph_image "${ROOT_DIR}" "${IMAGE_NAME}"
@@ -122,6 +138,7 @@ APP_PORT="$(choose_app_port)"
   --password postgres \
   --datasets-dir "${SANDBOX_DIR}/benchmark/datasets" \
   --results-dir "${SANDBOX_DIR}/benchmark/results" \
+  --build-mode "${BUILD_MODE}" \
   --prepare-only
 
 if [ -d "${VENV_DIR}" ]; then
@@ -140,9 +157,10 @@ run_venv_pip install -r "${SANDBOX_DIR}/playground/requirements.txt"
 
 export PGGRAPH_DSN="host=127.0.0.1 port=${ACTUAL_PG_PORT} dbname=postgres user=postgres password=postgres"
 export PGGRAPH_ASSETS_DIR="${ROOT_DIR}/assets"
+export PGGRAPH_PLAYGROUND_MODE="${PLAYGROUND_MODE}"
 
 URL="http://127.0.0.1:${APP_PORT}"
-echo "Starting pgGraph playground at ${URL}"
+echo "Starting pgGraph playground (${PLAYGROUND_MODE}) at ${URL}"
 "${VENV_DIR}/bin/streamlit" run "${SANDBOX_DIR}/playground/app.py" \
   --server.address 127.0.0.1 \
   --server.port "${APP_PORT}" \

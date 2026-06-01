@@ -895,10 +895,10 @@ def prepare_dataset(args: argparse.Namespace, dataset: str) -> dict[str, object]
     build_started = time.perf_counter()
     build_output = psql(
         args.container,
-        "SELECT row_to_json(b) FROM graph.build() b;",
+        build_sql(args.build_mode),
         timeout=None,
         tuples_only=True,
-        progress_label=f"Running graph.build() for {dataset}",
+        progress_label=f"Running graph.build({args.build_mode}) for {dataset}",
     ).strip()
     build_seconds = time.perf_counter() - build_started
     if dataset == "panama":
@@ -942,6 +942,15 @@ def scalar(container: str, sql: str) -> str:
 
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def build_sql(build_mode: str) -> str:
+    if build_mode == "mutable_overlay":
+        return """
+        SET graph.mutable_enabled = on;
+        SELECT row_to_json(b) FROM graph.build('mutable_overlay') b;
+        """
+    return "SELECT row_to_json(b) FROM graph.build('csr_readonly') b;"
 
 
 def benchmark_dsn(args: argparse.Namespace) -> str:
@@ -1344,6 +1353,12 @@ def main() -> int:
     parser.add_argument("--playground-venv", type=Path, default=Path("sandbox/playground/.venv"))
     parser.add_argument("--hot-iterations", type=int, default=10)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--build-mode",
+        choices=["csr_readonly", "mutable_overlay"],
+        default="csr_readonly",
+        help="Projection mode to use when preparing datasets.",
+    )
     parser.add_argument(
         "--cleanup",
         nargs="+",

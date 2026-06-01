@@ -360,12 +360,16 @@ counts.
 ```bash
 cd graph
 ./tests/heavy/playground_release_gate.sh
+PGGRAPH_PLAYGROUND_MODE=mutable ./tests/heavy/playground_release_gate.sh
 ```
 
 By default the script uses the sandbox Docker container and PostgreSQL port
-`55432`. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when validating an
-already-prepared playground database. Set `PGGRAPH_PLAYGROUND_YES=1` only when
-release automation is allowed to approve the first Panama dataset download.
+`55432` and validates the `csr_readonly` playground catalog. Set
+`PGGRAPH_PLAYGROUND_MODE=mutable` to prepare `mutable_overlay` and validate the
+mutable GQL examples. Set `PREPARE_PLAYGROUND=0` and provide `PGGRAPH_DSN` when
+validating an already-prepared playground database. Set
+`PGGRAPH_PLAYGROUND_YES=1` only when release automation is allowed to approve
+the first Panama dataset download.
 
 ## Release Gate
 

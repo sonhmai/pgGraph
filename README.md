@@ -150,8 +150,9 @@ scripts/quickstart.sh docker my-postgres 17 appdb postgres
 # source build/install with pgrx into local PostgreSQL
 scripts/quickstart.sh pgrx
 
-# start Streamlit playground with a preset dataset (panama|ldbc)
-scripts/quickstart.sh playground panama
+# start Streamlit playground with a preset dataset and mode (csr|mutable)
+scripts/quickstart.sh playground panama csr
+scripts/quickstart.sh playground panama mutable
 ```
 
 Supported modes:
@@ -166,8 +167,8 @@ Supported modes:
   `scripts/install_into_docker_postgres.sh`.
 - `pgrx [PG_MAJOR]`: build and install pgGraph into a local PostgreSQL using
   `cargo pgrx install`.
-- `playground [panama|ldbc]`: start the Streamlit playground using a preset
-  dataset.
+- `playground [panama|ldbc] [csr|mutable]`: start the Streamlit playground
+  using a preset dataset and projection mode.
 - `clean`: stop the Compose database and remove its volume.
 
 The script works on macOS and Linux from a normal terminal, and on Windows from

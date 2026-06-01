@@ -1,5 +1,7 @@
 """Shared pgGraph playground query catalog."""
 
+from __future__ import annotations
+
 DEFAULT_SQL = """-- Core pgGraph status and catalog checks.
 SELECT * FROM graph.status();
 
@@ -17,9 +19,22 @@ QUERY_QUESTIONS = {
     "Traverse Neighborhood": "What is within two hops of this Panama officer node?",
     "Expand Neighborhood": "What readable neighborhood does graph.expand produce from this seed?",
     "Shortest Path": "What path connects this Panama officer seed to the selected target?",
+    "GQL Parameterized Match": "How does GQL use parameters to project a known Panama relationship?",
+    "GQL Scalar Projection": "Which scalar fields can GQL return from matched Panama nodes?",
     "GQL One-Hop Relationships": "Which nodes does a GQL pattern match directly from this Panama officer?",
+    "GQL Relationship Projection": "What relationship value does GQL return for a known Panama edge?",
+    "GQL Inbound Relationships": "Which inbound relationships point at this Panama intermediary?",
+    "GQL Undirected Relationships": "What neighbors appear when direction does not matter?",
+    "GQL Distinct Labels": "Which distinct target labels appear in a GQL relationship match?",
     "GQL Aggregated Neighbors": "How does GQL group this officer's direct neighbors by source label?",
+    "GQL Aggregate By Label": "How many direct neighbors does this officer have by target label?",
+    "GQL Collect Neighbor Labels": "Which neighbor labels are collected around this relationship type?",
+    "GQL Variable-Length Paths": "What bounded path lengths can GQL find over a small relationship type?",
+    "GQL Path Functions": "What do nodes(path), relationships(path), and length(path) return?",
+    "GQL Hydration Off": "What compact node identifiers does GQL return when hydration is disabled?",
     "GQL Explain": "What physical plan does pgGraph choose for a one-hop GQL pattern?",
+    "Mutable GQL Merge Node": "How does mutable GQL merge a playground node into the Panama source table?",
+    "Mutable GQL Merge Update": "How does mutable GQL update an existing mapped node through MERGE?",
     "Component Stats": "How many connected components exist, and what are the first components?",
     "Largest Component": "Which nodes appear in the largest connected component?",
     "Table Sizes": "How large are the loaded Panama node and relationship tables?",
@@ -92,6 +107,37 @@ FROM graph.shortest_path(
   hydrate := true
 )
 ORDER BY step;""",
+            "Component Stats": """SELECT * FROM graph.component_stats();
+
+SELECT * FROM graph.components(max_rows := 20);""",
+            "Largest Component": """SELECT component_id, node_id, node_table::regclass AS node_table, node
+FROM graph.largest_component(max_rows := 20, hydrate := false);""",
+        },
+    ),
+    (
+        "GQL Examples",
+        {
+            "GQL Parameterized Match": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   WHERE source.node_id = $seed
+     AND target.node_id = $target
+   RETURN source.node_id AS source_id,
+          target.node_id AS target_id',
+  params := '{"seed":"23000018","target":"11012822"}'::jsonb
+);""",
+            "GQL Scalar Projection": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   RETURN source.node_id AS source_id,
+          source.name AS source_name,
+          target.node_id AS target_id,
+          target.name AS target_name,
+          target.country_codes AS target_country_codes
+   ORDER BY source_id, target_id
+   LIMIT 4',
+  params := '{}'::jsonb
+);""",
             "GQL One-Hop Relationships": """SELECT row
 FROM graph.gql(
   'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
@@ -105,11 +151,98 @@ FROM graph.gql(
    LIMIT 1',
   params := '{"seed":"23000018","target":"11012822"}'::jsonb
 );""",
+            "GQL Relationship Projection": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[rel:same_intermediary_as]->(target:nodes)
+   WHERE source.node_id = $seed
+     AND target.node_id = $target
+   RETURN source.node_id AS source_id,
+          rel AS relationship,
+          target.node_id AS target_id
+   LIMIT 1',
+  params := '{"seed":"23000018","target":"11012822"}'::jsonb
+);""",
+            "GQL Inbound Relationships": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)<-[:same_intermediary_as]-(target:nodes)
+   WHERE source.node_id = $target
+   RETURN target.node_id AS source_id,
+          source.node_id AS target_id,
+          source.name AS target_name
+   ORDER BY source_id
+   LIMIT 10',
+  params := '{"target":"11012822"}'::jsonb
+);""",
+            "GQL Undirected Relationships": """SELECT row
+FROM graph.gql(
+  'MATCH (seed:nodes)-[:same_intermediary_as]-(neighbor:nodes)
+   WHERE seed.node_id = $seed
+   RETURN neighbor.node_id AS neighbor_id,
+          neighbor.name AS neighbor_name,
+          neighbor.label AS neighbor_label
+   ORDER BY neighbor_id',
+  params := '{"seed":"23000018"}'::jsonb
+);""",
+            "GQL Distinct Labels": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   RETURN DISTINCT target.label AS target_label
+   ORDER BY target_label',
+  params := '{}'::jsonb
+);""",
             "GQL Aggregated Neighbors": """SELECT row
 FROM graph.gql(
   'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
    RETURN count(*) AS direct_links',
   params := '{}'::jsonb
+);""",
+            "GQL Aggregate By Label": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN target.label AS target_label,
+          count(*) AS links
+   ORDER BY links DESC, target_label',
+  params := '{"seed":"23000018"}'::jsonb
+);""",
+            "GQL Collect Neighbor Labels": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   RETURN source.label AS source_label,
+          collect(DISTINCT target.label) AS target_labels,
+          count(*) AS links',
+  params := '{}'::jsonb
+);""",
+            "GQL Variable-Length Paths": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[path:same_intermediary_as*1..1]->(target:nodes)
+   RETURN source.node_id AS source_id,
+          target.node_id AS target_id,
+          length(path) AS hops
+   ORDER BY source_id, target_id
+   LIMIT 4',
+  params := '{}'::jsonb
+);""",
+            "GQL Path Functions": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[path:same_intermediary_as*1..1]->(target:nodes)
+   RETURN length(path) AS hops,
+          nodes(path) AS path_nodes,
+          relationships(path) AS path_relationships
+   ORDER BY source.node_id, target.node_id
+   LIMIT 3',
+  params := '{}'::jsonb
+);""",
+            "GQL Hydration Off": """SELECT row
+FROM graph.gql(
+  'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
+   WHERE source.node_id = $seed
+   RETURN source,
+          target
+   ORDER BY target.node_id
+   LIMIT 2',
+  params := '{"seed":"23000018"}'::jsonb,
+  hydrate := false
 );""",
             "GQL Explain": """SELECT graph.gql_explain(
   'MATCH (source:nodes)-[:same_intermediary_as]->(target:nodes)
@@ -118,11 +251,33 @@ FROM graph.gql(
    ORDER BY target_id
    LIMIT 20'
 );""",
-            "Component Stats": """SELECT * FROM graph.component_stats();
-
-SELECT * FROM graph.components(max_rows := 20);""",
-            "Largest Component": """SELECT component_id, node_id, node_table::regclass AS node_table, node
-FROM graph.largest_component(max_rows := 20, hydrate := false);""",
+        },
+    ),
+    (
+        "Mutable GQL Writes",
+        {
+            "Mutable GQL Merge Node": """SELECT row
+FROM graph.gql(
+  'MERGE (n:nodes {node_id: $id, label: ''others'', name: $name})
+   ON CREATE SET n.countries = $countries
+   ON MATCH SET n.name = $name
+   RETURN n.node_id AS id,
+          n.name AS name,
+          n.label AS label,
+          n.countries AS countries',
+  params := '{"id":"pggraph-playground-merge","name":"pgGraph playground merge","countries":"Playground"}'::jsonb
+);""",
+            "Mutable GQL Merge Update": """SELECT row
+FROM graph.gql(
+  'MERGE (n:nodes {node_id: $id, label: ''others'', name: $name})
+   ON CREATE SET n.countries = $created_country
+   ON MATCH SET n.countries = $matched_country
+   RETURN n.node_id AS id,
+          n.name AS name,
+          n.label AS label,
+          n.countries AS countries',
+  params := '{"id":"pggraph-playground-merge","name":"pgGraph playground merge","created_country":"Playground","matched_country":"Mutable Playground"}'::jsonb
+);""",
         },
     ),
     (
@@ -240,7 +395,7 @@ ORDER BY depth, node_table_name, node_id;""",
     (
         "Admin",
         {
-            "Build Graph": "SELECT * FROM graph.build();",
+            "Build Graph": "SELECT * FROM graph.build('csr_readonly');",
             "Build Graph Concurrently": "SELECT * FROM graph.build(concurrently := true);",
             "Build Status": "SELECT * FROM graph.build_status('00000000-0000-0000-0000-000000000000');",
             "Sync Health": "SELECT * FROM graph.sync_health();",
@@ -254,6 +409,29 @@ ORDER BY depth, node_table_name, node_id;""",
 ]
 
 
-def query_catalog() -> dict[str, str]:
+def normalize_playground_mode(mode: str | None = None) -> str:
+    raw = (mode or "csr").strip().lower()
+    if raw in {"csr", "csr_readonly"}:
+        return "csr"
+    if raw in {"mutable", "mutable_overlay"}:
+        return "mutable"
+    raise ValueError(f"unsupported playground mode: {mode}")
+
+
+def query_sections(mode: str | None = None) -> list[tuple[str, dict[str, str]]]:
+    normalized = normalize_playground_mode(mode)
+    sections: list[tuple[str, dict[str, str]]] = []
+    for section, queries in QUERY_SECTIONS:
+        if normalized == "csr" and section == "Mutable GQL Writes":
+            continue
+        section_queries = dict(queries)
+        if section == "Admin" and normalized == "mutable":
+            section_queries["Build Graph"] = "SELECT * FROM graph.build('mutable_overlay');"
+            section_queries.pop("Build Graph Concurrently", None)
+        sections.append((section, section_queries))
+    return sections
+
+
+def query_catalog(mode: str | None = None) -> dict[str, str]:
     """Return all sidebar query labels mapped to their SQL text."""
-    return {label: sql for _, queries in QUERY_SECTIONS for label, sql in queries.items()}
+    return {label: sql for _, queries in query_sections(mode) for label, sql in queries.items()}

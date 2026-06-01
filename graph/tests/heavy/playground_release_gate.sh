@@ -11,6 +11,22 @@ PG_PORT="${PGGRAPH_PG_PORT:-55432}"
 CONTAINER_NAME="${PGGRAPH_CONTAINER_NAME:-pggraph-sandbox}"
 IMAGE_NAME="${PGGRAPH_IMAGE_NAME:-pggraph-postgres:17}"
 PLAYGROUND_DATASET="${PGGRAPH_PLAYGROUND_DATASET:-panama}"
+PLAYGROUND_MODE="${PGGRAPH_PLAYGROUND_MODE:-csr}"
+
+case "${PLAYGROUND_MODE}" in
+  csr|csr_readonly)
+    PLAYGROUND_MODE="csr"
+    BUILD_MODE="csr_readonly"
+    ;;
+  mutable|mutable_overlay)
+    PLAYGROUND_MODE="mutable"
+    BUILD_MODE="mutable_overlay"
+    ;;
+  *)
+    echo "Error: unsupported playground mode '${PLAYGROUND_MODE}'. Use csr or mutable." >&2
+    exit 2
+    ;;
+esac
 
 if [[ "${PREPARE_PLAYGROUND}" == "1" ]]; then
   # shellcheck source=../../../sandbox/common/docker.sh
@@ -32,6 +48,7 @@ if [[ "${PREPARE_PLAYGROUND}" == "1" ]]; then
     --password postgres
     --datasets-dir "${SANDBOX_DIR}/benchmark/datasets"
     --results-dir "${SANDBOX_DIR}/benchmark/results"
+    --build-mode "${BUILD_MODE}"
     --prepare-only
   )
   if [[ "${PGGRAPH_PLAYGROUND_YES:-0}" == "1" ]]; then
@@ -45,4 +62,4 @@ if [[ "${PREPARE_PLAYGROUND}" == "1" ]]; then
   fi
 fi
 
-python3 "${SCRIPT_DIR}/playground_release_gate.py" "$@"
+python3 "${SCRIPT_DIR}/playground_release_gate.py" --mode "${PLAYGROUND_MODE}" "$@"
