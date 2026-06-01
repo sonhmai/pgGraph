@@ -324,11 +324,6 @@ impl ReturnSlot {
     pub(crate) fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
     }
-
-    /// Return whether this slot needs the executor to retain path details.
-    pub(crate) fn requires_path(&self) -> bool {
-        matches!(self, Self::Path { .. } | Self::PathFunction { .. })
-    }
 }
 
 fn has_aggregate_return(returns: &[ReturnSlot]) -> bool {

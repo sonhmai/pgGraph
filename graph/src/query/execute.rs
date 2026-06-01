@@ -205,12 +205,7 @@ fn expand_targets(
         .returns
         .iter()
         .any(|slot| matches!(slot, ReturnSlot::Relationship { .. }));
-    let returns_path = plan.returns.iter().any(ReturnSlot::requires_path)
-        || plan
-            .distinct_stages
-            .iter()
-            .flatten()
-            .any(ReturnSlot::requires_path);
+    let preserve_path_matches = plan.hops.max > 1;
     let mut seen_result_nodes = std::collections::HashSet::new();
     let mut seen_result_relationships = std::collections::HashSet::new();
     let mut seen_frontier = std::collections::HashSet::from([source_idx]);
@@ -230,13 +225,13 @@ fn expand_targets(
                 {
                     continue;
                 }
-                if returns_path && state.path_nodes.contains(&target.node_idx) {
+                if preserve_path_matches && state.path_nodes.contains(&target.node_idx) {
                     continue;
                 }
                 let next_state = state.push(target);
                 if depth >= plan.hops.min
                     && target_matches(engine, target.node_idx, plan.target_table_oid, tenant)
-                    && (returns_path
+                    && (preserve_path_matches
                         || if returns_relationship {
                             seen_result_relationships.insert((target.node_idx, target.orientation))
                         } else {
@@ -251,7 +246,7 @@ fn expand_targets(
                     });
                 }
                 if depth < plan.hops.max
-                    && (returns_path
+                    && (preserve_path_matches
                         || (seen_frontier.insert(target.node_idx)
                             && seen_next.insert(target.node_idx)))
                 {

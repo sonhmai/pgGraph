@@ -1468,6 +1468,81 @@ fn path_projection_preserves_distinct_paths_to_same_target() {
 }
 
 #[test]
+fn variable_length_cardinality_does_not_depend_on_returning_path_values() {
+    let path_query = lower(bind_query(
+        "MATCH (u:users)-[p:friend*1..2]->(v:users) \
+         WHERE u.id = 'u1' AND v.id = 'u3' RETURN length(p) AS len ORDER BY len",
+    ));
+    let count_query = lower(bind_query(
+        "MATCH (u:users)-[p:friend*1..2]->(v:users) \
+         WHERE u.id = 'u1' AND v.id = 'u3' RETURN count(*) AS paths",
+    ));
+    let mut engine = Engine::new();
+    for pk in ["u1", "u2", "u3"] {
+        let node_idx = engine.node_store.add_node(10, pk.to_string());
+        engine.resolution_insert(10, pk, node_idx);
+        engine.insert_table_membership(10, node_idx);
+    }
+    let friend = engine.register_edge_type("friend").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: friend,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 2,
+                type_id: friend,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+    let hydrated = HashMap::from([
+        (
+            (10, "u1".to_string()),
+            serde_json::json!({"id": "u1", "name": "Ada"}),
+        ),
+        (
+            (10, "u2".to_string()),
+            serde_json::json!({"id": "u2", "name": "Linus"}),
+        ),
+        (
+            (10, "u3".to_string()),
+            serde_json::json!({"id": "u3", "name": "Grace"}),
+        ),
+    ]);
+
+    let path_rows = execute(&engine, &path_query, None).unwrap();
+    let count_rows = execute(&engine, &count_query, None).unwrap();
+    let path_projected =
+        project_rows(path_rows, &path_query, &hydrated, &QueryParams::new(), true).unwrap();
+    let count_projected = project_rows(
+        count_rows,
+        &count_query,
+        &hydrated,
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(path_projected.len(), 2);
+    assert_eq!(count_projected, vec![serde_json::json!({"paths": 2})]);
+}
+
+#[test]
 fn optional_path_functions_return_null_for_unmatched_rows() {
     let logical = bind_query(
         "OPTIONAL MATCH (u:users)-[p:works_at]->(c:companies) \
