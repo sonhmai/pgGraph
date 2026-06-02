@@ -536,13 +536,15 @@ Aggregate behavior:
   according to the aggregate.
 - Aggregate `DISTINCT` is supported.
 
-Wildcard path-variable reads support `RETURN`, `SKIP`, and `LIMIT` in this
+Wildcard path-variable reads support `WHERE`, `RETURN`, `SKIP`, and `LIMIT` in this
 phase. They can bind node variables across fixed paths, bind relationship
 variables for single-hop paths, and use concrete node labels or concrete
-relationship types as filters. They reject `ORDER BY`, `RETURN DISTINCT`,
-`WHERE`, `WITH`, aggregates, optional matches, writes, node properties,
-relationship properties, relationship variables in multi-segment paths, and
-variable-length wildcard paths.
+relationship types as filters. `WHERE` can read properties from named path-node
+variables only when every possible concrete table for that variable exposes the
+same registered property or JSONB property path. They reject `ORDER BY`,
+`RETURN DISTINCT`, `WITH`, aggregates, optional matches, writes, relationship
+properties, relationship variables in multi-segment paths, and variable-length
+wildcard paths.
 
 Multi-pattern reads support fixed single-hop patterns with concrete labels and
 relationship types. Reused node variables join by graph coordinate, independent
@@ -594,8 +596,7 @@ Not included in this release's GQL subset:
 - Aggregate `WITH` projections.
 - Variable-length wildcard path variables.
 - Multi-pattern relationship variables, path variables,
-  deduplication, aggregates, and variable-length relationships.
-- Property predicates inside wildcard path-variable patterns.
+  aggregates, and variable-length relationships.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 

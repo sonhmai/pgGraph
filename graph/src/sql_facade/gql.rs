@@ -265,7 +265,9 @@ pub(super) fn execute_statement(
                 &matches,
                 crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
             )?;
-            crate::query::value::project_wildcard_path_rows(matches, &plan, &hydrated, hydrate)
+            crate::query::value::project_wildcard_path_rows(
+                matches, &plan, &hydrated, params, hydrate,
+            )
         }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {
             check_create_acl(&plan);

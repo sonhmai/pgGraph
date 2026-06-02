@@ -140,6 +140,39 @@ fn binder_accepts_phase1_wildcard_path_functions() {
 }
 
 #[test]
+fn binder_accepts_wildcard_path_common_node_property_predicates() {
+    let plan = bind_statement_query("MATCH p=()-[]->(e) WHERE e.name = $name RETURN p, e");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+
+    assert!(plan.predicate.is_some());
+    assert!(matches!(
+        plan.returns[1],
+        super::logical_plan::ReturnBinding::Node {
+            side: super::logical_plan::BindingSide::PathNode(1),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn binder_rejects_wildcard_path_partially_available_node_property_predicates() {
+    for query in [
+        "MATCH p=()-[]->(e) WHERE e.age > 0 RETURN p",
+        "MATCH p=()-[]->(e) WHERE e.profile.plan = 'pro' RETURN p",
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be available on every possible concrete node label"),
+            "unexpected error for {query}: {err}"
+        );
+    }
+}
+
+#[test]
 fn binder_accepts_phase2_named_path_elements_and_filters() {
     let plan =
         bind_statement_query("MATCH p=(s:users)-[r:works_at]->(e:companies) RETURN p, s, r, e");
@@ -1479,7 +1512,14 @@ fn wildcard_path_executor_projects_actual_relationship_types() {
     };
     let engine = engine_fixture();
     let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
-    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 2);
     assert_eq!(projected[0]["len"], 1);
@@ -1507,7 +1547,14 @@ fn wildcard_path_executor_projects_named_elements_with_concrete_filters() {
     };
     let engine = engine_fixture();
     let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
-    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 2);
     assert_eq!(projected[0]["s"]["_id"]["table"], "users");
@@ -1517,6 +1564,80 @@ fn wildcard_path_executor_projects_named_elements_with_concrete_filters() {
         projected[0]["p"]["_path"]["relationships"][0],
         projected[0]["r"]
     );
+}
+
+#[test]
+fn wildcard_path_predicates_filter_named_unlabeled_nodes_after_hydration() {
+    let statement =
+        bind_statement_query("MATCH p=(s)-[]->(e) WHERE e.name = $company RETURN p, s, e");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    assert!(super::value::wildcard_path_requires_hydration(
+        &physical, false
+    ));
+
+    let rows = execute_wildcard_path(&engine_fixture(), &physical, None).unwrap();
+    let mut params = QueryParams::new();
+    params.insert("company".to_string(), serde_json::json!("Acme"));
+    let projected =
+        project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), &params, false).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["s"]["_id"]["id"], "u1");
+    assert_eq!(projected[0]["e"]["_id"]["id"], "c1");
+    assert!(projected[0]["s"].get("name").is_none());
+}
+
+#[test]
+fn wildcard_path_predicates_error_when_raw_row_cap_is_exceeded() {
+    let statement = bind_statement_query(
+        "MATCH p=(s)-[]->(e:companies) WHERE s.name = 'Nope' RETURN p LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = Engine::new();
+    for idx in 0..10_002 {
+        let user_pk = format!("u{idx}");
+        let company_pk = format!("c{idx}");
+        let user = engine.node_store.add_node(10, user_pk.clone());
+        let company = engine.node_store.add_node(20, company_pk.clone());
+        engine.resolution_insert(10, &user_pk, user);
+        engine.resolution_insert(20, &company_pk, company);
+        engine.insert_table_membership(10, user);
+        engine.insert_table_membership(20, company);
+    }
+    let works_at = engine.register_edge_type("works_at").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        (0..10_002)
+            .map(|idx| RawEdge {
+                source: idx * 2,
+                target: idx * 2 + 1,
+                type_id: works_at,
+                weight: None,
+            })
+            .collect(),
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+    engine.built = true;
+
+    let err = execute_wildcard_path(&engine, &physical, None).unwrap_err();
+
+    assert!(matches!(err, GraphError::GqlExecution { .. }));
+    assert!(err.to_string().contains("row cap"));
 }
 
 #[test]
@@ -1535,9 +1656,14 @@ fn wildcard_path_named_elements_preserve_path_order_and_relationship_orientation
     };
     let engine = engine_fixture();
     let inbound_rows = execute_wildcard_path(&engine, &inbound_physical, None).unwrap();
-    let inbound_projected =
-        project_wildcard_path_rows(inbound_rows, &inbound_physical, &hydrated_fixture(), true)
-            .unwrap();
+    let inbound_projected = project_wildcard_path_rows(
+        inbound_rows,
+        &inbound_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
 
     assert_eq!(inbound_projected.len(), 2);
     assert_eq!(inbound_projected[0]["c"]["_id"]["table"], "companies");
@@ -1571,6 +1697,7 @@ fn wildcard_path_named_elements_preserve_path_order_and_relationship_orientation
         undirected_rows,
         &undirected_physical,
         &hydrated_fixture(),
+        &QueryParams::new(),
         true,
     )
     .unwrap();
@@ -1660,7 +1787,14 @@ fn wildcard_path_executor_projects_fixed_multi_segment_paths() {
     engine.reverse_edge_store = engine.edge_store.reversed();
 
     let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
-    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0]["len"], 2);

@@ -79,3 +79,15 @@
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 115 tests.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 470 tests, 1 ignored.
+
+## 2026-06-02 Phase 3C Wildcard Property Predicate Slice
+
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 8 tests. Includes named unlabeled path-node property filtering and raw row-cap exhaustion for predicate plans.
+- `cargo test --features pg17 query::tests::binder_accepts_wildcard_path_common_node_property_predicates` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::binder_rejects_wildcard_path_partially_available_node_property_predicates` from `graph/`: passed, 1 test.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes wildcard path `WHERE` over an unlabeled target node through `graph.gql()` with `hydrate := false`.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 119 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 474 tests, 1 ignored.

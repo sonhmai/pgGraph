@@ -96,6 +96,7 @@ fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPla
         required_node_table_oids: plan.required_node_table_oids,
         table_labels: plan.table_labels,
         rel_type_labels: plan.rel_type_labels,
+        predicate: plan.predicate,
         skip: plan.skip,
         limit: plan.limit,
     }

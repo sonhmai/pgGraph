@@ -57,6 +57,8 @@ pub(crate) struct LogicalWildcardPathPlan {
     pub(crate) table_labels: BTreeMap<u32, String>,
     /// Relationship type labels that may appear in wildcard output.
     pub(crate) rel_type_labels: BTreeSet<String>,
+    /// Optional hydrated-row predicate over named path-node variables.
+    pub(crate) predicate: Option<Predicate>,
     /// Number of rows to skip after ordering.
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.

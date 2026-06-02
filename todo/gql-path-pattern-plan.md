@@ -458,6 +458,11 @@ Tests:
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 
+Status: compatible path-node property predicates implemented and documented on
+2026-06-02. Verification is recorded in `todo/measurements.md` under
+"Phase 3C Wildcard Property Predicate Slice". Relationship properties and
+partially available or ambiguous node properties remain planned.
+
 Target examples:
 
 ```sql

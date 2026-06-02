@@ -69,16 +69,19 @@ pub(crate) fn project_wildcard_path_rows(
     rows: Vec<GqlRow>,
     plan: &PhysicalWildcardPathPlan,
     hydrated: &HydratedRows,
+    params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
-        projected.push(project_wildcard_path_row(
-            &row,
-            plan,
-            hydrated,
-            hydrate_nodes,
-        )?);
+        if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
+            projected.push(project_wildcard_path_row(
+                &row,
+                plan,
+                hydrated,
+                hydrate_nodes,
+            )?);
+        }
     }
     apply_value_window(&mut projected, plan.skip, plan.limit);
     Ok(projected)
@@ -803,18 +806,19 @@ pub(crate) fn wildcard_path_requires_hydration(
     plan: &PhysicalWildcardPathPlan,
     hydrate_nodes: bool,
 ) -> bool {
-    hydrate_nodes
-        && plan.returns.iter().any(|slot| {
-            matches!(
-                slot,
-                ReturnSlot::Node { .. }
-                    | ReturnSlot::Path { .. }
-                    | ReturnSlot::PathFunction {
-                        func: PathFunc::Nodes,
-                        ..
-                    }
-            )
-        })
+    plan.predicate.is_some()
+        || (hydrate_nodes
+            && plan.returns.iter().any(|slot| {
+                matches!(
+                    slot,
+                    ReturnSlot::Node { .. }
+                        | ReturnSlot::Path { .. }
+                        | ReturnSlot::PathFunction {
+                            func: PathFunc::Nodes,
+                            ..
+                        }
+                )
+            }))
 }
 
 /// Return whether this multi-pattern join plan requires SQL row hydration.

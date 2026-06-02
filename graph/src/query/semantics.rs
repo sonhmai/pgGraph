@@ -598,14 +598,10 @@ fn bind_wildcard_path_read(
             "OPTIONAL MATCH path variables require a later read phase",
         ));
     }
-    if query.where_.is_some()
-        || !query.with_.is_empty()
-        || !query.order_by.is_empty()
-        || query.return_.distinct
-    {
+    if !query.with_.is_empty() || !query.order_by.is_empty() || query.return_.distinct {
         return Err(GqlError::unsupported(
             query.span,
-            "wildcard path variables support only RETURN, SKIP, and LIMIT in this phase",
+            "wildcard path variables support only WHERE, RETURN, SKIP, and LIMIT in this phase",
         ));
     }
     let Pattern {
@@ -689,6 +685,7 @@ fn bind_wildcard_path_read(
     };
     let returns =
         bind_wildcard_path_returns(&query.return_.items, &path_var, start.var.as_ref(), tail)?;
+    let predicate = bind_wildcard_path_predicate(query.where_.as_ref(), start, tail, catalog)?;
     let node_labels = catalog.node_labels();
     let table_labels = node_labels
         .iter()
@@ -717,9 +714,299 @@ fn bind_wildcard_path_read(
         required_node_table_oids,
         table_labels,
         rel_type_labels,
+        predicate,
         skip: query.skip,
         limit: query.limit,
     })
+}
+
+fn bind_wildcard_path_predicate(
+    where_: Option<&Expr>,
+    start: &NodePat,
+    tail: &[(RelPat, NodePat)],
+    catalog: &impl CatalogSnapshot,
+) -> Result<Option<Predicate>, GqlError> {
+    let Some(expr) = where_ else {
+        return Ok(None);
+    };
+    let node_positions = wildcard_node_var_positions(start, tail)?;
+    let possible_tables = possible_wildcard_node_tables(start, tail, catalog)?;
+    let node_labels = catalog.node_labels();
+    let properties_by_table = node_labels
+        .iter()
+        .map(|label| (label.table_oid, label.properties.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    bind_wildcard_expr(
+        expr,
+        &node_positions,
+        &possible_tables,
+        &properties_by_table,
+        0,
+    )
+    .map(Some)
+}
+
+fn wildcard_node_var_positions(
+    start: &NodePat,
+    tail: &[(RelPat, NodePat)],
+) -> Result<std::collections::HashMap<String, usize>, GqlError> {
+    let mut positions = std::collections::HashMap::new();
+    if let Some(var) = &start.var {
+        positions.insert(var.text.clone(), 0);
+    }
+    for (idx, (_, target)) in tail.iter().enumerate() {
+        if let Some(var) = &target.var {
+            if positions.insert(var.text.clone(), idx + 1).is_some() {
+                return Err(GqlError::bind(
+                    var.span,
+                    format!("duplicate variable `{}` in MATCH scope", var.text),
+                ));
+            }
+        }
+    }
+    Ok(positions)
+}
+
+fn possible_wildcard_node_tables(
+    start: &NodePat,
+    tail: &[(RelPat, NodePat)],
+    catalog: &impl CatalogSnapshot,
+) -> Result<Vec<std::collections::BTreeSet<u32>>, GqlError> {
+    let node_labels = catalog.node_labels();
+    let all_tables = node_labels
+        .iter()
+        .map(|label| label.table_oid)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut allowed = Vec::with_capacity(tail.len() + 1);
+    allowed.push(wildcard_allowed_tables_for_node(
+        start,
+        catalog,
+        &all_tables,
+    )?);
+    for (_, target) in tail {
+        allowed.push(wildcard_allowed_tables_for_node(
+            target,
+            catalog,
+            &all_tables,
+        )?);
+    }
+
+    let rels = catalog.rel_types();
+    let segment_pairs = tail
+        .iter()
+        .map(|(rel, _)| wildcard_segment_table_pairs(rel, &rels))
+        .collect::<Vec<_>>();
+    let mut possible = vec![std::collections::BTreeSet::new(); tail.len() + 1];
+    let mut path = Vec::with_capacity(tail.len() + 1);
+    for table_oid in &allowed[0] {
+        path.clear();
+        path.push(*table_oid);
+        collect_possible_wildcard_table_paths(
+            0,
+            *table_oid,
+            &allowed,
+            &segment_pairs,
+            &mut path,
+            &mut possible,
+        );
+    }
+    Ok(possible)
+}
+
+fn wildcard_allowed_tables_for_node(
+    node: &NodePat,
+    catalog: &impl CatalogSnapshot,
+    all_tables: &std::collections::BTreeSet<u32>,
+) -> Result<std::collections::BTreeSet<u32>, GqlError> {
+    node.label.as_ref().map_or_else(
+        || Ok(all_tables.clone()),
+        |label| {
+            catalog
+                .resolve_node_label(&label.text, label.span)
+                .map(|info| [info.table_oid].into_iter().collect())
+        },
+    )
+}
+
+fn wildcard_segment_table_pairs(
+    rel: &RelPat,
+    rels: &[super::catalog_snapshot::RelTypeInfo],
+) -> Vec<(u32, u32)> {
+    let mut pairs = std::collections::BTreeSet::new();
+    for rel_info in rels {
+        if rel
+            .rel_type
+            .as_ref()
+            .is_some_and(|filter| filter.text != rel_info.rel_type)
+        {
+            continue;
+        }
+        match rel.direction {
+            Direction::Out => {
+                pairs.insert((rel_info.from_table_oid, rel_info.to_table_oid));
+            }
+            Direction::In => {
+                pairs.insert((rel_info.to_table_oid, rel_info.from_table_oid));
+            }
+            Direction::Undirected => {
+                pairs.insert((rel_info.from_table_oid, rel_info.to_table_oid));
+                pairs.insert((rel_info.to_table_oid, rel_info.from_table_oid));
+            }
+        }
+    }
+    pairs.into_iter().collect()
+}
+
+fn collect_possible_wildcard_table_paths(
+    segment_idx: usize,
+    current_table: u32,
+    allowed: &[std::collections::BTreeSet<u32>],
+    segment_pairs: &[Vec<(u32, u32)>],
+    path: &mut Vec<u32>,
+    possible: &mut [std::collections::BTreeSet<u32>],
+) {
+    let Some(pairs) = segment_pairs.get(segment_idx) else {
+        for (idx, table_oid) in path.iter().enumerate() {
+            possible[idx].insert(*table_oid);
+        }
+        return;
+    };
+    for (from_table_oid, to_table_oid) in pairs {
+        if *from_table_oid != current_table || !allowed[segment_idx + 1].contains(to_table_oid) {
+            continue;
+        }
+        path.push(*to_table_oid);
+        collect_possible_wildcard_table_paths(
+            segment_idx + 1,
+            *to_table_oid,
+            allowed,
+            segment_pairs,
+            path,
+            possible,
+        );
+        path.pop();
+    }
+}
+
+fn bind_wildcard_expr(
+    expr: &Expr,
+    node_positions: &std::collections::HashMap<String, usize>,
+    possible_tables: &[std::collections::BTreeSet<u32>],
+    properties_by_table: &std::collections::HashMap<u32, std::collections::BTreeSet<String>>,
+    depth: usize,
+) -> Result<Predicate, GqlError> {
+    if depth > MAX_BOUND_PREDICATE_DEPTH {
+        return Err(GqlError::syntax(
+            expr_span(expr),
+            "predicate expression is too deeply nested",
+        ));
+    }
+    match expr {
+        Expr::And { lhs, rhs, .. } => Ok(Predicate::And(
+            Box::new(bind_wildcard_expr(
+                lhs,
+                node_positions,
+                possible_tables,
+                properties_by_table,
+                depth + 1,
+            )?),
+            Box::new(bind_wildcard_expr(
+                rhs,
+                node_positions,
+                possible_tables,
+                properties_by_table,
+                depth + 1,
+            )?),
+        )),
+        Expr::Or { lhs, rhs, .. } => Ok(Predicate::Or(
+            Box::new(bind_wildcard_expr(
+                lhs,
+                node_positions,
+                possible_tables,
+                properties_by_table,
+                depth + 1,
+            )?),
+            Box::new(bind_wildcard_expr(
+                rhs,
+                node_positions,
+                possible_tables,
+                properties_by_table,
+                depth + 1,
+            )?),
+        )),
+        Expr::Not { expr, .. } => Ok(Predicate::Not(Box::new(bind_wildcard_expr(
+            expr,
+            node_positions,
+            possible_tables,
+            properties_by_table,
+            depth + 1,
+        )?))),
+        Expr::Compare { lhs, op, rhs, .. } => Ok(Predicate::Compare {
+            lhs: bind_wildcard_operand(lhs, node_positions, possible_tables, properties_by_table)?,
+            op: bind_cmp_op(*op),
+            rhs: rhs
+                .as_ref()
+                .map(|operand| {
+                    bind_wildcard_operand(
+                        operand,
+                        node_positions,
+                        possible_tables,
+                        properties_by_table,
+                    )
+                })
+                .transpose()?,
+        }),
+    }
+}
+
+fn bind_wildcard_operand(
+    operand: &Operand,
+    node_positions: &std::collections::HashMap<String, usize>,
+    possible_tables: &[std::collections::BTreeSet<u32>],
+    properties_by_table: &std::collections::HashMap<u32, std::collections::BTreeSet<String>>,
+) -> Result<ValueExpr, GqlError> {
+    match operand {
+        Operand::Property {
+            var,
+            property,
+            span: _,
+        } => {
+            let node_idx = node_positions.get(&var.text).copied().ok_or_else(|| {
+                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
+            })?;
+            let possible = possible_tables.get(node_idx).ok_or_else(|| {
+                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
+            })?;
+            if possible.is_empty() {
+                return Err(GqlError::unsupported(
+                    property.span,
+                    "wildcard property predicates require at least one possible concrete node label",
+                ));
+            }
+            if possible.iter().any(|table_oid| {
+                !properties_by_table
+                    .get(table_oid)
+                    .is_some_and(|properties| properties.contains(&property.text))
+            }) {
+                return Err(GqlError::unsupported(
+                    property.span,
+                    format!(
+                        "wildcard property `{}` must be available on every possible concrete node label",
+                        property.text
+                    ),
+                ));
+            }
+            Ok(ValueExpr::Property {
+                side: BindingSide::PathNode(node_idx),
+                property: property.text.clone(),
+            })
+        }
+        Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
+        Operand::Param { name, .. } => Ok(ValueExpr::Param(name.text.clone())),
+        Operand::List { values, .. } => {
+            Ok(ValueExpr::List(values.iter().map(literal_json).collect()))
+        }
+    }
 }
 
 fn bind_wildcard_node_filter(
