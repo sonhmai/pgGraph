@@ -82,6 +82,8 @@ pub(crate) struct PhysicalWildcardPathSegment {
     pub(crate) target_var: Option<String>,
     /// Traversal direction requested by the relationship pattern.
     pub(crate) direction: BoundDirection,
+    /// Hop bounds for this segment.
+    pub(crate) hops: HopBounds,
     /// Optional target-table filter.
     pub(crate) target_table_filter: Option<u32>,
     /// Optional relationship type filter.

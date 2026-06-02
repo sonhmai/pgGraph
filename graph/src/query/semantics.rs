@@ -621,17 +621,38 @@ fn bind_wildcard_path_read(
             "wildcard path variables require at least one relationship",
         ));
     }
+    if tail.len() > 1 && tail.iter().any(|(rel, _)| rel.var_len.is_some()) {
+        return Err(GqlError::unsupported(
+            query.match_.pattern.span,
+            "variable-length wildcard paths with multiple segments require a later phase",
+        ));
+    }
     let source_table_filter = bind_wildcard_node_filter(start, catalog)?;
     let mut segments = Vec::with_capacity(tail.len());
     let mut previous_table_filter = source_table_filter;
     for (rel, target) in tail {
         let target_table_filter = bind_wildcard_node_filter(target, catalog)?;
         let rel_type_filter = bind_wildcard_relationship_filter(rel, catalog)?;
+        let hops = bind_hops(rel)?;
         if tail.len() > 1 && rel.var.is_some() {
             return Err(GqlError::unsupported(
                 rel.span,
                 "relationship variables in multi-segment path variables require a later phase",
             ));
+        }
+        if rel.var_len.is_some() {
+            if rel.var.is_some() {
+                return Err(GqlError::unsupported(
+                    rel.span,
+                    "relationship variables on variable-length wildcard paths require a later phase",
+                ));
+            }
+            if target.var.is_some() {
+                return Err(GqlError::unsupported(
+                    target.span,
+                    "named target nodes on variable-length wildcard paths require a later phase",
+                ));
+            }
         }
         if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
             previous_table_filter,
@@ -667,6 +688,7 @@ fn bind_wildcard_path_read(
             rel_var: rel.var.as_ref().map(|var| var.text.clone()),
             target_var: target.var.as_ref().map(|var| var.text.clone()),
             direction: bind_direction(rel.direction),
+            hops,
             target_table_filter,
             rel_type_filter,
         });
@@ -1033,10 +1055,10 @@ fn bind_wildcard_relationship_filter(
     rel: &RelPat,
     catalog: &impl CatalogSnapshot,
 ) -> Result<Option<String>, GqlError> {
-    if rel.var_len.is_some() || !rel.props.is_empty() {
+    if !rel.props.is_empty() {
         return Err(GqlError::unsupported(
             rel.span,
-            "wildcard path variables cannot bind relationship properties or variable-length bounds in this phase",
+            "wildcard path variables cannot bind relationship properties in this phase",
         ));
     }
     let Some(rel_type) = &rel.rel_type else {

@@ -400,22 +400,77 @@ fn expand_wildcard_segment(
         rows.push(project_wildcard_path_state(engine, state)?);
         return Ok(());
     };
+    expand_wildcard_segment_hops(
+        engine,
+        neighbors,
+        plan,
+        segment_filters,
+        tenant,
+        segment,
+        state,
+        segment_idx,
+        0,
+        rows,
+        seen_paths,
+        row_cap,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_wildcard_segment_hops(
+    engine: &Engine,
+    neighbors: &GqlNeighbors<'_>,
+    plan: &PhysicalWildcardPathPlan,
+    segment_filters: &[Option<u8>],
+    tenant: Option<&str>,
+    segment: &PhysicalWildcardPathSegment,
+    state: PathState,
+    segment_idx: usize,
+    hop_count: u32,
+    rows: &mut Vec<GqlRow>,
+    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    row_cap: usize,
+) -> GraphResult<()> {
+    if hop_count >= segment.hops.min {
+        if wildcard_segment_endpoint_matches(engine, segment, state.node_idx, tenant) {
+            expand_wildcard_segment(
+                engine,
+                neighbors,
+                plan,
+                segment_filters,
+                tenant,
+                state.clone(),
+                segment_idx + 1,
+                rows,
+                seen_paths,
+                row_cap,
+            )?;
+            if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+                return Ok(());
+            }
+        }
+    }
+    if hop_count >= segment.hops.max {
+        return Ok(());
+    }
     for target in neighbors.for_direction_any(segment.direction, state.node_idx) {
         if segment_filters[segment_idx].is_some_and(|type_id| target.type_id != type_id) {
             continue;
         }
-        if !wildcard_target_matches(engine, segment, target.node_idx, tenant) {
+        if !wildcard_node_visible(engine, target.node_idx, tenant) {
             continue;
         }
         let next_state = state.push(target);
-        expand_wildcard_segment(
+        expand_wildcard_segment_hops(
             engine,
             neighbors,
             plan,
             segment_filters,
             tenant,
+            segment,
             next_state,
-            segment_idx + 1,
+            segment_idx,
+            hop_count + 1,
             rows,
             seen_paths,
             row_cap,
@@ -427,15 +482,19 @@ fn expand_wildcard_segment(
     Ok(())
 }
 
-fn wildcard_target_matches(
+fn wildcard_node_visible(engine: &Engine, target_idx: u32, tenant: Option<&str>) -> bool {
+    engine.node_store.is_active(target_idx)
+        && !crate::projection::tx_delta::node_deleted(target_idx)
+        && tenant_allows_node(engine, target_idx, tenant)
+}
+
+fn wildcard_segment_endpoint_matches(
     engine: &Engine,
     segment: &PhysicalWildcardPathSegment,
     target_idx: u32,
     tenant: Option<&str>,
 ) -> bool {
-    engine.node_store.is_active(target_idx)
-        && !crate::projection::tx_delta::node_deleted(target_idx)
-        && tenant_allows_node(engine, target_idx, tenant)
+    wildcard_node_visible(engine, target_idx, tenant)
         && segment
             .target_table_filter
             .is_none_or(|table_oid| engine.node_store.table_oid(target_idx) == table_oid)

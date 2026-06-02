@@ -212,6 +212,19 @@ fn binder_accepts_phase2_named_path_elements_and_filters() {
 }
 
 #[test]
+fn binder_accepts_variable_length_wildcard_path_without_element_variables() {
+    let plan = bind_statement_query("MATCH p=()-[*1..3]->() RETURN p, length(p) AS len");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+
+    assert_eq!(plan.segments.len(), 1);
+    assert!(plan.segments[0].hops.variable);
+    assert_eq!(plan.segments[0].hops.min, 1);
+    assert_eq!(plan.segments[0].hops.max, 3);
+}
+
+#[test]
 fn binder_rejects_phase2_duplicate_path_element_names() {
     for query in [
         "MATCH p=(p)-[]->() RETURN p",
@@ -234,7 +247,6 @@ fn binder_rejects_unsupported_wildcard_path_shapes() {
     for query in [
         "MATCH p=({id: 'u1'})-[]->() RETURN p",
         "MATCH p=()-[{id: 'r1'}]->() RETURN p",
-        "MATCH p=()-[*1..3]->() RETURN p",
         "MATCH p=()-[]->() WHERE p.id = 'x' RETURN p",
         "MATCH p=()-[]->() RETURN count(*)",
         "MATCH p=()-[]->() RETURN DISTINCT p",
@@ -249,6 +261,31 @@ fn binder_rejects_unsupported_wildcard_path_shapes() {
                 GqlErrorKind::Unsupported { .. } | GqlErrorKind::Bind { .. }
             ),
             "unexpected error for {query}: {err}"
+        );
+    }
+}
+
+#[test]
+fn binder_rejects_deferred_variable_length_wildcard_bindings() {
+    for (query, expected) in [
+        (
+            "MATCH p=()-[r*1..3]->() RETURN p",
+            "relationship variables on variable-length wildcard paths",
+        ),
+        (
+            "MATCH p=()-[*1..3]->(e) RETURN p",
+            "named target nodes on variable-length wildcard paths",
+        ),
+        (
+            "MATCH p=()-[*1..3]->()-[]->() RETURN p",
+            "variable-length wildcard paths with multiple segments",
+        ),
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "expected `{expected}` for {query}, got {err}"
         );
     }
 }
@@ -1812,6 +1849,174 @@ fn wildcard_path_executor_projects_fixed_multi_segment_paths() {
         projected[0]["p"]["_path"]["relationships"][1]["_type"],
         "works_at"
     );
+}
+
+#[test]
+fn wildcard_path_executor_projects_bounded_variable_length_paths() {
+    let statement = bind_statement_query(
+        "MATCH p=()-[:works_at*1..2]->() RETURN length(p) AS len, relationships(p) AS rs",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 3);
+    assert_eq!(projected.iter().filter(|row| row["len"] == 1).count(), 2);
+    let two_hop = projected
+        .iter()
+        .find(|row| row["len"] == 2)
+        .expect("two-hop path missing");
+    assert_eq!(two_hop["rs"].as_array().unwrap().len(), 2);
+    assert_eq!(two_hop["rs"][0]["_type"], "works_at");
+    assert_eq!(two_hop["rs"][1]["_type"], "works_at");
+}
+
+#[test]
+fn wildcard_path_variable_length_target_label_filters_only_emitted_endpoint() {
+    let statement = bind_statement_query("MATCH p=()-[*2..2]->(:users) RETURN length(p) AS len");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["len"], 2);
+}
+
+#[test]
+fn wildcard_path_executor_bounds_variable_length_walks() {
+    let statement = bind_statement_query(
+        "MATCH p=()-[*1..2]->() RETURN length(p) AS len, relationships(p) AS rs",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 1,
+                target: 0,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 4);
+    assert_eq!(projected.iter().filter(|row| row["len"] == 1).count(), 2);
+    assert_eq!(projected.iter().filter(|row| row["len"] == 2).count(), 2);
+    assert!(projected
+        .iter()
+        .all(|row| row["rs"].as_array().unwrap().len() == row["len"].as_u64().unwrap() as usize));
 }
 
 #[test]

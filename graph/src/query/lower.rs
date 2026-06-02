@@ -107,6 +107,7 @@ fn lower_wildcard_path_segment(segment: LogicalWildcardPathSegment) -> PhysicalW
         rel_var: segment.rel_var,
         target_var: segment.target_var,
         direction: segment.direction,
+        hops: segment.hops,
         target_table_filter: segment.target_table_filter,
         rel_type_filter: segment.rel_type_filter,
     }

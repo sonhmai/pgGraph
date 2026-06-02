@@ -486,6 +486,14 @@ Tests:
 
 ### Phase 3D: Variable-Length Wildcard Paths
 
+Status: bounded single-segment wildcard variable-length path variables
+implemented and documented on 2026-06-02 using bounded walk semantics. Nodes and
+relationships may repeat within the explicit maximum hop bound, and row caps are
+enforced before projection. Verification is recorded in `todo/measurements.md`
+under "Phase 3D Variable-Length Wildcard Path Slice". Named node/relationship
+variables on variable-length wildcard segments, multi-segment variable-length
+wildcard paths, and type alternation remain planned.
+
 Target examples:
 
 ```sql
@@ -497,7 +505,7 @@ Architectural plan:
 
 - Generalize path expansion to allow a relationship selector per hop.
 - Store actual relationship type metadata for every step.
-- Define simple-path or walk semantics before implementation.
+- Use bounded walk semantics for this first wildcard variable-length slice.
 - Enforce maximum hop bounds and row caps before projection.
 - Benchmark wildcard variable-length expansion separately from concrete variable-length expansion.
 

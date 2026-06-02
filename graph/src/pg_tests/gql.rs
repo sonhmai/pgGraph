@@ -1007,6 +1007,8 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         unhydrated_join_property_matches,
         wildcard_predicate_rows,
         wildcard_predicate_coordinate_only,
+        wildcard_var_len_rows,
+        wildcard_var_len_shape,
         shape_matches,
         coordinate_only_has_name,
     ) =
@@ -1075,6 +1077,14 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                              params := '{\"target\":\"Bob\"}'::jsonb,
                              hydrate := false
                          )
+                     ),
+                     wildcard_var_len AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH p=()-[*1..2]->()
+                              RETURN p, length(p) AS len, relationships(p) AS rs',
+                             hydrate := false
+                         )
                      )
                      SELECT count(*)::bigint,
                             count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend')::bigint,
@@ -1106,6 +1116,12 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                                 AND row->'e' ? '_id'
                                 AND NOT (row->'e' ? 'name')
                              ) FROM wildcard_predicate),
+                            (SELECT count(*)::bigint FROM wildcard_var_len),
+                            (SELECT bool_and(
+                                (row->>'len')::bigint BETWEEN 1 AND 2
+                                AND jsonb_array_length(row->'rs') = (row->>'len')::integer
+                                AND row->'p'->'_path'->'relationships' = row->'rs'
+                             ) FROM wildcard_var_len),
                             bool_and(
                                 (row->>'len')::bigint = 1
                                 AND row->'p'->'_path'->'nodes' = row->'ns'
@@ -1154,10 +1170,16 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                 row.get::<bool>(11)
                     .expect("wildcard predicate shape read failed")
                     .unwrap_or(false),
-                row.get::<bool>(12)
+                row.get::<i64>(12)
+                    .expect("wildcard var-len row count read failed")
+                    .unwrap_or_default(),
+                row.get::<bool>(13)
+                    .expect("wildcard var-len shape read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(14)
                     .expect("shape equality read failed")
                     .unwrap_or(false),
-                row.get::<bool>(13)
+                row.get::<bool>(15)
                     .expect("coordinate-only shape read failed")
                     .unwrap_or(true),
             ))
@@ -1181,6 +1203,11 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         "unexpected wildcard predicate count"
     );
     assert!(wildcard_predicate_coordinate_only);
+    assert!(
+        wildcard_var_len_rows >= row_count,
+        "unexpected wildcard var-len count: {wildcard_var_len_rows}"
+    );
+    assert!(wildcard_var_len_shape);
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);
 }
