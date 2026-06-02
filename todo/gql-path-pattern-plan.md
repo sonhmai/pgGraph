@@ -395,6 +395,9 @@ Phase 3 is where the deferred reviewer-adjacent capabilities belong. These are v
 
 ### Phase 3A: Multi-Relationship Fixed Patterns
 
+Status: implemented and documented on 2026-06-02. Verification is recorded in
+`todo/measurements.md` under "Phase 3A Fixed Multi-Segment Slice".
+
 Target examples:
 
 ```sql

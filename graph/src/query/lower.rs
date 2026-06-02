@@ -3,13 +3,14 @@
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
     LogicalDetachDeleteNode, LogicalMergeNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
-    LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan, ReturnBinding,
+    LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan, LogicalWildcardPathSegment,
+    ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
     PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalMergeNode, PhysicalNodeScan,
     PhysicalPlan, PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement,
-    PhysicalWildcardPathPlan, ReturnSlot,
+    PhysicalWildcardPathPlan, PhysicalWildcardPathSegment, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -50,11 +51,26 @@ fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPla
         source_table_filter: plan.source_table_filter,
         target_table_filter: plan.target_table_filter,
         rel_type_filter: plan.rel_type_filter,
+        segments: plan
+            .segments
+            .into_iter()
+            .map(lower_wildcard_path_segment)
+            .collect(),
         required_node_table_oids: plan.required_node_table_oids,
         table_labels: plan.table_labels,
         rel_type_labels: plan.rel_type_labels,
         skip: plan.skip,
         limit: plan.limit,
+    }
+}
+
+fn lower_wildcard_path_segment(segment: LogicalWildcardPathSegment) -> PhysicalWildcardPathSegment {
+    PhysicalWildcardPathSegment {
+        rel_var: segment.rel_var,
+        target_var: segment.target_var,
+        direction: segment.direction,
+        target_table_filter: segment.target_table_filter,
+        rel_type_filter: segment.rel_type_filter,
     }
 }
 

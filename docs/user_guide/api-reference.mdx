@@ -497,8 +497,9 @@ Read pattern support:
 
 - Node-only `MATCH`.
 - Single-relationship graph patterns.
-- Single-hop path variables: `MATCH p=()-[]->()`,
-  `MATCH p=(s)-[r]->(e)`, `MATCH p=()<-[]-()`, and `MATCH p=()-[]-()`.
+- Fixed path variables: `MATCH p=()-[]->()`,
+  `MATCH p=(s)-[r]->(e)`, `MATCH p=()<-[]-()`,
+  `MATCH p=()-[]-()`, and `MATCH p=(a)-[]->(b)-[]->(c)`.
 - Top-level single-relationship `OPTIONAL MATCH`.
 
 Optional matches return matched relationship rows, and emit one null-extended
@@ -511,7 +512,8 @@ Return value support:
 - JSONB list/map properties, including dotted paths such as `u.profile.plan`.
 - Coordinate-only single-hop relationship identities.
 - Bounded relationship path values with a minimum of at least one hop.
-- Single-hop path values, including named node and relationship variables.
+- Fixed path values, including named node variables and single-hop named
+  relationship variables.
 - `RETURN DISTINCT` for non-wildcard path reads.
 - `RETURN` aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`.
 
@@ -530,16 +532,18 @@ Aggregate behavior:
 - Aggregate `DISTINCT` is supported.
 
 Wildcard path-variable reads support `RETURN`, `SKIP`, and `LIMIT` in this
-phase. They can bind node and relationship variables and can use concrete node
-labels or a concrete relationship type as filters. They reject `ORDER BY`,
-`RETURN DISTINCT`, `WHERE`, `WITH`, aggregates, optional matches, writes, node
-properties, relationship properties, and variable-length wildcard paths.
+phase. They can bind node variables across fixed paths, bind relationship
+variables for single-hop paths, and use concrete node labels or concrete
+relationship types as filters. They reject `ORDER BY`, `RETURN DISTINCT`,
+`WHERE`, `WITH`, aggregates, optional matches, writes, node properties,
+relationship properties, relationship variables in multi-segment paths, and
+variable-length wildcard paths.
 
 Path behavior:
 
 - Named relationship patterns can be returned as path objects with
   `_path.nodes` and `_path.relationships`.
-- Single-hop path variables return the same path object shape while scanning
+- Fixed path variables return the same path object shape while scanning
   all registered edge labels or applying the concrete labels/types in the
   pattern.
 - `nodes(path)`, `relationships(path)`, and `length(path)` return those
@@ -572,7 +576,7 @@ Not included in this release's GQL subset:
 - Relationship source-row hydration.
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
-- Multi-segment and variable-length wildcard path variables.
+- Variable-length wildcard path variables.
 - Property predicates inside wildcard path-variable patterns.
 - Node-only optional matches.
 - Multi-pattern optional joins.

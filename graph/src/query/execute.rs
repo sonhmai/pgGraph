@@ -8,7 +8,10 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 use super::logical_plan::BoundDirection;
-use super::physical_plan::{PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, ReturnSlot};
+use super::physical_plan::{
+    PhysicalNodeScan, PhysicalPlan, PhysicalWildcardPathPlan, PhysicalWildcardPathSegment,
+    ReturnSlot,
+};
 
 /// Coordinate-only node value returned by Phase 1B.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,14 +190,20 @@ pub(crate) fn execute_wildcard_path(
         return Err(GraphError::NotBuilt);
     }
     let neighbors = GqlNeighbors::new(engine);
-    let rel_type_filter = plan
-        .rel_type_filter
-        .as_deref()
-        .map(|rel_type| edge_type_id(engine, rel_type))
-        .transpose()?;
+    let segment_filters = plan
+        .segments
+        .iter()
+        .map(|segment| {
+            segment
+                .rel_type_filter
+                .as_deref()
+                .map(|rel_type| edge_type_id(engine, rel_type))
+                .transpose()
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
     let row_cap = plan.execution_row_cap();
     let mut rows = Vec::new();
-    let mut seen_relationships = std::collections::HashSet::new();
+    let mut seen_paths = std::collections::HashSet::new();
     let scan_table_oids: Vec<u32> = plan.source_table_filter.map_or_else(
         || plan.required_node_table_oids.iter().copied().collect(),
         |oid| vec![oid],
@@ -206,49 +215,130 @@ pub(crate) fn execute_wildcard_path(
             {
                 continue;
             }
-            for target in neighbors.for_direction_any(plan.direction, source_idx) {
-                if rel_type_filter.is_some_and(|type_id| target.type_id != type_id) {
-                    continue;
-                }
-                if !engine.node_store.is_active(target.node_idx)
-                    || crate::projection::tx_delta::node_deleted(target.node_idx)
-                    || !tenant_allows_node(engine, target.node_idx, tenant)
-                {
-                    continue;
-                }
-                if plan.target_table_filter.is_some_and(|table_oid| {
-                    engine.node_store.table_oid(target.node_idx) != table_oid
-                }) {
-                    continue;
-                }
-                let (rel_start_idx, rel_end_idx) = match target.orientation {
-                    EdgeOrientation::Forward => (source_idx, target.node_idx),
-                    EdgeOrientation::Reverse => (target.node_idx, source_idx),
-                };
-                if plan.direction == BoundDirection::Undirected
-                    && !seen_relationships.insert((rel_start_idx, rel_end_idx, target.type_id))
-                {
-                    continue;
-                }
-                if rows.len() >= row_cap {
-                    if plan.cap_exhaustion_is_error() {
-                        return Err(GraphError::GqlExecution {
-                            reason: format!("GQL result row cap exceeded ({row_cap})"),
-                        });
-                    }
-                    return Ok(rows);
-                }
-                rows.push(project_wildcard_row(
-                    engine,
-                    source_idx,
-                    target.node_idx,
-                    target.orientation,
-                    target.type_id,
-                )?);
-            }
+            expand_wildcard_segments(
+                engine,
+                &neighbors,
+                plan,
+                &segment_filters,
+                tenant,
+                source_idx,
+                &mut rows,
+                &mut seen_paths,
+                row_cap,
+            )?;
         }
     }
     Ok(rows)
+}
+
+fn expand_wildcard_segments(
+    engine: &Engine,
+    neighbors: &GqlNeighbors<'_>,
+    plan: &PhysicalWildcardPathPlan,
+    segment_filters: &[Option<u8>],
+    tenant: Option<&str>,
+    source_idx: u32,
+    rows: &mut Vec<GqlRow>,
+    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    row_cap: usize,
+) -> GraphResult<()> {
+    let state = PathState {
+        node_idx: source_idx,
+        path_nodes: vec![source_idx],
+        path_relationships: Vec::new(),
+    };
+    expand_wildcard_segment(
+        engine,
+        neighbors,
+        plan,
+        segment_filters,
+        tenant,
+        state,
+        0,
+        rows,
+        seen_paths,
+        row_cap,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_wildcard_segment(
+    engine: &Engine,
+    neighbors: &GqlNeighbors<'_>,
+    plan: &PhysicalWildcardPathPlan,
+    segment_filters: &[Option<u8>],
+    tenant: Option<&str>,
+    state: PathState,
+    segment_idx: usize,
+    rows: &mut Vec<GqlRow>,
+    seen_paths: &mut std::collections::HashSet<Vec<(u32, u32, u8)>>,
+    row_cap: usize,
+) -> GraphResult<()> {
+    let Some(segment) = plan.segments.get(segment_idx) else {
+        let path_key = state
+            .path_relationships
+            .iter()
+            .map(|relationship| {
+                let (rel_start_idx, rel_end_idx) = match relationship.orientation {
+                    EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
+                    EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
+                };
+                (rel_start_idx, rel_end_idx, relationship.type_id)
+            })
+            .collect::<Vec<_>>();
+        if !seen_paths.insert(path_key) {
+            return Ok(());
+        }
+        if rows.len() >= row_cap {
+            if plan.cap_exhaustion_is_error() {
+                return Err(GraphError::GqlExecution {
+                    reason: format!("GQL result row cap exceeded ({row_cap})"),
+                });
+            }
+            return Ok(());
+        }
+        rows.push(project_wildcard_path_state(engine, state)?);
+        return Ok(());
+    };
+    for target in neighbors.for_direction_any(segment.direction, state.node_idx) {
+        if segment_filters[segment_idx].is_some_and(|type_id| target.type_id != type_id) {
+            continue;
+        }
+        if !wildcard_target_matches(engine, segment, target.node_idx, tenant) {
+            continue;
+        }
+        let next_state = state.push(target);
+        expand_wildcard_segment(
+            engine,
+            neighbors,
+            plan,
+            segment_filters,
+            tenant,
+            next_state,
+            segment_idx + 1,
+            rows,
+            seen_paths,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && rows.len() >= row_cap {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn wildcard_target_matches(
+    engine: &Engine,
+    segment: &PhysicalWildcardPathSegment,
+    target_idx: u32,
+    tenant: Option<&str>,
+) -> bool {
+    engine.node_store.is_active(target_idx)
+        && !crate::projection::tx_delta::node_deleted(target_idx)
+        && tenant_allows_node(engine, target_idx, tenant)
+        && segment
+            .target_table_filter
+            .is_none_or(|table_oid| engine.node_store.table_oid(target_idx) == table_oid)
 }
 
 fn edge_type_id(engine: &Engine, rel_type: &str) -> GraphResult<u8> {
@@ -614,33 +704,44 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
     })
 }
 
-fn project_wildcard_row(
-    engine: &Engine,
-    source_idx: u32,
-    target_idx: u32,
-    orientation: EdgeOrientation,
-    type_id: u8,
-) -> GraphResult<GqlRow> {
-    let (rel_start_idx, rel_end_idx) = match orientation {
-        EdgeOrientation::Forward => (source_idx, target_idx),
-        EdgeOrientation::Reverse => (target_idx, source_idx),
+fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult<GqlRow> {
+    let path_nodes = state
+        .path_nodes
+        .iter()
+        .map(|node_idx| coordinate(engine, *node_idx))
+        .collect::<Vec<_>>();
+    let Some(source) = path_nodes.first().cloned() else {
+        return Err(GraphError::GqlExecution {
+            reason: "wildcard path state has no source node".to_string(),
+        });
     };
-    let source = coordinate(engine, source_idx);
-    let target = coordinate(engine, target_idx);
-    let rel_start = coordinate(engine, rel_start_idx);
-    let rel_end = coordinate(engine, rel_end_idx);
-    let rel_type = edge_type_label(engine, type_id)?;
+    let target = path_nodes.last().cloned();
+    let path_relationships = state
+        .path_relationships
+        .iter()
+        .map(|relationship| {
+            let (start_idx, end_idx) = match relationship.orientation {
+                EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
+                EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
+            };
+            Ok(GqlPathRelationship {
+                rel_type: edge_type_label(engine, relationship.type_id)?,
+                start: coordinate(engine, start_idx),
+                end: coordinate(engine, end_idx),
+            })
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    let (rel_start, rel_end) = path_relationships
+        .first()
+        .map(|relationship| (relationship.start.clone(), relationship.end.clone()))
+        .unzip();
     Ok(GqlRow {
-        source: source.clone(),
-        target: Some(target.clone()),
-        rel_start: Some(rel_start.clone()),
-        rel_end: Some(rel_end.clone()),
-        path_nodes: vec![source, target],
-        path_relationships: vec![GqlPathRelationship {
-            rel_type,
-            start: rel_start,
-            end: rel_end,
-        }],
+        source,
+        target,
+        rel_start,
+        rel_end,
+        path_nodes,
+        path_relationships,
     })
 }
 

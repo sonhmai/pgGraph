@@ -28,3 +28,13 @@
 - `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 5 tests.
 - `cargo test --features pg17` from `graph/`: passed, 458 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.
+
+## 2026-06-02 Phase 3A Fixed Multi-Segment Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::wildcard_path_` from `graph/`: passed, 6 tests.
+- `cargo test --features pg17 query::tests::binder_rejects_multi_segment_wildcard_relationship_variables` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 106 tests.
+- `cargo test --features pg17` from `graph/`: passed, 460 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.

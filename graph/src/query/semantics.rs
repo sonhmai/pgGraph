@@ -12,8 +12,8 @@ use super::logical_plan::{
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
     HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalMergeNode,
     LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
-    LogicalWildcardPathPlan, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey,
-    ValueExpr,
+    LogicalWildcardPathPlan, LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding,
+    SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -204,61 +204,76 @@ fn bind_wildcard_path_read(
         .expect("caller only routes path-variable patterns")
         .text
         .clone();
-    let [(rel, target)] = tail.as_slice() else {
+    if tail.is_empty() {
         return Err(GqlError::unsupported(
             query.match_.pattern.span,
-            "wildcard path variables support exactly one relationship in this phase",
+            "wildcard path variables require at least one relationship",
         ));
-    };
+    }
     let source_table_filter = bind_wildcard_node_filter(start, catalog)?;
-    let target_table_filter = bind_wildcard_node_filter(target, catalog)?;
-    let rel_type_filter = bind_wildcard_relationship_filter(rel, catalog)?;
-    if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
-        source_table_filter,
-        target_table_filter,
-        rel_type_filter.as_ref(),
-    ) {
-        let source = BoundNode {
-            var: start
-                .var
+    let mut segments = Vec::with_capacity(tail.len());
+    let mut previous_table_filter = source_table_filter;
+    for (rel, target) in tail {
+        let target_table_filter = bind_wildcard_node_filter(target, catalog)?;
+        let rel_type_filter = bind_wildcard_relationship_filter(rel, catalog)?;
+        if tail.len() > 1 && rel.var.is_some() {
+            return Err(GqlError::unsupported(
+                rel.span,
+                "relationship variables in multi-segment path variables require a later phase",
+            ));
+        }
+        if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
+            previous_table_filter,
+            target_table_filter,
+            rel_type_filter.as_ref(),
+        ) {
+            let source = BoundNode {
+                var: String::new(),
+                label: String::new(),
+                table_oid: source_table_oid,
+                properties: std::collections::BTreeSet::new(),
+            };
+            let target_node = BoundNode {
+                var: target
+                    .var
+                    .as_ref()
+                    .map_or_else(String::new, |var| var.text.clone()),
+                label: target
+                    .label
+                    .as_ref()
+                    .map_or_else(String::new, |label| label.text.clone()),
+                table_oid: target_table_oid,
+                properties: std::collections::BTreeSet::new(),
+            };
+            let rel_ident = rel
+                .rel_type
                 .as_ref()
-                .map_or_else(String::new, |var| var.text.clone()),
-            label: start
-                .label
-                .as_ref()
-                .map_or_else(String::new, |label| label.text.clone()),
-            table_oid: source_table_oid,
-            properties: std::collections::BTreeSet::new(),
-        };
-        let target = BoundNode {
-            var: target
-                .var
-                .as_ref()
-                .map_or_else(String::new, |var| var.text.clone()),
-            label: target
-                .label
-                .as_ref()
-                .map_or_else(String::new, |label| label.text.clone()),
-            table_oid: target_table_oid,
-            properties: std::collections::BTreeSet::new(),
-        };
-        let rel_ident = rel
-            .rel_type
-            .as_ref()
-            .expect("rel_type_filter came from rel");
-        resolve_relationship(catalog, rel, rel_ident, &source, &target)?;
-        debug_assert_eq!(rel_type, &rel_ident.text);
+                .expect("rel_type_filter came from rel");
+            resolve_relationship(catalog, rel, rel_ident, &source, &target_node)?;
+            debug_assert_eq!(rel_type, &rel_ident.text);
+        }
+        segments.push(LogicalWildcardPathSegment {
+            rel_var: rel.var.as_ref().map(|var| var.text.clone()),
+            target_var: target.var.as_ref().map(|var| var.text.clone()),
+            direction: bind_direction(rel.direction),
+            target_table_filter,
+            rel_type_filter,
+        });
+        previous_table_filter = target_table_filter;
     }
     let source_var = start.var.as_ref().map(|var| var.text.clone());
-    let rel_var = rel.var.as_ref().map(|var| var.text.clone());
-    let target_var = target.var.as_ref().map(|var| var.text.clone());
-    let returns = bind_wildcard_path_returns(
-        &query.return_.items,
-        &path_var,
-        start.var.as_ref(),
-        rel.var.as_ref(),
-        target.var.as_ref(),
-    )?;
+    let (rel_var, target_var, direction, target_table_filter, rel_type_filter) = {
+        let first_segment = &segments[0];
+        (
+            first_segment.rel_var.clone(),
+            first_segment.target_var.clone(),
+            first_segment.direction,
+            first_segment.target_table_filter,
+            first_segment.rel_type_filter.clone(),
+        )
+    };
+    let returns =
+        bind_wildcard_path_returns(&query.return_.items, &path_var, start.var.as_ref(), tail)?;
     let node_labels = catalog.node_labels();
     let table_labels = node_labels
         .iter()
@@ -278,11 +293,12 @@ fn bind_wildcard_path_read(
         source_var,
         rel_var,
         target_var,
-        direction: bind_direction(rel.direction),
+        direction,
         returns,
         source_table_filter,
         target_table_filter,
         rel_type_filter,
+        segments,
         required_node_table_oids,
         table_labels,
         rel_type_labels,
@@ -341,28 +357,29 @@ fn bind_wildcard_path_returns(
     items: &[ReturnItem],
     path_var: &str,
     source_var: Option<&ast::Ident>,
-    rel_var: Option<&ast::Ident>,
-    target_var: Option<&ast::Ident>,
+    tail: &[(RelPat, NodePat)],
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut scope = BindingScope::from([(path_var.to_string(), ScopedBinding::Path)]);
     insert_wildcard_binding(
         &mut scope,
         path_var,
         source_var,
-        ScopedBinding::Node(BindingSide::Source),
+        ScopedBinding::Node(BindingSide::PathNode(0)),
     )?;
-    insert_wildcard_binding(
-        &mut scope,
-        path_var,
-        rel_var,
-        ScopedBinding::Relationship { var_len: false },
-    )?;
-    insert_wildcard_binding(
-        &mut scope,
-        path_var,
-        target_var,
-        ScopedBinding::Node(BindingSide::Target),
-    )?;
+    for (idx, (rel, target)) in tail.iter().enumerate() {
+        insert_wildcard_binding(
+            &mut scope,
+            path_var,
+            rel.var.as_ref(),
+            ScopedBinding::Relationship { var_len: false },
+        )?;
+        insert_wildcard_binding(
+            &mut scope,
+            path_var,
+            target.var.as_ref(),
+            ScopedBinding::Node(BindingSide::PathNode(idx + 1)),
+        )?;
+    }
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut bindings = Vec::with_capacity(items.len());
     for item in items {
@@ -1891,6 +1908,12 @@ fn validate_property(
     let properties = match side {
         BindingSide::Source => &source.properties,
         BindingSide::Target => &target.properties,
+        BindingSide::PathNode(_) => {
+            return Err(GqlError::unsupported(
+                span,
+                "property references over multi-segment path variables require a later phase",
+            ));
+        }
     };
     if properties.contains(property) {
         Ok(())

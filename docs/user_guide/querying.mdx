@@ -69,7 +69,7 @@ Supported read coverage:
 
 | Area | Supported behavior |
 |---|---|
-| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, one single-hop path variable such as `MATCH p=(s)-[r]->(e)`, or top-level single-relationship `OPTIONAL MATCH` |
+| Pattern | One node-only `MATCH` pattern, one graph pattern with two node variables and one relationship pattern, fixed path variables such as `MATCH p=(a)-[]->(b)-[]->(c)`, or top-level single-relationship `OPTIONAL MATCH` |
 | Labels and types | Node labels map to registered table names; relationship types map to registered edge labels |
 | Direction | Outbound, inbound, and undirected relationship patterns |
 | Variable length | Bounded variable-length relationships with an explicit maximum and minimum of at least one hop |
@@ -154,8 +154,9 @@ Path values are JSON objects with a `_path` member:
 }
 ```
 
-Single-hop path variables can scan every registered edge label and return path
-values. Named node and relationship variables are optional:
+Fixed path variables can scan every registered edge label and return path
+values. Named node variables are supported across the path. Relationship
+variables are supported for single-hop path variables:
 
 ```sql
 SELECT row
@@ -166,13 +167,14 @@ FROM graph.gql(
 );
 ```
 
-The supported wildcard forms are outbound `p=()-[]->()`, inbound
-`p=()<-[]-()`, and undirected `p=()-[]-()`. The same single-hop shape can bind
-node and relationship variables and can use concrete node labels or a concrete
-relationship type as filters. This phase intentionally keeps property predicates
-and later clauses narrow: node properties, relationship properties, `WHERE`,
-`WITH`, `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes, and
-variable-length wildcard paths are rejected for wildcard path-variable reads.
+The supported wildcard forms include outbound `p=()-[]->()`, inbound
+`p=()<-[]-()`, undirected `p=()-[]-()`, and fixed multi-segment chains such as
+`p=()-[]->()-[]->()`. These shapes can use concrete node labels or concrete
+relationship types as filters. This phase intentionally keeps property
+predicates and later clauses narrow: node properties, relationship properties,
+`WHERE`, `WITH`, `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches,
+writes, relationship variables in multi-segment paths, and variable-length
+wildcard paths are rejected for wildcard path-variable reads.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and
@@ -213,7 +215,7 @@ Other read semantics:
   result cap.
 - Bounded relationship variables return path objects with `_path.nodes` and
   `_path.relationships`.
-- Single-hop path variables return the same path object shape, with each
+- Fixed path variables return the same path object shape, with each
   relationship carrying its actual registered edge label.
 - `nodes`, `relationships`, and `length` expose path components directly.
 
@@ -227,7 +229,8 @@ Planned outside this subset:
 - Relationship source-row hydration.
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
-- Multi-segment and variable-length wildcard path variables.
+- Variable-length wildcard path variables.
+- Multi-pattern joins.
 - Property predicates inside wildcard path-variable patterns.
 - Multi-pattern optional joins.
 

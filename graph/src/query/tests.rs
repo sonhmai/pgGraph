@@ -160,7 +160,7 @@ fn binder_accepts_phase2_named_path_elements_and_filters() {
     assert!(matches!(
         plan.returns[1],
         super::logical_plan::ReturnBinding::Node {
-            side: super::logical_plan::BindingSide::Source,
+            side: super::logical_plan::BindingSide::PathNode(0),
             ..
         }
     ));
@@ -171,7 +171,7 @@ fn binder_accepts_phase2_named_path_elements_and_filters() {
     assert!(matches!(
         plan.returns[3],
         super::logical_plan::ReturnBinding::Node {
-            side: super::logical_plan::BindingSide::Target,
+            side: super::logical_plan::BindingSide::PathNode(1),
             ..
         }
     ));
@@ -217,6 +217,18 @@ fn binder_rejects_unsupported_wildcard_path_shapes() {
             "unexpected error for {query}: {err}"
         );
     }
+}
+
+#[test]
+fn binder_rejects_multi_segment_wildcard_relationship_variables() {
+    let ast = crate::gql::parse_statement("MATCH p=()-[]->()-[r]->() RETURN r").unwrap();
+    let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("relationship variables in multi-segment path variables"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -1273,6 +1285,66 @@ fn wildcard_path_hydration_is_needed_only_for_node_outputs() {
     assert!(!super::value::wildcard_path_requires_hydration(
         &physical, false
     ));
+}
+
+#[test]
+fn wildcard_path_executor_projects_fixed_multi_segment_paths() {
+    let statement = bind_statement_query(
+        "MATCH p=(a:users)-[:works_at]->(b)-[]->(c) RETURN p, a, b, c, length(p) AS len",
+    );
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let mut engine = engine_fixture();
+    let works_at = engine
+        .edge_type_registry
+        .iter()
+        .position(|label| label == "works_at")
+        .expect("works_at edge type missing") as u8;
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 2,
+                type_id: works_at,
+                weight: None,
+            },
+            RawEdge {
+                source: 2,
+                target: 1,
+                type_id: works_at,
+                weight: None,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["len"], 2);
+    assert_eq!(projected[0]["a"]["_id"]["id"], "u1");
+    assert_eq!(projected[0]["b"]["_id"]["id"], "c1");
+    assert_eq!(projected[0]["c"]["_id"]["id"], "u2");
+    assert_eq!(projected[0]["p"]["_path"]["nodes"][0], projected[0]["a"]);
+    assert_eq!(projected[0]["p"]["_path"]["nodes"][1], projected[0]["b"]);
+    assert_eq!(projected[0]["p"]["_path"]["nodes"][2], projected[0]["c"]);
+    assert_eq!(
+        projected[0]["p"]["_path"]["relationships"][0]["_type"],
+        "works_at"
+    );
+    assert_eq!(
+        projected[0]["p"]["_path"]["relationships"][1]["_type"],
+        "works_at"
+    );
 }
 
 #[test]

@@ -1583,6 +1583,7 @@ fn coordinate(row: &GqlRow, side: BindingSide) -> Option<&GqlNodeCoordinate> {
     match side {
         BindingSide::Source => Some(&row.source),
         BindingSide::Target => row.target.as_ref(),
+        BindingSide::PathNode(idx) => row.path_nodes.get(idx),
     }
 }
 
@@ -1590,6 +1591,9 @@ fn label(plan: &PhysicalPlan, side: BindingSide) -> &str {
     match side {
         BindingSide::Source => &plan.source_label,
         BindingSide::Target => &plan.target_label,
+        BindingSide::PathNode(_) => {
+            unreachable!("path-node bindings are not used by one-hop plans")
+        }
     }
 }
 

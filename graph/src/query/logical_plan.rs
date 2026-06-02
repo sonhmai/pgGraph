@@ -47,6 +47,8 @@ pub(crate) struct LogicalWildcardPathPlan {
     pub(crate) target_table_filter: Option<u32>,
     /// Optional relationship type filter.
     pub(crate) rel_type_filter: Option<String>,
+    /// Fixed relationship segments in path order.
+    pub(crate) segments: Vec<LogicalWildcardPathSegment>,
     /// Source-table OIDs requiring ACL checks before wildcard expansion.
     pub(crate) required_node_table_oids: BTreeSet<u32>,
     /// GQL labels keyed by source-table OID.
@@ -57,6 +59,21 @@ pub(crate) struct LogicalWildcardPathPlan {
     pub(crate) skip: Option<u64>,
     /// Maximum rows to return.
     pub(crate) limit: Option<u64>,
+}
+
+/// One fixed segment in a wildcard path variable plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalWildcardPathSegment {
+    /// Optional relationship variable for this segment.
+    pub(crate) rel_var: Option<String>,
+    /// Optional target node variable for this segment.
+    pub(crate) target_var: Option<String>,
+    /// Traversal direction requested by the relationship pattern.
+    pub(crate) direction: BoundDirection,
+    /// Optional target-table filter.
+    pub(crate) target_table_filter: Option<u32>,
+    /// Optional relationship type filter.
+    pub(crate) rel_type_filter: Option<String>,
 }
 
 /// Bound read-only logical query.
@@ -449,6 +466,8 @@ pub(crate) enum BindingSide {
     Source,
     /// Target node.
     Target,
+    /// Node at a path-position index.
+    PathNode(usize),
 }
 
 /// Bound boolean predicate.
