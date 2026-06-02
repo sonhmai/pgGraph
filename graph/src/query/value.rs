@@ -106,6 +106,9 @@ pub(crate) fn project_join_rows(
             });
         }
     }
+    if plan.distinct {
+        dedup_projected_rows(&mut projected)?;
+    }
     sort_and_window(&mut projected, plan.skip, plan.limit);
     Ok(projected.into_iter().map(|row| row.row).collect())
 }

@@ -518,7 +518,8 @@ Return value support:
 - Bounded relationship path values with a minimum of at least one hop.
 - Fixed path values, including named node variables and single-hop named
   relationship variables.
-- `RETURN DISTINCT` for non-wildcard path reads.
+- `RETURN DISTINCT` for non-wildcard path reads, including projected rows from
+  supported multi-pattern joins.
 - `RETURN` aggregates: `count`, `sum`, `avg`, `min`, `max`, and `collect`.
 
 JSONB arrays and objects keep their JSON shape. A missing key inside a JSONB
@@ -548,9 +549,11 @@ relationship types. Reused node variables join by graph coordinate, independent
 patterns produce Cartesian combinations up to the GQL result cap, joined
 node-property `WHERE` predicates filter after all referenced slots are bound,
 `ORDER BY` can sort joined node properties or returned property aliases, and
-`SKIP` and `LIMIT` apply after projection. Multi-pattern reads currently reject
-relationship variables, path variables, `WITH`, `RETURN DISTINCT`, aggregates,
-optional matches, variable-length relationships, and relationship properties.
+`RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
+multi-pattern reads must order by returned scalar expressions. Multi-pattern
+reads currently reject relationship variables, path variables, `WITH`,
+aggregates, optional matches, variable-length relationships, and relationship
+properties.
 
 Path behavior:
 

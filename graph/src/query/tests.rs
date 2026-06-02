@@ -1379,6 +1379,38 @@ fn multi_pattern_join_ordering_errors_when_raw_row_cap_is_exceeded() {
 }
 
 #[test]
+fn multi_pattern_join_distinct_deduplicates_projected_rows() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) \
+         RETURN DISTINCT v.name AS peer ORDER BY peer",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert!(logical.distinct);
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["peer"], "Ada");
+    assert_eq!(projected[1]["peer"], "Linus");
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -1406,8 +1438,8 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "WITH over multi-pattern joins requires a later phase",
         ),
         (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT u",
-            "RETURN DISTINCT over multi-pattern joins requires a later phase",
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT v.name AS peer ORDER BY u.name",
+            "DISTINCT queries must ORDER BY returned scalar expressions",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(*)",

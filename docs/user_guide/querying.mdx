@@ -76,10 +76,10 @@ Supported read coverage:
 | Predicates | Property comparisons, null checks, membership, boolean combinations, JSONB `$parameters`, and dotted paths into registered JSONB property columns |
 | Return values | Node values, scalar properties, JSONB list/map properties, coordinate-only single-hop relationship identities, bounded relationship path values, aggregate values, and JSON `null` for unmatched optional targets or relationships |
 | Projection stages | `WITH` can project node variables and scalar properties into the downstream `RETURN` scope, including aliases, shadowing, and `WITH DISTINCT` row-stream deduplication |
-| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads with a bounded in-memory key set |
+| Deduplication | `RETURN DISTINCT`, `WITH DISTINCT`, and aggregate `DISTINCT` are supported for non-wildcard path reads, including projected rows from supported multi-pattern joins, with a bounded in-memory key set |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max`, and `collect` in `RETURN`; non-aggregate return items are implicit grouping keys |
 | Path functions | `nodes(path)`, `relationships(path)`, and `length(path)` over named relationship patterns and single-hop wildcard path variables |
-| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT` for single-pattern non-wildcard reads, and `SKIP`/`LIMIT` for wildcard path and multi-pattern reads, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
+| Ordering and pagination | `ORDER BY`, `SKIP`, and `LIMIT` for single-pattern non-wildcard reads; `ORDER BY`, `SKIP`, and `LIMIT` for supported multi-pattern reads; and `SKIP`/`LIMIT` for wildcard path reads, with the hard GQL row cap still enforced; `RETURN DISTINCT` must order by returned scalar expressions |
 
 ### GQL JSONB result format
 
@@ -201,10 +201,12 @@ node variable may omit the label or repeat the same label, and it joins by the
 graph coordinate. Independent patterns produce Cartesian combinations up to the
 GQL result cap. This slice supports node and node-property returns, joined
 node-property `WHERE` predicates, `ORDER BY` over joined node properties or
-returned property aliases, and `SKIP`/`LIMIT`; relationship variables, path
-variables, `WITH`, `RETURN DISTINCT`, aggregates, optional multi-pattern joins,
-variable-length relationships, and relationship properties in multi-pattern
-joins remain outside the current subset.
+returned property aliases, projected-row `RETURN DISTINCT`, and `SKIP`/`LIMIT`.
+When `RETURN DISTINCT` is combined with `ORDER BY`, the sort keys must be
+returned scalar expressions. Relationship variables, path variables, `WITH`,
+aggregates, optional multi-pattern joins, variable-length relationships, and
+relationship properties in multi-pattern joins remain outside the current
+subset.
 
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`

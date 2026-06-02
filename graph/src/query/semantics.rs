@@ -192,12 +192,6 @@ fn bind_join_read(
             "WITH over multi-pattern joins requires a later phase",
         ));
     }
-    if query.return_.distinct {
-        return Err(GqlError::unsupported(
-            query.return_.span,
-            "RETURN DISTINCT over multi-pattern joins requires a later phase",
-        ));
-    }
     validate_row_window(query)?;
 
     let mut node_slots = Vec::new();
@@ -254,12 +248,19 @@ fn bind_join_read(
 
     let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
     let returns = bind_join_returns(&query.return_.items, &node_slots, &slot_by_var)?;
-    let order_by = bind_join_sort_items(&query.order_by, &returns, &node_slots, &slot_by_var)?;
+    let order_by = bind_join_sort_items(
+        &query.order_by,
+        &returns,
+        &node_slots,
+        &slot_by_var,
+        query.return_.distinct,
+    )?;
     let required_table_oids = node_slots.iter().map(|slot| slot.table_oid).collect();
     Ok(LogicalJoinPlan {
         node_slots,
         patterns,
         returns,
+        distinct: query.return_.distinct,
         predicate,
         order_by,
         required_table_oids,
@@ -431,6 +432,7 @@ fn bind_join_sort_items(
     returns: &[ReturnBinding],
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
+    return_distinct: bool,
 ) -> Result<Vec<SortBinding>, GqlError> {
     items
         .iter()
@@ -459,6 +461,23 @@ fn bind_join_sort_items(
                     property,
                     span: _,
                 } => {
+                    if return_distinct {
+                        if let Some(binding) = returned_join_property_binding(
+                            returns,
+                            slot_by_var,
+                            &var.text,
+                            &property.text,
+                        ) {
+                            return Ok(SortBinding {
+                                key: SortBindingKey::ReturnName(binding.name().to_string()),
+                                desc: item.desc,
+                            });
+                        }
+                        return Err(GqlError::unsupported(
+                            item.span,
+                            "DISTINCT queries must ORDER BY returned scalar expressions",
+                        ));
+                    }
                     let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
                         GqlError::bind(
                             var.span,
@@ -486,6 +505,25 @@ fn bind_join_sort_items(
             })
         })
         .collect()
+}
+
+fn returned_join_property_binding<'a>(
+    returns: &'a [ReturnBinding],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+    var: &str,
+    property: &str,
+) -> Option<&'a ReturnBinding> {
+    let slot = slot_by_var.get(var)?;
+    returns.iter().find(|binding| {
+        matches!(
+            binding,
+            ReturnBinding::Property {
+                side: BindingSide::PathNode(binding_slot),
+                property: binding_property,
+                ..
+            } if binding_slot == slot && binding_property == property
+        )
+    })
 }
 
 fn bind_join_returns(

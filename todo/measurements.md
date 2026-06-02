@@ -69,3 +69,13 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 469 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.
+
+## 2026-06-02 Phase 3B Multi-Pattern DISTINCT Slice
+
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 9 tests. Includes projected-row `RETURN DISTINCT` deduplication and the unsupported `DISTINCT ORDER BY` non-returned-property regression.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 115 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 470 tests, 1 ignored.

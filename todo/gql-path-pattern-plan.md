@@ -428,9 +428,9 @@ Status: initial fixed single-hop join slice implemented and documented on
 patterns produce Cartesian combinations under the result cap, and node/node
 property returns with joined node-property `WHERE` predicates and `SKIP`/`LIMIT`
 are supported, including `ORDER BY` over joined node properties or returned
-property aliases. Relationship variables, path variables, later clauses beyond
-ordering, optional joins, and variable-length relationships remain planned
-within this phase.
+property aliases and projected-row `RETURN DISTINCT`. Relationship variables,
+path variables, `WITH`, aggregates, optional joins, and variable-length
+relationships remain planned within this phase.
 
 Target examples:
 
@@ -453,6 +453,8 @@ Tests:
 - Independent patterns produce expected Cartesian behavior under row caps.
 - Conflicting labels/types on reused variables fail with a binding error.
 - Predicates over variables from different patterns are evaluated after both bindings exist.
+- Projected-row `RETURN DISTINCT` deduplicates after projection and before
+  ordering/windowing.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 

@@ -136,6 +136,8 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) patterns: Vec<PhysicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
@@ -490,7 +492,7 @@ impl PhysicalJoinPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
-        if self.predicate.is_none() && self.order_by.is_empty() {
+        if !self.distinct && self.predicate.is_none() && self.order_by.is_empty() {
             if let Some(limit) = self.limit {
                 let requested = self.skip.unwrap_or(0).saturating_add(limit);
                 return usize::try_from(requested)
@@ -503,7 +505,10 @@ impl PhysicalJoinPlan {
 
     /// Whether hitting the execution cap means results would be incomplete.
     pub(crate) fn cap_exhaustion_is_error(&self) -> bool {
-        self.limit.is_none() || self.predicate.is_some() || !self.order_by.is_empty()
+        self.limit.is_none()
+            || self.distinct
+            || self.predicate.is_some()
+            || !self.order_by.is_empty()
     }
 }
 

@@ -135,6 +135,8 @@ pub(crate) struct LogicalJoinPlan {
     pub(crate) patterns: Vec<LogicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+    /// Whether final projected rows should be deduplicated.
+    pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
     pub(crate) predicate: Option<Predicate>,
     /// Sort keys in requested order.
