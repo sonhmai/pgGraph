@@ -254,7 +254,7 @@ pub(super) fn execute_statement(
                 &matches,
                 crate::query::value::join_requires_hydration(&plan, hydrate),
             )?;
-            crate::query::value::project_join_rows(matches, &plan, &hydrated, hydrate)
+            crate::query::value::project_join_rows(matches, &plan, &hydrated, params, hydrate)
         }
         crate::query::physical_plan::PhysicalStatement::WildcardPathRead(plan) => {
             check_wildcard_path_acl(&plan);

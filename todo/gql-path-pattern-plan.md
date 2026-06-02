@@ -426,9 +426,9 @@ Tests:
 Status: initial fixed single-hop join slice implemented and documented on
 2026-06-02. Reused node variables join by graph coordinate, independent
 patterns produce Cartesian combinations under the result cap, and node/node
-property returns with `SKIP`/`LIMIT` are supported. Relationship variables,
-path variables, predicates, later clauses, optional joins, and variable-length
-relationships remain planned within this phase.
+property returns with joined node-property `WHERE` predicates and `SKIP`/`LIMIT`
+are supported. Relationship variables, path variables, later clauses, optional
+joins, and variable-length relationships remain planned within this phase.
 
 Target examples:
 

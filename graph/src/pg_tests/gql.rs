@@ -1003,6 +1003,7 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
         named_shape_matches,
         join_rows,
         join_shape_matches,
+        join_predicate_matches,
         unhydrated_join_property_matches,
         shape_matches,
         coordinate_only_has_name,
@@ -1043,6 +1044,17 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                              hydrate := true
                          )
                      ),
+                     joined_friend_predicate AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                                    (v:graph_test_users_pgtest)-[:friend]->(c)
+                              WHERE c.name = $target
+                              RETURN u.name AS source, v.name AS peer, c.name AS target',
+                             params := '{\"target\":\"Bob\"}'::jsonb,
+                             hydrate := false
+                         )
+                     ),
                      joined_friend_unhydrated_property AS (
                          SELECT row
                          FROM graph.gql(
@@ -1067,6 +1079,11 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                                 row->>'source' = row->>'peer'
                                 AND row->>'target' = 'Bob'
                              ) FROM joined_friend),
+                            (SELECT bool_and(
+                                row->>'source' = 'Alice'
+                                AND row->>'peer' = 'Alice'
+                                AND row->>'target' = 'Bob'
+                             ) FROM joined_friend_predicate),
                             (SELECT bool_and(
                                 row->>'source' = 'Alice'
                                 AND row->>'target' = 'Bob'
@@ -1108,12 +1125,15 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                     .expect("join shape read failed")
                     .unwrap_or(false),
                 row.get::<bool>(8)
-                    .expect("unhydrated join property read failed")
+                    .expect("join predicate read failed")
                     .unwrap_or(false),
                 row.get::<bool>(9)
-                    .expect("shape equality read failed")
+                    .expect("unhydrated join property read failed")
                     .unwrap_or(false),
                 row.get::<bool>(10)
+                    .expect("shape equality read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(11)
                     .expect("coordinate-only shape read failed")
                     .unwrap_or(true),
             ))
@@ -1130,6 +1150,7 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     assert!(named_shape_matches);
     assert_eq!(join_rows, 1, "unexpected multi-pattern join count");
     assert!(join_shape_matches);
+    assert!(join_predicate_matches);
     assert!(unhydrated_join_property_matches);
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);

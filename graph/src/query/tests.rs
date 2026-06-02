@@ -1153,7 +1153,14 @@ fn multi_pattern_join_reuses_node_variables_by_coordinate() {
     };
 
     let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
-    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 2);
     assert_eq!(projected[0]["source"], "Ada");
@@ -1180,7 +1187,14 @@ fn multi_pattern_join_independent_patterns_are_cartesian() {
     };
 
     let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
-    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), false).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 3);
     assert_eq!(projected[0]["u"]["_id"]["id"], "u1");
@@ -1207,11 +1221,80 @@ fn multi_pattern_join_applies_skip_before_limit() {
     };
 
     let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
-    let projected = project_join_rows(rows, &physical, &hydrated_fixture(), false).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0]["u"]["_id"]["id"], "u1");
     assert_eq!(projected[0]["v"]["_id"]["id"], "u2");
+}
+
+#[test]
+fn multi_pattern_join_filters_predicates_after_slots_bind() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WHERE c.name = $company AND v.name = 'Linus' \
+         RETURN u.name AS source, v.name AS peer, c.name AS company",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert!(logical.predicate.is_some());
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    let mut params = QueryParams::new();
+    params.insert("company".into(), serde_json::json!("Bell"));
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected =
+        project_join_rows(rows, &physical, &hydrated_fixture(), &params, false).unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source"], "Linus");
+    assert_eq!(projected[0]["peer"], "Linus");
+    assert_eq!(projected[0]["company"], "Bell");
+}
+
+#[test]
+fn multi_pattern_join_limit_does_not_hide_later_predicate_matches() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(d:companies) \
+         WHERE v.name = 'Linus' \
+         RETURN u.name AS source, v.name AS peer LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source"], "Ada");
+    assert_eq!(projected[0]["peer"], "Linus");
 }
 
 #[test]
@@ -1238,16 +1321,12 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "multi-pattern OPTIONAL MATCH requires a later join phase",
         ),
         (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WHERE u.age > 1 RETURN u",
-            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
-        ),
-        (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH u RETURN u",
-            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+            "WITH and ORDER BY over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u ORDER BY u.name",
-            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+            "WITH and ORDER BY over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN DISTINCT u",

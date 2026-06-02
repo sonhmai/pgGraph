@@ -94,11 +94,14 @@ pub(crate) fn project_join_rows(
     rows: Vec<GqlRow>,
     plan: &PhysicalJoinPlan,
     hydrated: &HydratedRows,
+    params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
-        projected.push(project_join_row(&row, plan, hydrated, hydrate_nodes)?);
+        if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
+            projected.push(project_join_row(&row, plan, hydrated, hydrate_nodes)?);
+        }
     }
     apply_value_window(&mut projected, plan.skip, plan.limit);
     Ok(projected)
@@ -810,7 +813,12 @@ pub(crate) fn wildcard_path_requires_hydration(
 
 /// Return whether this multi-pattern join plan requires SQL row hydration.
 pub(crate) fn join_requires_hydration(plan: &PhysicalJoinPlan, hydrate_nodes: bool) -> bool {
-    hydrate_nodes || plan.returns.iter().any(return_slot_requires_hydration)
+    hydrate_nodes
+        || plan.returns.iter().any(return_slot_requires_hydration)
+        || plan
+            .predicate
+            .as_ref()
+            .is_some_and(predicate_requires_hydration)
 }
 
 fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {
@@ -822,6 +830,23 @@ fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {
                 ..
             }
     )
+}
+
+fn predicate_requires_hydration(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::And(lhs, rhs) | Predicate::Or(lhs, rhs) => {
+            predicate_requires_hydration(lhs) || predicate_requires_hydration(rhs)
+        }
+        Predicate::Not(expr) => predicate_requires_hydration(expr),
+        Predicate::Compare { lhs, rhs, .. } => {
+            value_expr_requires_hydration(lhs)
+                || rhs.as_ref().is_some_and(value_expr_requires_hydration)
+        }
+    }
+}
+
+fn value_expr_requires_hydration(expr: &ValueExpr) -> bool {
+    matches!(expr, ValueExpr::Property { .. })
 }
 
 #[derive(Debug)]

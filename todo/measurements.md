@@ -49,3 +49,13 @@
 - `cargo test --features pg17 query::tests::` from `graph/`: passed, 110 tests.
 - `cargo test --features pg17` from `graph/`: passed, 465 tests, 1 ignored.
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes unhydrated multi-pattern property projection through `graph.gql()`.
+
+## 2026-06-02 Phase 3B Multi-Pattern Predicate Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 6 tests. Includes joined node-property `WHERE` predicates, JSON parameter evaluation, and a regression that `LIMIT` does not hide later predicate matches.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 112 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 467 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes parameterized multi-pattern `WHERE` projection through `graph.gql()`.

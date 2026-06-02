@@ -186,10 +186,10 @@ fn bind_join_read(
             "multi-pattern OPTIONAL MATCH requires a later join phase",
         ));
     }
-    if query.where_.is_some() || !query.with_.is_empty() || !query.order_by.is_empty() {
+    if !query.with_.is_empty() || !query.order_by.is_empty() {
         return Err(GqlError::unsupported(
             query.span,
-            "WHERE, WITH, and ORDER BY over multi-pattern joins require a later phase",
+            "WITH and ORDER BY over multi-pattern joins require a later phase",
         ));
     }
     if query.return_.distinct {
@@ -252,12 +252,14 @@ fn bind_join_read(
         });
     }
 
+    let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
     let returns = bind_join_returns(&query.return_.items, &node_slots, &slot_by_var)?;
     let required_table_oids = node_slots.iter().map(|slot| slot.table_oid).collect();
     Ok(LogicalJoinPlan {
         node_slots,
         patterns,
         returns,
+        predicate,
         required_table_oids,
         skip: query.skip,
         limit: query.limit,
@@ -336,6 +338,90 @@ fn validate_join_relationship(
     };
     resolve_relationship(catalog, rel, rel_type, &source, &target)?;
     Ok(())
+}
+
+fn bind_join_predicate(
+    where_: Option<&Expr>,
+    node_slots: &[LogicalJoinNodeSlot],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+) -> Result<Option<Predicate>, GqlError> {
+    where_
+        .map(|expr| bind_join_expr(expr, node_slots, slot_by_var, 0))
+        .transpose()
+}
+
+fn bind_join_expr(
+    expr: &Expr,
+    node_slots: &[LogicalJoinNodeSlot],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+    depth: usize,
+) -> Result<Predicate, GqlError> {
+    if depth > MAX_BOUND_PREDICATE_DEPTH {
+        return Err(GqlError::syntax(
+            expr_span(expr),
+            "predicate expression is too deeply nested",
+        ));
+    }
+    match expr {
+        Expr::And { lhs, rhs, .. } => Ok(Predicate::And(
+            Box::new(bind_join_expr(lhs, node_slots, slot_by_var, depth + 1)?),
+            Box::new(bind_join_expr(rhs, node_slots, slot_by_var, depth + 1)?),
+        )),
+        Expr::Or { lhs, rhs, .. } => Ok(Predicate::Or(
+            Box::new(bind_join_expr(lhs, node_slots, slot_by_var, depth + 1)?),
+            Box::new(bind_join_expr(rhs, node_slots, slot_by_var, depth + 1)?),
+        )),
+        Expr::Not { expr, .. } => Ok(Predicate::Not(Box::new(bind_join_expr(
+            expr,
+            node_slots,
+            slot_by_var,
+            depth + 1,
+        )?))),
+        Expr::Compare { lhs, op, rhs, .. } => Ok(Predicate::Compare {
+            lhs: bind_join_operand(lhs, node_slots, slot_by_var)?,
+            op: bind_cmp_op(*op),
+            rhs: rhs
+                .as_ref()
+                .map(|operand| bind_join_operand(operand, node_slots, slot_by_var))
+                .transpose()?,
+        }),
+    }
+}
+
+fn bind_join_operand(
+    operand: &Operand,
+    node_slots: &[LogicalJoinNodeSlot],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+) -> Result<ValueExpr, GqlError> {
+    match operand {
+        Operand::Property {
+            var,
+            property,
+            span: _,
+        } => {
+            let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
+            })?;
+            if !node_slots[slot].properties.contains(&property.text) {
+                return Err(GqlError::bind(
+                    property.span,
+                    format!(
+                        "unknown property `{}` for label `{}`",
+                        property.text, node_slots[slot].label
+                    ),
+                ));
+            }
+            Ok(ValueExpr::Property {
+                side: BindingSide::PathNode(slot),
+                property: property.text.clone(),
+            })
+        }
+        Operand::Literal(literal) => Ok(ValueExpr::Literal(literal_json(literal))),
+        Operand::Param { name, .. } => Ok(ValueExpr::Param(name.text.clone())),
+        Operand::List { values, .. } => {
+            Ok(ValueExpr::List(values.iter().map(literal_json).collect()))
+        }
+    }
 }
 
 fn bind_join_returns(
