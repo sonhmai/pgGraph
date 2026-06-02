@@ -1611,15 +1611,87 @@ fn multi_pattern_join_distinct_deduplicates_projected_rows() {
 }
 
 #[test]
+fn multi_pattern_join_projects_relationship_variables() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[r:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN u.name AS source, r, v.name AS peer ORDER BY source, peer LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert_eq!(logical.rel_slots.len(), 1);
+    assert_eq!(logical.rel_slots[0].var, "r");
+    assert_eq!(logical.rel_slots[0].pattern_slot, 0);
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0]["source"], "Ada");
+    assert_eq!(projected[0]["peer"], "Ada");
+    assert_eq!(projected[0]["r"]["_type"], "works_at");
+    assert_eq!(projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(projected[0]["r"]["_start"]["id"], "u1");
+    assert_eq!(projected[0]["r"]["_end"]["table"], "companies");
+    assert_eq!(projected[0]["r"]["_end"]["id"], "c1");
+
+    let alias_statement = bind_statement_query(
+        "MATCH (u:users)-[r:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN r AS rel LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(alias_logical) = alias_statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(alias_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(alias_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    let alias_rows = execute_join(&engine_fixture(), &alias_physical, None).unwrap();
+    let alias_projected = project_join_rows(
+        alias_rows,
+        &alias_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(alias_projected[0]["rel"]["_type"], "works_at");
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
-            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN r",
-            "relationship variables in multi-pattern joins require a later phase",
-        ),
-        (
             "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN p",
             "path variables in multi-pattern joins require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[r:works_at]->(c) RETURN r",
+            "duplicate variable `r` in MATCH scope",
+        ),
+        (
+            "MATCH (u:users)-[r:works_at]->(c:companies), (r:users)-[:works_at]->(c) RETURN r",
+            "duplicate variable `r` in MATCH scope",
+        ),
+        (
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN r.role",
+            "relationship properties over multi-pattern joins require a later phase",
         ),
         (
             "MATCH (u:users)-[:works_at*1..2]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",

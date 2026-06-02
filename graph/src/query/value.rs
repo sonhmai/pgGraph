@@ -1311,8 +1311,10 @@ fn project_join_row(
                         .unwrap_or(serde_json::Value::Null),
                 );
             }
-            ReturnSlot::Relationship { .. }
-            | ReturnSlot::Path { .. }
+            ReturnSlot::Relationship { name } => {
+                output.insert(name.clone(), join_relationship_value(row, plan, name)?);
+            }
+            ReturnSlot::Path { .. }
             | ReturnSlot::PathFunction { .. }
             | ReturnSlot::Aggregate { .. } => {
                 return Err(GraphError::GqlExecution {
@@ -1596,6 +1598,33 @@ fn wildcard_relationship_value(
     }))
 }
 
+fn join_relationship_value(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    name: &str,
+) -> GraphResult<serde_json::Value> {
+    let slot = plan
+        .rel_slots
+        .iter()
+        .find(|slot| slot.var == name)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("unknown multi-pattern relationship slot `{name}`"),
+        })?;
+    let Some(relationship) = row.path_relationships.get(slot.pattern_slot) else {
+        return Err(GraphError::GqlExecution {
+            reason: format!(
+                "multi-pattern relationship slot `{}` points at missing pattern {}",
+                slot.var, slot.pattern_slot
+            ),
+        });
+    };
+    Ok(serde_json::json!({
+        "_type": &relationship.rel_type,
+        "_start": join_relationship_endpoint(&relationship.start, plan)?,
+        "_end": join_relationship_endpoint(&relationship.end, plan)?,
+    }))
+}
+
 fn path_nodes_value(
     row: &GqlRow,
     plan: &PhysicalPlan,
@@ -1633,6 +1662,27 @@ fn relationship_endpoint(coordinate: &GqlNodeCoordinate, plan: &PhysicalPlan) ->
         "table": label_for_table(plan, coordinate.table_oid),
         "id": &coordinate.node_id,
     })
+}
+
+fn join_relationship_endpoint(
+    coordinate: &GqlNodeCoordinate,
+    plan: &PhysicalJoinPlan,
+) -> GraphResult<serde_json::Value> {
+    let label = plan
+        .node_slots
+        .iter()
+        .find(|slot| slot.table_oid == coordinate.table_oid)
+        .map(|slot| slot.label.as_str())
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!(
+                "multi-pattern relationship endpoint table OID {} is not bound",
+                coordinate.table_oid
+            ),
+        })?;
+    Ok(serde_json::json!({
+        "table": label,
+        "id": &coordinate.node_id,
+    }))
 }
 
 fn wildcard_relationship_endpoint(

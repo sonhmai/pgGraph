@@ -11,10 +11,10 @@ use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, BoundDirection, BoundIncidentEdge,
     BoundMappedEdge, BoundNode, BoundRel, CreateProperty, CreateReturnBinding, CreateValue,
     HopBounds, LogicalCreateNode, LogicalDeleteEdge, LogicalDetachDeleteNode, LogicalJoinNodeSlot,
-    LogicalJoinPattern, LogicalJoinPlan, LogicalMergeNode, LogicalNodeScan, LogicalPlan,
-    LogicalRemoveProperty, LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan,
-    LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding, SortBinding, SortBindingKey,
-    ValueExpr,
+    LogicalJoinPattern, LogicalJoinPlan, LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan,
+    LogicalPlan, LogicalRemoveProperty, LogicalSetProperty, LogicalStatement,
+    LogicalWildcardPathPlan, LogicalWildcardPathSegment, PathFunc, Predicate, ReturnBinding,
+    SortBinding, SortBindingKey, ValueExpr,
 };
 use super::physical_plan::MAX_GQL_RESULT_ROWS;
 
@@ -196,6 +196,8 @@ fn bind_join_read(
 
     let mut node_slots = Vec::new();
     let mut slot_by_var = std::collections::HashMap::<String, usize>::new();
+    let mut rel_slots = Vec::new();
+    let mut rel_by_var = std::collections::HashMap::<String, usize>::new();
     let mut patterns = Vec::with_capacity(query.match_.patterns.len());
     for pattern in &query.match_.patterns {
         if pattern.path_var.is_some() {
@@ -210,12 +212,6 @@ fn bind_join_read(
                 "multi-pattern joins currently support fixed single-relationship patterns",
             ));
         };
-        if rel.var.is_some() {
-            return Err(GqlError::unsupported(
-                rel.span,
-                "relationship variables in multi-pattern joins require a later phase",
-            ));
-        }
         if !rel.props.is_empty() || rel.var_len.is_some() {
             return Err(GqlError::unsupported(
                 rel.span,
@@ -228,15 +224,33 @@ fn bind_join_read(
                 "anonymous relationship types in multi-pattern joins require a later phase",
             )
         })?;
-        let source_slot =
-            bind_join_node_slot(&pattern.start, catalog, &mut node_slots, &mut slot_by_var)?;
-        let target_slot = bind_join_node_slot(target, catalog, &mut node_slots, &mut slot_by_var)?;
+        let source_slot = bind_join_node_slot(
+            &pattern.start,
+            catalog,
+            &mut node_slots,
+            &mut slot_by_var,
+            &rel_by_var,
+        )?;
+        let target_slot = bind_join_node_slot(
+            target,
+            catalog,
+            &mut node_slots,
+            &mut slot_by_var,
+            &rel_by_var,
+        )?;
         validate_join_relationship(
             catalog,
             rel,
             rel_type,
             &node_slots[source_slot],
             &node_slots[target_slot],
+        )?;
+        bind_join_relationship_slot(
+            rel,
+            patterns.len(),
+            &slot_by_var,
+            &mut rel_slots,
+            &mut rel_by_var,
         )?;
         patterns.push(LogicalJoinPattern {
             source_slot,
@@ -247,7 +261,13 @@ fn bind_join_read(
     }
 
     let predicate = bind_join_predicate(query.where_.as_ref(), &node_slots, &slot_by_var)?;
-    let returns = bind_join_returns(&query.return_.items, &node_slots, &slot_by_var)?;
+    let returns = bind_join_returns(
+        &query.return_.items,
+        &node_slots,
+        &slot_by_var,
+        &rel_by_var,
+        &mut rel_slots,
+    )?;
     let order_by = bind_join_sort_items(
         &query.order_by,
         &returns,
@@ -258,6 +278,7 @@ fn bind_join_read(
     let required_table_oids = node_slots.iter().map(|slot| slot.table_oid).collect();
     Ok(LogicalJoinPlan {
         node_slots,
+        rel_slots,
         patterns,
         returns,
         distinct: query.return_.distinct,
@@ -274,6 +295,7 @@ fn bind_join_node_slot(
     catalog: &impl CatalogSnapshot,
     node_slots: &mut Vec<LogicalJoinNodeSlot>,
     slot_by_var: &mut std::collections::HashMap<String, usize>,
+    rel_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<usize, GqlError> {
     if !node.props.is_empty() {
         return Err(GqlError::unsupported(
@@ -287,6 +309,12 @@ fn bind_join_node_slot(
             "anonymous nodes in multi-pattern joins require a later phase",
         )
     })?;
+    if rel_by_var.contains_key(&var.text) {
+        return Err(GqlError::bind(
+            var.span,
+            format!("duplicate variable `{}` in MATCH scope", var.text),
+        ));
+    }
     if let Some(slot) = slot_by_var.get(&var.text).copied() {
         if let Some(label) = &node.label {
             let resolved = catalog.resolve_node_label(&label.text, label.span)?;
@@ -318,6 +346,31 @@ fn bind_join_node_slot(
     });
     slot_by_var.insert(var.text.clone(), slot);
     Ok(slot)
+}
+
+fn bind_join_relationship_slot(
+    rel: &RelPat,
+    pattern_slot: usize,
+    slot_by_var: &std::collections::HashMap<String, usize>,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
+    rel_by_var: &mut std::collections::HashMap<String, usize>,
+) -> Result<(), GqlError> {
+    let Some(var) = &rel.var else {
+        return Ok(());
+    };
+    if slot_by_var.contains_key(&var.text) || rel_by_var.contains_key(&var.text) {
+        return Err(GqlError::bind(
+            var.span,
+            format!("duplicate variable `{}` in MATCH scope", var.text),
+        ));
+    }
+    let slot = rel_slots.len();
+    rel_slots.push(LogicalJoinRelSlot {
+        var: var.text.clone(),
+        pattern_slot,
+    });
+    rel_by_var.insert(var.text.clone(), slot);
+    Ok(())
 }
 
 fn validate_join_relationship(
@@ -530,23 +583,43 @@ fn bind_join_returns(
     items: &[ReturnItem],
     node_slots: &[LogicalJoinNodeSlot],
     slot_by_var: &std::collections::HashMap<String, usize>,
+    rel_by_var: &std::collections::HashMap<String, usize>,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut returns = Vec::with_capacity(items.len());
     for item in items {
         let binding = match &item.expr {
             ReturnExpr::Var { var, .. } => {
-                let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
-                    GqlError::bind(var.span, format!("unknown return variable `{}`", var.text))
-                })?;
-                ReturnBinding::Node {
-                    side: BindingSide::PathNode(slot),
-                    name: projection_name(item),
+                let name = projection_name(item);
+                if let Some(slot) = slot_by_var.get(&var.text).copied() {
+                    ReturnBinding::Node {
+                        side: BindingSide::PathNode(slot),
+                        name,
+                    }
+                } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
+                    bind_join_relationship_return_alias(&name, rel_slot, rel_slots);
+                    ReturnBinding::Relationship { name }
+                } else {
+                    return Err(GqlError::bind(
+                        var.span,
+                        format!("unknown return variable `{}`", var.text),
+                    ));
                 }
             }
             ReturnExpr::Property { var, property, .. } => {
                 let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
-                    GqlError::bind(var.span, format!("unknown return variable `{}`", var.text))
+                    if rel_by_var.contains_key(&var.text) {
+                        GqlError::unsupported(
+                            property.span,
+                            "relationship properties over multi-pattern joins require a later phase",
+                        )
+                    } else {
+                        GqlError::bind(
+                            var.span,
+                            format!("unknown return variable `{}`", var.text),
+                        )
+                    }
                 })?;
                 if !node_slots[slot].properties.contains(&property.text) {
                     return Err(GqlError::bind(
@@ -585,6 +658,21 @@ fn bind_join_returns(
         returns.push(binding);
     }
     Ok(returns)
+}
+
+fn bind_join_relationship_return_alias(
+    name: &str,
+    rel_slot: usize,
+    rel_slots: &mut Vec<LogicalJoinRelSlot>,
+) {
+    if rel_slots.iter().any(|slot| slot.var == name) {
+        return;
+    }
+    let pattern_slot = rel_slots[rel_slot].pattern_slot;
+    rel_slots.push(LogicalJoinRelSlot {
+        var: name.to_string(),
+        pattern_slot,
+    });
 }
 
 fn bind_wildcard_path_read(

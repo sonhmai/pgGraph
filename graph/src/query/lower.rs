@@ -3,15 +3,16 @@
 use super::logical_plan::{
     CreateReturnBinding, CreateValue, LogicalCreateNode, LogicalDeleteEdge,
     LogicalDetachDeleteNode, LogicalJoinNodeSlot, LogicalJoinPattern, LogicalJoinPlan,
-    LogicalMergeNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty, LogicalSetProperty,
-    LogicalStatement, LogicalWildcardPathPlan, LogicalWildcardPathSegment, ReturnBinding,
+    LogicalJoinRelSlot, LogicalMergeNode, LogicalNodeScan, LogicalPlan, LogicalRemoveProperty,
+    LogicalSetProperty, LogicalStatement, LogicalWildcardPathPlan, LogicalWildcardPathSegment,
+    ReturnBinding,
 };
 use super::physical_plan::{
     CreatePropertySlot, CreateReturnSlot, CreateValueSlot, PhysicalCreateNode, PhysicalDeleteEdge,
     PhysicalDetachDeleteNode, PhysicalIncidentEdge, PhysicalJoinNodeSlot, PhysicalJoinPattern,
-    PhysicalJoinPlan, PhysicalMergeNode, PhysicalNodeScan, PhysicalPlan, PhysicalRemoveProperty,
-    PhysicalSetProperty, PhysicalStatement, PhysicalWildcardPathPlan, PhysicalWildcardPathSegment,
-    ReturnSlot,
+    PhysicalJoinPlan, PhysicalJoinRelSlot, PhysicalMergeNode, PhysicalNodeScan, PhysicalPlan,
+    PhysicalRemoveProperty, PhysicalSetProperty, PhysicalStatement, PhysicalWildcardPathPlan,
+    PhysicalWildcardPathSegment, ReturnSlot,
 };
 
 /// Lower a bound logical statement into an executable physical statement.
@@ -49,6 +50,11 @@ fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
             .into_iter()
             .map(lower_join_node_slot)
             .collect(),
+        rel_slots: plan
+            .rel_slots
+            .into_iter()
+            .map(lower_join_rel_slot)
+            .collect(),
         patterns: plan.patterns.into_iter().map(lower_join_pattern).collect(),
         returns: lower_returns(plan.returns),
         distinct: plan.distinct,
@@ -65,6 +71,13 @@ fn lower_join_node_slot(slot: LogicalJoinNodeSlot) -> PhysicalJoinNodeSlot {
         var: slot.var,
         table_oid: slot.table_oid,
         label: slot.label,
+    }
+}
+
+fn lower_join_rel_slot(slot: LogicalJoinRelSlot) -> PhysicalJoinRelSlot {
+    PhysicalJoinRelSlot {
+        var: slot.var,
+        pattern_slot: slot.pattern_slot,
     }
 }
 

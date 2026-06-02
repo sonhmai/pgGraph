@@ -512,7 +512,8 @@ row for each source node with no qualifying target. Null-extended rows use JSON
 Return value support:
 
 - Node values and scalar properties.
-- Node values and scalar properties from supported multi-pattern joins.
+- Node values, scalar properties, and fixed single-hop relationship variables
+  from supported multi-pattern joins.
 - JSONB list/map properties, including dotted paths such as `u.profile.plan`.
 - Coordinate-only single-hop relationship identities.
 - Bounded relationship path values with a minimum of at least one hop.
@@ -555,12 +556,12 @@ Multi-pattern reads support fixed single-hop patterns with concrete labels and
 relationship types. Reused node variables join by graph coordinate, independent
 patterns produce Cartesian combinations up to the GQL result cap, joined
 node-property `WHERE` predicates filter after all referenced slots are bound,
-`ORDER BY` can sort joined node properties or returned property aliases, and
-`RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
-multi-pattern reads must order by returned scalar expressions. Multi-pattern
-reads currently reject relationship variables, path variables, `WITH`,
-aggregates, optional matches, variable-length relationships, and relationship
-properties.
+fixed single-hop relationship variables can be returned as coordinate identity
+objects, `ORDER BY` can sort joined node properties or returned property
+aliases, and `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection.
+Distinct multi-pattern reads must order by returned scalar expressions.
+Multi-pattern reads currently reject path variables, `WITH`, aggregates,
+optional matches, variable-length relationships, and relationship properties.
 
 Path behavior:
 
@@ -600,8 +601,7 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern relationship variables, path variables,
-  aggregates, and variable-length relationships.
+- Multi-pattern path variables, aggregates, and variable-length relationships.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 

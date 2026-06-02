@@ -136,6 +136,8 @@ pub(crate) struct PhysicalPlan {
 pub(crate) struct PhysicalJoinPlan {
     /// Node variables in row-slot order.
     pub(crate) node_slots: Vec<PhysicalJoinNodeSlot>,
+    /// Relationship variables in row-slot order.
+    pub(crate) rel_slots: Vec<PhysicalJoinRelSlot>,
     /// Single-hop patterns in source order.
     pub(crate) patterns: Vec<PhysicalJoinPattern>,
     /// Return slots in requested order.
@@ -163,6 +165,15 @@ pub(crate) struct PhysicalJoinNodeSlot {
     pub(crate) table_oid: u32,
     /// Source label.
     pub(crate) label: String,
+}
+
+/// Physical relationship variable slot in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalJoinRelSlot {
+    /// Relationship variable.
+    pub(crate) var: String,
+    /// Pattern index that binds this relationship.
+    pub(crate) pattern_slot: usize,
 }
 
 /// Physical fixed single-hop pattern in a multi-pattern join.

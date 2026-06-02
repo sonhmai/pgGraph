@@ -443,9 +443,9 @@ Status: initial fixed single-hop join slice implemented and documented on
 patterns produce Cartesian combinations under the result cap, and node/node
 property returns with joined node-property `WHERE` predicates and `SKIP`/`LIMIT`
 are supported, including `ORDER BY` over joined node properties or returned
-property aliases and projected-row `RETURN DISTINCT`. Relationship variables,
-path variables, `WITH`, aggregates, optional joins, and variable-length
-relationships remain planned within this phase.
+property aliases, fixed single-hop relationship variable returns, and
+projected-row `RETURN DISTINCT`. Path variables, `WITH`, aggregates, optional
+joins, and variable-length relationships remain planned within this phase.
 
 Target examples:
 

@@ -125,3 +125,13 @@
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17 cypher::tests::` from `graph/`: passed, 6 tests.
+
+## 2026-06-03 Phase 3B Multi-Pattern Relationship Variable Slice
+
+- `cargo test --features pg17 query::tests::multi_pattern_join_projects_relationship_variables` from `graph/`: passed, 1 test.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 10 tests. Includes fixed single-hop relationship variable returns with aliases, duplicate relationship-variable and node/relationship-variable rejection, and explicit relationship-property deferral for multi-pattern joins.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes relationship variable projection from a fixed single-hop multi-pattern join through `graph.gql()`.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 133 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.

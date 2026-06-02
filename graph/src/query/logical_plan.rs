@@ -135,6 +135,8 @@ pub(crate) struct LogicalNodeScan {
 pub(crate) struct LogicalJoinPlan {
     /// Node variables in row-slot order.
     pub(crate) node_slots: Vec<LogicalJoinNodeSlot>,
+    /// Relationship variables in row-slot order.
+    pub(crate) rel_slots: Vec<LogicalJoinRelSlot>,
     /// Single-hop patterns in source order.
     pub(crate) patterns: Vec<LogicalJoinPattern>,
     /// Return slots in requested order.
@@ -164,6 +166,15 @@ pub(crate) struct LogicalJoinNodeSlot {
     pub(crate) label: String,
     /// Registered readable properties.
     pub(crate) properties: BTreeSet<String>,
+}
+
+/// Bound relationship variable slot in a multi-pattern join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalJoinRelSlot {
+    /// Relationship variable.
+    pub(crate) var: String,
+    /// Pattern index that binds this relationship.
+    pub(crate) pattern_slot: usize,
 }
 
 /// Bound fixed single-hop pattern in a multi-pattern join.
