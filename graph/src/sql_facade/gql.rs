@@ -235,7 +235,10 @@ pub(super) fn execute_statement(
             let matches = ENGINE.with(|engine| {
                 crate::query::execute::execute_wildcard_path(&engine.borrow(), &plan, tenant_scope)
             })?;
-            let hydrated = hydrate_gql_rows(&matches, hydrate)?;
+            let hydrated = hydrate_gql_rows(
+                &matches,
+                crate::query::value::wildcard_path_requires_hydration(&plan, hydrate),
+            )?;
             crate::query::value::project_wildcard_path_rows(matches, &plan, &hydrated, hydrate)
         }
         crate::query::physical_plan::PhysicalStatement::CreateNode(plan) => {

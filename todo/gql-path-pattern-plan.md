@@ -187,6 +187,9 @@ WildcardPathExpand(path=p, direction=out, rel=*, hops=1..1, return=[p])
 
 ## Phase 2: Named Variables and Optional Concrete Filters
 
+Status: implemented and documented on 2026-06-02. Verification is recorded in
+`todo/measurements.md` under "Phase 2 Named Element Slice".
+
 ### Supported Queries
 
 ```sql

@@ -42,8 +42,14 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
 fn lower_wildcard_path(plan: LogicalWildcardPathPlan) -> PhysicalWildcardPathPlan {
     PhysicalWildcardPathPlan {
         path_var: plan.path_var,
+        source_var: plan.source_var,
+        rel_var: plan.rel_var,
+        target_var: plan.target_var,
         direction: plan.direction,
         returns: lower_returns(plan.returns),
+        source_table_filter: plan.source_table_filter,
+        target_table_filter: plan.target_table_filter,
+        rel_type_filter: plan.rel_type_filter,
         required_node_table_oids: plan.required_node_table_oids,
         table_labels: plan.table_labels,
         rel_type_labels: plan.rel_type_labels,

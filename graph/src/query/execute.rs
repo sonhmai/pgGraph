@@ -187,21 +187,38 @@ pub(crate) fn execute_wildcard_path(
         return Err(GraphError::NotBuilt);
     }
     let neighbors = GqlNeighbors::new(engine);
+    let rel_type_filter = plan
+        .rel_type_filter
+        .as_deref()
+        .map(|rel_type| edge_type_id(engine, rel_type))
+        .transpose()?;
     let row_cap = plan.execution_row_cap();
     let mut rows = Vec::new();
     let mut seen_relationships = std::collections::HashSet::new();
-    for table_oid in &plan.required_node_table_oids {
-        for source_idx in source_nodes(engine, *table_oid, tenant) {
+    let scan_table_oids: Vec<u32> = plan.source_table_filter.map_or_else(
+        || plan.required_node_table_oids.iter().copied().collect(),
+        |oid| vec![oid],
+    );
+    for table_oid in scan_table_oids {
+        for source_idx in source_nodes(engine, table_oid, tenant) {
             if !engine.node_store.is_active(source_idx)
                 || crate::projection::tx_delta::node_deleted(source_idx)
             {
                 continue;
             }
             for target in neighbors.for_direction_any(plan.direction, source_idx) {
+                if rel_type_filter.is_some_and(|type_id| target.type_id != type_id) {
+                    continue;
+                }
                 if !engine.node_store.is_active(target.node_idx)
                     || crate::projection::tx_delta::node_deleted(target.node_idx)
                     || !tenant_allows_node(engine, target.node_idx, tenant)
                 {
+                    continue;
+                }
+                if plan.target_table_filter.is_some_and(|table_oid| {
+                    engine.node_store.table_oid(target.node_idx) != table_oid
+                }) {
                     continue;
                 }
                 let (rel_start_idx, rel_end_idx) = match target.orientation {

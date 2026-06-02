@@ -210,10 +210,55 @@ fn bind_wildcard_path_read(
             "wildcard path variables support exactly one relationship in this phase",
         ));
     };
-    reject_phase1_wildcard_node(start)?;
-    reject_phase1_wildcard_node(target)?;
-    reject_phase1_wildcard_relationship(rel)?;
-    let returns = bind_wildcard_path_returns(&query.return_.items, &path_var)?;
+    let source_table_filter = bind_wildcard_node_filter(start, catalog)?;
+    let target_table_filter = bind_wildcard_node_filter(target, catalog)?;
+    let rel_type_filter = bind_wildcard_relationship_filter(rel, catalog)?;
+    if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
+        source_table_filter,
+        target_table_filter,
+        rel_type_filter.as_ref(),
+    ) {
+        let source = BoundNode {
+            var: start
+                .var
+                .as_ref()
+                .map_or_else(String::new, |var| var.text.clone()),
+            label: start
+                .label
+                .as_ref()
+                .map_or_else(String::new, |label| label.text.clone()),
+            table_oid: source_table_oid,
+            properties: std::collections::BTreeSet::new(),
+        };
+        let target = BoundNode {
+            var: target
+                .var
+                .as_ref()
+                .map_or_else(String::new, |var| var.text.clone()),
+            label: target
+                .label
+                .as_ref()
+                .map_or_else(String::new, |label| label.text.clone()),
+            table_oid: target_table_oid,
+            properties: std::collections::BTreeSet::new(),
+        };
+        let rel_ident = rel
+            .rel_type
+            .as_ref()
+            .expect("rel_type_filter came from rel");
+        resolve_relationship(catalog, rel, rel_ident, &source, &target)?;
+        debug_assert_eq!(rel_type, &rel_ident.text);
+    }
+    let source_var = start.var.as_ref().map(|var| var.text.clone());
+    let rel_var = rel.var.as_ref().map(|var| var.text.clone());
+    let target_var = target.var.as_ref().map(|var| var.text.clone());
+    let returns = bind_wildcard_path_returns(
+        &query.return_.items,
+        &path_var,
+        start.var.as_ref(),
+        rel.var.as_ref(),
+        target.var.as_ref(),
+    )?;
     let node_labels = catalog.node_labels();
     let table_labels = node_labels
         .iter()
@@ -230,8 +275,14 @@ fn bind_wildcard_path_read(
         .collect::<std::collections::BTreeSet<_>>();
     Ok(LogicalWildcardPathPlan {
         path_var,
+        source_var,
+        rel_var,
+        target_var,
         direction: bind_direction(rel.direction),
         returns,
+        source_table_filter,
+        target_table_filter,
+        rel_type_filter,
         required_node_table_oids,
         table_labels,
         rel_type_labels,
@@ -240,32 +291,78 @@ fn bind_wildcard_path_read(
     })
 }
 
-fn reject_phase1_wildcard_node(node: &NodePat) -> Result<(), GqlError> {
-    if node.var.is_some() || node.label.is_some() || !node.props.is_empty() {
+fn bind_wildcard_node_filter(
+    node: &NodePat,
+    catalog: &impl CatalogSnapshot,
+) -> Result<Option<u32>, GqlError> {
+    if !node.props.is_empty() {
         return Err(GqlError::unsupported(
             node.span,
-            "wildcard path variables cannot bind node variables, labels, or properties in this phase",
+            "wildcard path variables cannot bind node properties in this phase",
         ));
     }
-    Ok(())
+    node.label
+        .as_ref()
+        .map(|label| {
+            catalog
+                .resolve_node_label(&label.text, label.span)
+                .map(|info| info.table_oid)
+        })
+        .transpose()
 }
 
-fn reject_phase1_wildcard_relationship(rel: &RelPat) -> Result<(), GqlError> {
-    if rel.var.is_some() || rel.rel_type.is_some() || rel.var_len.is_some() || !rel.props.is_empty()
-    {
+fn bind_wildcard_relationship_filter(
+    rel: &RelPat,
+    catalog: &impl CatalogSnapshot,
+) -> Result<Option<String>, GqlError> {
+    if rel.var_len.is_some() || !rel.props.is_empty() {
         return Err(GqlError::unsupported(
             rel.span,
-            "wildcard path variables cannot bind relationship variables, types, properties, or variable-length bounds in this phase",
+            "wildcard path variables cannot bind relationship properties or variable-length bounds in this phase",
         ));
     }
-    Ok(())
+    let Some(rel_type) = &rel.rel_type else {
+        return Ok(None);
+    };
+    if catalog
+        .rel_types()
+        .into_iter()
+        .any(|info| info.rel_type == rel_type.text)
+    {
+        return Ok(Some(rel_type.text.clone()));
+    }
+    Err(GqlError::bind(
+        rel_type.span,
+        format!("unknown relationship type `{}`", rel_type.text),
+    ))
 }
 
 fn bind_wildcard_path_returns(
     items: &[ReturnItem],
     path_var: &str,
+    source_var: Option<&ast::Ident>,
+    rel_var: Option<&ast::Ident>,
+    target_var: Option<&ast::Ident>,
 ) -> Result<Vec<ReturnBinding>, GqlError> {
-    let scope = BindingScope::from([(path_var.to_string(), ScopedBinding::Path)]);
+    let mut scope = BindingScope::from([(path_var.to_string(), ScopedBinding::Path)]);
+    insert_wildcard_binding(
+        &mut scope,
+        path_var,
+        source_var,
+        ScopedBinding::Node(BindingSide::Source),
+    )?;
+    insert_wildcard_binding(
+        &mut scope,
+        path_var,
+        rel_var,
+        ScopedBinding::Relationship { var_len: false },
+    )?;
+    insert_wildcard_binding(
+        &mut scope,
+        path_var,
+        target_var,
+        ScopedBinding::Node(BindingSide::Target),
+    )?;
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut bindings = Vec::with_capacity(items.len());
     for item in items {
@@ -277,13 +374,18 @@ fn bind_wildcard_path_returns(
             ));
         }
         let binding = match &item.expr {
-            ReturnExpr::Var { var, .. } if var.text == path_var => ReturnBinding::Path { name },
-            ReturnExpr::Var { var, span } => {
-                return Err(GqlError::bind(
-                    *span,
-                    format!("unknown return variable `{}`", var.text),
-                ));
-            }
+            ReturnExpr::Var { var, span } => match scope.get(&var.text) {
+                Some(ScopedBinding::Path) => ReturnBinding::Path { name },
+                Some(ScopedBinding::Node(side)) => ReturnBinding::Node { side: *side, name },
+                Some(ScopedBinding::Relationship { .. }) => ReturnBinding::Relationship { name },
+                Some(_) => unreachable!("wildcard path scope stores only element bindings"),
+                None => {
+                    return Err(GqlError::bind(
+                        *span,
+                        format!("unknown return variable `{}`", var.text),
+                    ));
+                }
+            },
             ReturnExpr::Func {
                 name: func_name,
                 args,
@@ -308,6 +410,24 @@ fn bind_wildcard_path_returns(
         bindings.push(binding);
     }
     Ok(bindings)
+}
+
+fn insert_wildcard_binding(
+    scope: &mut BindingScope,
+    path_var: &str,
+    var: Option<&ast::Ident>,
+    binding: ScopedBinding,
+) -> Result<(), GqlError> {
+    let Some(var) = var else {
+        return Ok(());
+    };
+    if var.text == path_var || scope.insert(var.text.clone(), binding).is_some() {
+        return Err(GqlError::bind(
+            var.span,
+            format!("duplicate variable `{}` in MATCH scope", var.text),
+        ));
+    }
+    Ok(())
 }
 
 fn bind_create_node(

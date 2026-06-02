@@ -768,6 +768,25 @@ pub(crate) fn node_scan_requires_hydration(plan: &PhysicalNodeScan, hydrate_node
             .any(return_slot_requires_hydration)
 }
 
+/// Return whether this wildcard path plan requires SQL row hydration.
+pub(crate) fn wildcard_path_requires_hydration(
+    plan: &PhysicalWildcardPathPlan,
+    hydrate_nodes: bool,
+) -> bool {
+    hydrate_nodes
+        && plan.returns.iter().any(|slot| {
+            matches!(
+                slot,
+                ReturnSlot::Node { .. }
+                    | ReturnSlot::Path { .. }
+                    | ReturnSlot::PathFunction {
+                        func: PathFunc::Nodes,
+                        ..
+                    }
+            )
+        })
+}
+
 fn return_slot_requires_hydration(slot: &ReturnSlot) -> bool {
     matches!(
         slot,
@@ -1124,12 +1143,29 @@ fn project_wildcard_path_row(
                     wildcard_path_function_value(*func, row, plan, hydrated, hydrate_nodes)?,
                 );
             }
-            ReturnSlot::Node { .. }
-            | ReturnSlot::Relationship { .. }
-            | ReturnSlot::Property { .. }
-            | ReturnSlot::Aggregate { .. } => {
+            ReturnSlot::Node { side, name } => {
+                let coordinate = coordinate(row, *side);
+                output.insert(
+                    name.clone(),
+                    coordinate
+                        .map(|coordinate| {
+                            node_value(
+                                coordinate,
+                                hydrated,
+                                wildcard_label_for_table(plan, coordinate.table_oid)?,
+                                hydrate_nodes,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            ReturnSlot::Relationship { name } => {
+                output.insert(name.clone(), wildcard_relationship_value(row, plan)?);
+            }
+            ReturnSlot::Property { .. } | ReturnSlot::Aggregate { .. } => {
                 return Err(GraphError::GqlExecution {
-                    reason: "wildcard path plans can project only path values and path functions"
+                    reason: "wildcard path plans cannot project properties or aggregates"
                         .to_string(),
                 });
             }
@@ -1394,6 +1430,20 @@ fn wildcard_path_relationships_value(
             }))
         })
         .collect()
+}
+
+fn wildcard_relationship_value(
+    row: &GqlRow,
+    plan: &PhysicalWildcardPathPlan,
+) -> GraphResult<serde_json::Value> {
+    let Some(relationship) = row.path_relationships.first() else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(serde_json::json!({
+        "_type": &relationship.rel_type,
+        "_start": wildcard_relationship_endpoint(&relationship.start, plan)?,
+        "_end": wildcard_relationship_endpoint(&relationship.end, plan)?,
+    }))
 }
 
 fn path_nodes_value(

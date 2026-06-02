@@ -995,7 +995,15 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     .expect("add works_at edge failed");
     Spi::run("SELECT * FROM graph.build()").expect("build wildcard path graph failed");
 
-    let (row_count, friend_rows, works_at_rows, shape_matches, coordinate_only_has_name) =
+    let (
+        row_count,
+        friend_rows,
+        works_at_rows,
+        named_works_at_rows,
+        named_shape_matches,
+        shape_matches,
+        coordinate_only_has_name,
+    ) =
         Spi::connect(|client| {
             let row = client
                 .select(
@@ -1014,10 +1022,25 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                          SELECT row
                          FROM graph.gql('MATCH p=()-[]->() RETURN nodes(p) AS ns', hydrate := false)
                          LIMIT 1
+                     ),
+                     named_works_at AS (
+                         SELECT row
+                         FROM graph.gql(
+                             'MATCH p=(s)-[r:works_at]->(e)
+                              RETURN p, s, r, e',
+                             hydrate := true
+                         )
                      )
                      SELECT count(*)::bigint,
                             count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'friend')::bigint,
                             count(*) FILTER (WHERE row->'rs'->0->>'_type' = 'works_at')::bigint,
+                            (SELECT count(*)::bigint FROM named_works_at),
+                            (SELECT bool_and(
+                                row->'s' ? '_id'
+                                AND row->'e' ? '_id'
+                                AND row->'r'->>'_type' = 'works_at'
+                                AND row->'p'->'_path'->'relationships'->0 = row->'r'
+                             ) FROM named_works_at),
                             bool_and(
                                 (row->>'len')::bigint = 1
                                 AND row->'p'->'_path'->'nodes' = row->'ns'
@@ -1042,10 +1065,16 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                 row.get::<i64>(3)
                     .expect("works_at row count read failed")
                     .unwrap_or_default(),
-                row.get::<bool>(4)
+                row.get::<i64>(4)
+                    .expect("named works_at row count read failed")
+                    .unwrap_or_default(),
+                row.get::<bool>(5)
+                    .expect("named works_at shape read failed")
+                    .unwrap_or(false),
+                row.get::<bool>(6)
                     .expect("shape equality read failed")
                     .unwrap_or(false),
-                row.get::<bool>(5)
+                row.get::<bool>(7)
                     .expect("coordinate-only shape read failed")
                     .unwrap_or(true),
             ))
@@ -1058,6 +1087,8 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     );
     assert_eq!(friend_rows, 1, "unexpected friend path count");
     assert_eq!(works_at_rows, 2, "unexpected works_at path count");
+    assert_eq!(named_works_at_rows, works_at_rows);
+    assert!(named_shape_matches);
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);
 }

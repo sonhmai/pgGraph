@@ -31,10 +31,22 @@ pub(crate) enum LogicalStatement {
 pub(crate) struct LogicalWildcardPathPlan {
     /// Path variable name bound to the whole matched path.
     pub(crate) path_var: String,
+    /// Optional source node variable for the first node in path order.
+    pub(crate) source_var: Option<String>,
+    /// Optional relationship variable.
+    pub(crate) rel_var: Option<String>,
+    /// Optional target node variable for the second node in path order.
+    pub(crate) target_var: Option<String>,
     /// Traversal direction requested by the relationship pattern.
     pub(crate) direction: BoundDirection,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnBinding>,
+    /// Optional source-table filter.
+    pub(crate) source_table_filter: Option<u32>,
+    /// Optional target-table filter.
+    pub(crate) target_table_filter: Option<u32>,
+    /// Optional relationship type filter.
+    pub(crate) rel_type_filter: Option<String>,
     /// Source-table OIDs requiring ACL checks before wildcard expansion.
     pub(crate) required_node_table_oids: BTreeSet<u32>,
     /// GQL labels keyed by source-table OID.

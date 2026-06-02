@@ -139,12 +139,67 @@ fn binder_accepts_phase1_wildcard_path_functions() {
 }
 
 #[test]
-fn binder_rejects_phase1_wildcard_path_named_elements_and_filters() {
+fn binder_accepts_phase2_named_path_elements_and_filters() {
+    let plan =
+        bind_statement_query("MATCH p=(s:users)-[r:works_at]->(e:companies) RETURN p, s, r, e");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(plan) = plan else {
+        panic!("expected wildcard path read plan");
+    };
+
+    assert_eq!(plan.path_var, "p");
+    assert_eq!(plan.source_var.as_deref(), Some("s"));
+    assert_eq!(plan.rel_var.as_deref(), Some("r"));
+    assert_eq!(plan.target_var.as_deref(), Some("e"));
+    assert_eq!(plan.source_table_filter, Some(10));
+    assert_eq!(plan.target_table_filter, Some(20));
+    assert_eq!(plan.rel_type_filter.as_deref(), Some("works_at"));
+    assert!(matches!(
+        plan.returns[0],
+        super::logical_plan::ReturnBinding::Path { .. }
+    ));
+    assert!(matches!(
+        plan.returns[1],
+        super::logical_plan::ReturnBinding::Node {
+            side: super::logical_plan::BindingSide::Source,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plan.returns[2],
+        super::logical_plan::ReturnBinding::Relationship { .. }
+    ));
+    assert!(matches!(
+        plan.returns[3],
+        super::logical_plan::ReturnBinding::Node {
+            side: super::logical_plan::BindingSide::Target,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn binder_rejects_phase2_duplicate_path_element_names() {
     for query in [
-        "MATCH p=(s)-[]->() RETURN p",
-        "MATCH p=()-[r]->() RETURN p",
-        "MATCH p=(:users)-[]->() RETURN p",
-        "MATCH p=()-[:friend]->() RETURN p",
+        "MATCH p=(p)-[]->() RETURN p",
+        "MATCH p=(s)-[p]->() RETURN p",
+        "MATCH p=(s)-[]->(s) RETURN p",
+        "MATCH p=(s)-[s]->(e) RETURN p",
+    ] {
+        let ast = crate::gql::parse_statement(query).unwrap();
+        let err = bind_statement(&ast, &fake_catalog()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("duplicate variable"),
+            "unexpected error for {query}: {err}"
+        );
+    }
+}
+
+#[test]
+fn binder_rejects_unsupported_wildcard_path_shapes() {
+    for query in [
+        "MATCH p=({id: 'u1'})-[]->() RETURN p",
+        "MATCH p=()-[{id: 'r1'}]->() RETURN p",
         "MATCH p=()-[*1..3]->() RETURN p",
         "MATCH p=()-[]->() WHERE p.id = 'x' RETURN p",
         "MATCH p=()-[]->() RETURN count(*)",
@@ -1091,6 +1146,133 @@ fn wildcard_path_executor_projects_actual_relationship_types() {
     assert_eq!(projected[0]["rs"][0]["_type"], "works_at");
     assert_eq!(projected[0]["rs"][0]["_start"]["table"], "users");
     assert_eq!(projected[0]["rs"][0]["_end"]["table"], "companies");
+}
+
+#[test]
+fn wildcard_path_executor_projects_named_elements_with_concrete_filters() {
+    let statement =
+        bind_statement_query("MATCH p=(s:users)-[r:works_at]->(e:companies) RETURN p, s, r, e");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = statement else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+    let engine = engine_fixture();
+    let rows = execute_wildcard_path(&engine, &physical, None).unwrap();
+    let projected = project_wildcard_path_rows(rows, &physical, &hydrated_fixture(), true).unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["s"]["_id"]["table"], "users");
+    assert_eq!(projected[0]["e"]["_id"]["table"], "companies");
+    assert_eq!(projected[0]["r"]["_type"], "works_at");
+    assert_eq!(
+        projected[0]["p"]["_path"]["relationships"][0],
+        projected[0]["r"]
+    );
+}
+
+#[test]
+fn wildcard_path_named_elements_preserve_path_order_and_relationship_orientation() {
+    let inbound =
+        bind_statement_query("MATCH p=(c:companies)<-[r:works_at]-(u:users) RETURN p, c, r, u");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(inbound_logical) = inbound else {
+        panic!("expected inbound wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(inbound_physical) =
+        lower_statement(super::logical_plan::LogicalStatement::WildcardPathRead(
+            inbound_logical,
+        ))
+    else {
+        panic!("expected physical inbound wildcard path plan");
+    };
+    let engine = engine_fixture();
+    let inbound_rows = execute_wildcard_path(&engine, &inbound_physical, None).unwrap();
+    let inbound_projected =
+        project_wildcard_path_rows(inbound_rows, &inbound_physical, &hydrated_fixture(), true)
+            .unwrap();
+
+    assert_eq!(inbound_projected.len(), 2);
+    assert_eq!(inbound_projected[0]["c"]["_id"]["table"], "companies");
+    assert_eq!(inbound_projected[0]["u"]["_id"]["table"], "users");
+    assert_eq!(
+        inbound_projected[0]["p"]["_path"]["nodes"][0],
+        inbound_projected[0]["c"]
+    );
+    assert_eq!(
+        inbound_projected[0]["p"]["_path"]["nodes"][1],
+        inbound_projected[0]["u"]
+    );
+    assert_eq!(inbound_projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(inbound_projected[0]["r"]["_end"]["table"], "companies");
+
+    let undirected =
+        bind_statement_query("MATCH p=(c:companies)-[r:works_at]-(u:users) RETURN p, c, r, u");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(undirected_logical) = undirected
+    else {
+        panic!("expected undirected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(undirected_physical) =
+        lower_statement(super::logical_plan::LogicalStatement::WildcardPathRead(
+            undirected_logical,
+        ))
+    else {
+        panic!("expected physical undirected wildcard path plan");
+    };
+    let undirected_rows = execute_wildcard_path(&engine, &undirected_physical, None).unwrap();
+    let undirected_projected = project_wildcard_path_rows(
+        undirected_rows,
+        &undirected_physical,
+        &hydrated_fixture(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(undirected_projected.len(), 2);
+    assert_eq!(undirected_projected[0]["c"]["_id"]["table"], "companies");
+    assert_eq!(undirected_projected[0]["u"]["_id"]["table"], "users");
+    assert_eq!(
+        undirected_projected[0]["p"]["_path"]["nodes"][0],
+        undirected_projected[0]["c"]
+    );
+    assert_eq!(undirected_projected[0]["r"]["_start"]["table"], "users");
+    assert_eq!(undirected_projected[0]["r"]["_end"]["table"], "companies");
+}
+
+#[test]
+fn wildcard_path_hydration_is_needed_only_for_node_outputs() {
+    let relationship_only = bind_statement_query("MATCH p=()-[r]->() RETURN r");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = relationship_only else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+
+    assert!(!super::value::wildcard_path_requires_hydration(
+        &physical, true
+    ));
+
+    let node_output = bind_statement_query("MATCH p=(s)-[]->() RETURN s");
+    let super::logical_plan::LogicalStatement::WildcardPathRead(logical) = node_output else {
+        panic!("expected wildcard path plan");
+    };
+    let super::physical_plan::PhysicalStatement::WildcardPathRead(physical) = lower_statement(
+        super::logical_plan::LogicalStatement::WildcardPathRead(logical),
+    ) else {
+        panic!("expected physical wildcard path plan");
+    };
+
+    assert!(super::value::wildcard_path_requires_hydration(
+        &physical, true
+    ));
+    assert!(!super::value::wildcard_path_requires_hydration(
+        &physical, false
+    ));
 }
 
 #[test]
