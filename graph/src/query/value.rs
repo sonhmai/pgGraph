@@ -1533,6 +1533,12 @@ fn aggregate_arg_value(
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
         AggregateArg::Relationship => Ok(relationship_value(row, plan)),
+        AggregateArg::JoinRelationship(_) | AggregateArg::JoinPath(_) => {
+            Err(GraphError::GqlExecution {
+                reason: "single-pattern MATCH cannot aggregate multi-pattern join values"
+                    .to_string(),
+            })
+        }
         AggregateArg::Property { side, property } => coordinate(row, *side)
             .map(|coordinate| property_value(coordinate, hydrated, property))
             .transpose()
@@ -1551,7 +1557,9 @@ fn aggregate_arg_value_for_node(
         AggregateArg::All => Ok(serde_json::Value::Bool(true)),
         AggregateArg::Node(_) => node_value(&row.source, hydrated, label, hydrate_nodes),
         AggregateArg::Property { property, .. } => property_value(&row.source, hydrated, property),
-        AggregateArg::Relationship => Err(GraphError::GqlExecution {
+        AggregateArg::Relationship
+        | AggregateArg::JoinRelationship(_)
+        | AggregateArg::JoinPath(_) => Err(GraphError::GqlExecution {
             reason: "node-only MATCH cannot aggregate relationship values".to_string(),
         }),
     }
@@ -1580,8 +1588,12 @@ fn aggregate_arg_value_for_join(
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
         AggregateArg::Relationship => Err(GraphError::GqlExecution {
-            reason: "multi-pattern joins cannot aggregate relationship values".to_string(),
+            reason: "multi-pattern joins require a relationship slot for aggregation".to_string(),
         }),
+        AggregateArg::JoinRelationship(slot) => join_relationship_value_by_slot(row, plan, *slot),
+        AggregateArg::JoinPath(slot) => {
+            join_path_value_by_slot(row, plan, *slot, hydrated, hydrate_nodes)
+        }
     }
 }
 
@@ -1737,12 +1749,26 @@ fn join_relationship_value(
     plan: &PhysicalJoinPlan,
     name: &str,
 ) -> GraphResult<serde_json::Value> {
-    let slot = plan
+    let slot_index = plan
         .rel_slots
         .iter()
-        .find(|slot| slot.var == name)
+        .position(|slot| slot.var == name)
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern relationship slot `{name}`"),
+        })?;
+    join_relationship_value_by_slot(row, plan, slot_index)
+}
+
+fn join_relationship_value_by_slot(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    slot_index: usize,
+) -> GraphResult<serde_json::Value> {
+    let slot = plan
+        .rel_slots
+        .get(slot_index)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("unknown multi-pattern relationship slot {slot_index}"),
         })?;
     let Some(relationship) = row.path_relationships.get(slot.pattern_slot) else {
         return Err(GraphError::GqlExecution {
@@ -1766,12 +1792,28 @@ fn join_path_value(
     hydrated: &HydratedRows,
     hydrate_nodes: bool,
 ) -> GraphResult<serde_json::Value> {
-    let slot = plan
+    let slot_index = plan
         .path_slots
         .iter()
-        .find(|slot| slot.var == name)
+        .position(|slot| slot.var == name)
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern path slot `{name}`"),
+        })?;
+    join_path_value_by_slot(row, plan, slot_index, hydrated, hydrate_nodes)
+}
+
+fn join_path_value_by_slot(
+    row: &GqlRow,
+    plan: &PhysicalJoinPlan,
+    slot_index: usize,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    let slot = plan
+        .path_slots
+        .get(slot_index)
+        .ok_or_else(|| GraphError::GqlExecution {
+            reason: format!("unknown multi-pattern path slot {slot_index}"),
         })?;
     let pattern = plan
         .patterns

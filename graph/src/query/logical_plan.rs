@@ -508,6 +508,10 @@ pub(crate) enum AggregateArg {
     Node(BindingSide),
     /// Relationship variable.
     Relationship,
+    /// Relationship variable in a multi-pattern join.
+    JoinRelationship(usize),
+    /// Path variable in a multi-pattern join.
+    JoinPath(usize),
     /// Node property.
     Property {
         /// Source or target binding.

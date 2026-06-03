@@ -1782,12 +1782,14 @@ fn multi_pattern_join_projects_path_functions() {
 #[test]
 fn multi_pattern_join_projects_aggregates() {
     let statement = bind_statement_query(
-        "MATCH (u:users)-[:works_at]->(c:companies), \
+        "MATCH p=(u:users)-[r:works_at]->(c:companies), \
          (v:users)-[:works_at]->(c) \
          RETURN c.name AS company, count(*) AS rows, count(DISTINCT v) AS peers, \
                 count(v.age) AS age_count, sum(v.age) AS age_sum, \
                 avg(v.age) AS age_avg, min(v.age) AS youngest, \
-                max(v.age) AS oldest, collect(v.name) AS names \
+                max(v.age) AS oldest, collect(v.name) AS names, \
+                count(DISTINCT r) AS rels, collect(r) AS rel_values, \
+                count(DISTINCT p) AS paths, collect(p) AS path_values \
          ORDER BY company",
     );
     let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
@@ -1819,6 +1821,13 @@ fn multi_pattern_join_projects_aggregates() {
     assert_eq!(projected[0]["youngest"], serde_json::json!(37));
     assert_eq!(projected[0]["oldest"], serde_json::json!(37));
     assert_eq!(projected[0]["names"], serde_json::json!(["Ada"]));
+    assert_eq!(projected[0]["rels"], serde_json::json!(1));
+    assert_eq!(projected[0]["rel_values"][0]["_type"], "works_at");
+    assert_eq!(projected[0]["paths"], serde_json::json!(1));
+    assert_eq!(
+        projected[0]["path_values"][0]["_path"]["relationships"][0]["_type"],
+        "works_at"
+    );
     assert_eq!(projected[1]["company"], "Bell");
     assert_eq!(projected[1]["rows"], serde_json::json!(1));
 
@@ -2030,12 +2039,12 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "DISTINCT queries must ORDER BY returned scalar expressions",
         ),
         (
-            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(r)",
-            "aggregates over multi-pattern relationship variables require a later phase",
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN sum(r)",
+            "aggregate `sum` requires a property argument",
         ),
         (
-            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN collect(p)",
-            "aggregates over multi-pattern path variables require a later phase",
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN sum(p)",
+            "aggregate `sum` requires a property argument",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(*) AS rows ORDER BY u.name",

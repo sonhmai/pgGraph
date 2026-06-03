@@ -1057,16 +1057,30 @@ fn bind_join_aggregate_arg(
                         ),
                     ))
                 }
-            } else if rel_by_var.contains_key(&var.text) {
-                Err(GqlError::unsupported(
-                    *span,
-                    "aggregates over multi-pattern relationship variables require a later phase",
-                ))
-            } else if path_by_var.contains_key(&var.text) {
-                Err(GqlError::unsupported(
-                    *span,
-                    "aggregates over multi-pattern path variables require a later phase",
-                ))
+            } else if let Some(rel_slot) = rel_by_var.get(&var.text).copied() {
+                if aggregate_accepts_value(func) {
+                    Ok(AggregateArg::JoinRelationship(rel_slot))
+                } else {
+                    Err(GqlError::bind(
+                        *span,
+                        format!(
+                            "aggregate `{}` requires a property argument",
+                            aggregate_name(func)
+                        ),
+                    ))
+                }
+            } else if let Some(path_slot) = path_by_var.get(&var.text).copied() {
+                if aggregate_accepts_value(func) {
+                    Ok(AggregateArg::JoinPath(path_slot))
+                } else {
+                    Err(GqlError::bind(
+                        *span,
+                        format!(
+                            "aggregate `{}` requires a property argument",
+                            aggregate_name(func)
+                        ),
+                    ))
+                }
             } else {
                 Err(GqlError::bind(
                     *span,

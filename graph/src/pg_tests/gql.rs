@@ -1275,11 +1275,17 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
                     row->>'target' = 'Bob'
                     AND (row->>'rows')::integer = 1
                     AND (row->>'total_age')::float8 = 37
+                    AND (row->>'rels')::integer = 1
+                    AND row #>> '{rel_values,0,_type}' = 'friend'
+                    AND (row->>'paths')::integer = 1
+                    AND row #>> '{path_values,0,_path,relationships,0,_type}' = 'friend'
                 )
          FROM graph.gql(
-             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+             'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(c:graph_test_users_pgtest),
                     (v:graph_test_users_pgtest)-[:friend]->(c)
-              RETURN c.name AS target, count(*) AS rows, sum(v.age) AS total_age',
+              RETURN c.name AS target, count(*) AS rows, sum(v.age) AS total_age,
+                     count(DISTINCT r) AS rels, collect(r) AS rel_values,
+                     count(DISTINCT p) AS paths, collect(p) AS path_values',
              hydrate := true
          )",
     )

@@ -173,6 +173,15 @@
 - `git diff --check` from repository root: passed.
 - `cargo test --features pg17` from `graph/`: passed, 493 tests, 1 ignored.
 
+## 2026-06-03 Phase 3B Multi-Pattern Relationship/Path Aggregate Slice
+
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 15 tests. Includes relationship-value and path-value `count`/`collect` over fixed single-hop multi-pattern joins, while numeric aggregates over relationship/path values remain rejected.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 138 tests.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes relationship/path aggregate projection through `graph.gql()`.
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17` from `graph/`: passed, 493 tests, 1 ignored.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.
