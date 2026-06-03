@@ -100,14 +100,32 @@ pub(crate) fn project_join_rows(
     params: &QueryParams,
     hydrate_nodes: bool,
 ) -> GraphResult<Vec<serde_json::Value>> {
+    let rows = rows
+        .into_iter()
+        .filter_map(|row| {
+            match predicate_matches(plan.predicate.as_ref(), &row, hydrated, params) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(err) => Some(Err(err)),
+            }
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    if plan.returns.iter().any(ReturnSlot::is_aggregate) {
+        let mut projected =
+            aggregate_join_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
+        if plan.distinct {
+            dedup_projected_rows(&mut projected)?;
+        }
+        sort_and_window(&mut projected, plan.skip, plan.limit);
+        return Ok(projected.into_iter().map(|row| row.row).collect());
+    }
+
     let mut projected = Vec::with_capacity(rows.len());
     for row in rows {
-        if predicate_matches(plan.predicate.as_ref(), &row, hydrated, params)? {
-            projected.push(ProjectedRow {
-                row: project_join_row(&row, plan, hydrated, hydrate_nodes)?,
-                sort_values: sort_values_for_join(&row, plan, hydrated, params)?,
-            });
-        }
+        projected.push(ProjectedRow {
+            row: project_join_row(&row, plan, hydrated, hydrate_nodes)?,
+            sort_values: sort_values_for_join(&row, plan, hydrated, params)?,
+        });
     }
     if plan.distinct {
         dedup_projected_rows(&mut projected)?;
@@ -375,6 +393,22 @@ fn aggregate_node_rows(
             let fake = node_row_as_gql_row(row);
             aggregate_arg_value_for_node(&fake, arg, &plan.label, hydrated, hydrate_nodes)
         },
+        |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+    )
+}
+
+fn aggregate_join_rows(
+    rows: &[GqlRow],
+    returns: &[ReturnSlot],
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<Vec<ProjectedRow>> {
+    aggregate_by(
+        rows,
+        returns,
+        |row, slot| project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes),
+        |row, arg| aggregate_arg_value_for_join(row, arg, plan, hydrated, hydrate_nodes),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
     )
 }
@@ -1367,6 +1401,44 @@ fn project_slot_value(
     }
 }
 
+fn project_join_slot_value(
+    row: &GqlRow,
+    slot: &ReturnSlot,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    match slot {
+        ReturnSlot::Node { side, .. } => match coordinate(row, *side) {
+            Some(coordinate) => node_value(
+                coordinate,
+                hydrated,
+                join_label(plan, *side)?,
+                hydrate_nodes,
+            ),
+            None => Ok(serde_json::Value::Null),
+        },
+        ReturnSlot::Relationship { name } => join_relationship_value(row, plan, name),
+        ReturnSlot::Path { name } => join_path_value(row, plan, name, hydrated, hydrate_nodes),
+        ReturnSlot::PathFunction {
+            func,
+            path_var: Some(path_var),
+            ..
+        } => join_path_function_value(*func, row, plan, path_var, hydrated, hydrate_nodes),
+        ReturnSlot::PathFunction { path_var: None, .. } => Err(GraphError::GqlExecution {
+            reason: "single-pattern path functions cannot group multi-pattern join rows"
+                .to_string(),
+        }),
+        ReturnSlot::Property { side, property, .. } => coordinate(row, *side)
+            .map(|coordinate| property_value(coordinate, hydrated, property))
+            .transpose()
+            .map(|value| value.unwrap_or(serde_json::Value::Null)),
+        ReturnSlot::Aggregate { .. } => Err(GraphError::GqlExecution {
+            reason: "aggregate slots cannot be used as grouping values".to_string(),
+        }),
+    }
+}
+
 fn project_node_row(
     row: &GqlNodeRow,
     plan: &PhysicalNodeScan,
@@ -1461,6 +1533,34 @@ fn aggregate_arg_value_for_node(
         AggregateArg::Property { property, .. } => property_value(&row.source, hydrated, property),
         AggregateArg::Relationship => Err(GraphError::GqlExecution {
             reason: "node-only MATCH cannot aggregate relationship values".to_string(),
+        }),
+    }
+}
+
+fn aggregate_arg_value_for_join(
+    row: &GqlRow,
+    arg: &AggregateArg,
+    plan: &PhysicalJoinPlan,
+    hydrated: &HydratedRows,
+    hydrate_nodes: bool,
+) -> GraphResult<serde_json::Value> {
+    match arg {
+        AggregateArg::All => Ok(serde_json::Value::Bool(true)),
+        AggregateArg::Node(side) => match coordinate(row, *side) {
+            Some(coordinate) => node_value(
+                coordinate,
+                hydrated,
+                join_label(plan, *side)?,
+                hydrate_nodes,
+            ),
+            None => Ok(serde_json::Value::Null),
+        },
+        AggregateArg::Property { side, property } => coordinate(row, *side)
+            .map(|coordinate| property_value(coordinate, hydrated, property))
+            .transpose()
+            .map(|value| value.unwrap_or(serde_json::Value::Null)),
+        AggregateArg::Relationship => Err(GraphError::GqlExecution {
+            reason: "multi-pattern joins cannot aggregate relationship values".to_string(),
         }),
     }
 }

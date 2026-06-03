@@ -1780,6 +1780,78 @@ fn multi_pattern_join_projects_path_functions() {
 }
 
 #[test]
+fn multi_pattern_join_projects_aggregates() {
+    let statement = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN c.name AS company, count(*) AS rows, count(DISTINCT v) AS peers, \
+                count(v.age) AS age_count, sum(v.age) AS age_sum, \
+                avg(v.age) AS age_avg, min(v.age) AS youngest, \
+                max(v.age) AS oldest, collect(v.name) AS names \
+         ORDER BY company",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0]["company"], "Acme");
+    assert_eq!(projected[0]["rows"], serde_json::json!(1));
+    assert_eq!(projected[0]["peers"], serde_json::json!(1));
+    assert_eq!(projected[0]["age_count"], serde_json::json!(1));
+    assert_eq!(projected[0]["age_sum"], serde_json::json!(37.0));
+    assert_eq!(projected[0]["age_avg"], serde_json::json!(37.0));
+    assert_eq!(projected[0]["youngest"], serde_json::json!(37));
+    assert_eq!(projected[0]["oldest"], serde_json::json!(37));
+    assert_eq!(projected[0]["names"], serde_json::json!(["Ada"]));
+    assert_eq!(projected[1]["company"], "Bell");
+    assert_eq!(projected[1]["rows"], serde_json::json!(1));
+
+    let ordered = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN c.name AS company, count(*) AS rows \
+         ORDER BY rows DESC, company ASC SKIP 1 LIMIT 1",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(ordered_logical) = ordered else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(ordered_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(ordered_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    let ordered_rows = execute_join(&engine_fixture(), &ordered_physical, None).unwrap();
+    let ordered_projected = project_join_rows(
+        ordered_rows,
+        &ordered_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(ordered_projected.len(), 1);
+    assert_eq!(ordered_projected[0]["company"], "Bell");
+    assert_eq!(ordered_projected[0]["rows"], serde_json::json!(1));
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -1823,8 +1895,16 @@ fn multi_pattern_join_rejects_deferred_shapes() {
             "DISTINCT queries must ORDER BY returned scalar expressions",
         ),
         (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(*)",
-            "aggregates over multi-pattern joins require a later phase",
+            "MATCH (u:users)-[r:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(r)",
+            "aggregates over multi-pattern relationship variables require a later phase",
+        ),
+        (
+            "MATCH p=(u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN collect(p)",
+            "aggregates over multi-pattern path variables require a later phase",
+        ),
+        (
+            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN count(*) AS rows ORDER BY u.name",
+            "aggregate queries must ORDER BY returned property or aggregate aliases",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v)-[:works_at]->(c) RETURN v",

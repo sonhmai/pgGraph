@@ -1269,6 +1269,24 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     .unwrap_or(false);
 
     assert!(join_path_function_shape);
+
+    let join_aggregate_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->>'target' = 'Bob'
+                    AND (row->>'rows')::integer = 1
+                    AND (row->>'total_age')::float8 = 37
+                )
+         FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              RETURN c.name AS target, count(*) AS rows, sum(v.age) AS total_age',
+             hydrate := true
+         )",
+    )
+    .expect("multi-pattern aggregate projection query failed")
+    .unwrap_or(false);
+
+    assert!(join_aggregate_shape);
 }
 
 #[pg_test]

@@ -445,8 +445,9 @@ property returns with joined node-property `WHERE` predicates and `SKIP`/`LIMIT`
 are supported, including `ORDER BY` over joined node properties or returned
 property aliases, fixed single-hop relationship variable returns, fixed
 single-hop path variable returns, path functions over fixed single-hop path
-variables, and projected-row `RETURN DISTINCT`. `WITH`, aggregates, optional
-joins, and variable-length relationships remain planned within this phase.
+variables, node and node-property aggregate inputs, and projected-row
+`RETURN DISTINCT`. `WITH`, relationship/path aggregate inputs, optional joins,
+and variable-length relationships remain planned within this phase.
 
 Target examples:
 
@@ -473,6 +474,8 @@ Tests:
   ordering/windowing.
 - `nodes(p)`, `relationships(p)`, and `length(p)` project from fixed
   single-hop path variables in multi-pattern joins.
+- `count(*)` and node-property aggregates group over fixed single-hop
+  multi-pattern join rows.
 
 ### Phase 3C: Property Predicates on Unlabeled Wildcard Nodes
 

@@ -531,6 +531,7 @@ fn bind_join_sort_items(
     slot_by_var: &std::collections::HashMap<String, usize>,
     return_distinct: bool,
 ) -> Result<Vec<SortBinding>, GqlError> {
+    let has_aggregate = returns.iter().any(ReturnBinding::is_aggregate);
     items
         .iter()
         .map(|item| {
@@ -558,6 +559,23 @@ fn bind_join_sort_items(
                     property,
                     span: _,
                 } => {
+                    if has_aggregate {
+                        if let Some(binding) = returned_join_property_binding(
+                            returns,
+                            slot_by_var,
+                            &var.text,
+                            &property.text,
+                        ) {
+                            return Ok(SortBinding {
+                                key: SortBindingKey::ReturnName(binding.name().to_string()),
+                                desc: item.desc,
+                            });
+                        }
+                        return Err(GqlError::unsupported(
+                            item.span,
+                            "aggregate queries must ORDER BY returned property or aggregate aliases",
+                        ));
+                    }
                     if return_distinct {
                         if let Some(binding) = returned_join_property_binding(
                             returns,
@@ -690,12 +708,24 @@ fn bind_join_returns(
                     name: projection_name(item),
                 }
             }
-            ReturnExpr::Aggregate { span, .. } => {
-                return Err(GqlError::unsupported(
-                    *span,
-                    "aggregates over multi-pattern joins require a later phase",
-                ));
-            }
+            ReturnExpr::Aggregate {
+                func,
+                distinct,
+                arg,
+                ..
+            } => ReturnBinding::Aggregate {
+                func: bind_aggregate_func(*func),
+                arg: bind_join_aggregate_arg(
+                    *func,
+                    arg,
+                    node_slots,
+                    slot_by_var,
+                    rel_by_var,
+                    path_by_var,
+                )?,
+                distinct: *distinct,
+                name: projection_name(item),
+            },
             ReturnExpr::Func {
                 name: func_name,
                 args,
@@ -741,6 +771,95 @@ fn bind_join_returns(
         returns.push(binding);
     }
     Ok(returns)
+}
+
+fn bind_join_aggregate_arg(
+    func: ast::AggregateFunc,
+    arg: &ast::AggregateArg,
+    node_slots: &[LogicalJoinNodeSlot],
+    slot_by_var: &std::collections::HashMap<String, usize>,
+    rel_by_var: &std::collections::HashMap<String, usize>,
+    path_by_var: &std::collections::HashMap<String, usize>,
+) -> Result<AggregateArg, GqlError> {
+    match arg {
+        ast::AggregateArg::All { span } => {
+            if func == ast::AggregateFunc::Count {
+                Ok(AggregateArg::All)
+            } else {
+                Err(GqlError::bind(
+                    *span,
+                    "only count(*) may use '*' as an aggregate argument",
+                ))
+            }
+        }
+        ast::AggregateArg::Var { var, span } => {
+            if let Some(slot) = slot_by_var.get(&var.text).copied() {
+                if aggregate_accepts_value(func) {
+                    Ok(AggregateArg::Node(BindingSide::PathNode(slot)))
+                } else {
+                    Err(GqlError::bind(
+                        *span,
+                        format!(
+                            "aggregate `{}` requires a property argument",
+                            aggregate_name(func)
+                        ),
+                    ))
+                }
+            } else if rel_by_var.contains_key(&var.text) {
+                Err(GqlError::unsupported(
+                    *span,
+                    "aggregates over multi-pattern relationship variables require a later phase",
+                ))
+            } else if path_by_var.contains_key(&var.text) {
+                Err(GqlError::unsupported(
+                    *span,
+                    "aggregates over multi-pattern path variables require a later phase",
+                ))
+            } else {
+                Err(GqlError::bind(
+                    *span,
+                    format!("unknown aggregate variable `{}`", var.text),
+                ))
+            }
+        }
+        ast::AggregateArg::Property {
+            var,
+            property,
+            span: _,
+        } => {
+            let slot = slot_by_var.get(&var.text).copied().ok_or_else(|| {
+                if rel_by_var.contains_key(&var.text) {
+                    GqlError::unsupported(
+                        property.span,
+                        "relationship properties over multi-pattern joins require a later phase",
+                    )
+                } else if path_by_var.contains_key(&var.text) {
+                    GqlError::unsupported(
+                        property.span,
+                        "path properties over multi-pattern joins require a later phase",
+                    )
+                } else {
+                    GqlError::bind(
+                        var.span,
+                        format!("unknown aggregate variable `{}`", var.text),
+                    )
+                }
+            })?;
+            if !node_slots[slot].properties.contains(&property.text) {
+                return Err(GqlError::bind(
+                    property.span,
+                    format!(
+                        "unknown property `{}` for label `{}`",
+                        property.text, node_slots[slot].label
+                    ),
+                ));
+            }
+            Ok(AggregateArg::Property {
+                side: BindingSide::PathNode(slot),
+                property: property.text.clone(),
+            })
+        }
+    }
 }
 
 fn bind_join_relationship_return_alias(

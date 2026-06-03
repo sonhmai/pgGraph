@@ -553,6 +553,10 @@ Aggregate behavior:
 - Aggregate-only empty inputs return one row with `0`, `null`, or `[]`
   according to the aggregate.
 - Aggregate `DISTINCT` is supported.
+- Multi-pattern aggregate reads support `count(*)`, node-value
+  `count`/`collect`, and node-property `count`, `sum`, `avg`, `min`, `max`,
+  and `collect`. Relationship-value and path-value aggregate inputs in
+  multi-pattern reads remain outside this release's GQL subset.
 
 Wildcard path-variable reads support `WHERE`, `RETURN`, `SKIP`, and `LIMIT` in this
 phase. They can bind node variables across fixed paths, bind relationship
@@ -576,12 +580,13 @@ node-property `WHERE` predicates filter after all referenced slots are bound,
 fixed single-hop relationship variables can be returned as coordinate identity
 objects, fixed single-hop path variables can be returned as path JSON objects,
 `nodes(path)`, `relationships(path)`, and `length(path)` can project from fixed
-single-hop path variables,
+single-hop path variables, node and node-property aggregate inputs can be
+grouped over joined rows,
 `ORDER BY` can sort joined node properties or returned property aliases, and
 `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
 multi-pattern reads must order by returned scalar expressions. Multi-pattern
-reads currently reject `WITH`, aggregates, optional matches, variable-length
-relationships, and relationship properties.
+reads currently reject `WITH`, optional matches, variable-length relationships,
+relationship properties, and relationship/path aggregate inputs.
 
 Path behavior:
 
@@ -621,7 +626,8 @@ Not included in this release's GQL subset:
 - Path-function `WITH` projections.
 - Aggregate `WITH` projections.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern aggregates and variable-length relationships.
+- Multi-pattern relationship/path aggregate inputs and variable-length
+  relationships.
 - Node-only optional matches.
 - Multi-pattern optional joins.
 
