@@ -739,6 +739,12 @@ fn bind_join_distinct_stage(
     let mut seen = std::collections::HashSet::with_capacity(items.len());
     let mut stage = Vec::with_capacity(items.len());
     for item in items {
+        if let ReturnExpr::Aggregate { span, .. } = &item.expr {
+            return Err(GqlError::unsupported(
+                *span,
+                "aggregate WITH DISTINCT projections require grouped row streams from a later read phase",
+            ));
+        }
         let (name, binding) = bind_join_with_item(
             item,
             node_slots,
@@ -771,6 +777,25 @@ fn bind_join_projection_scope(
     path_slots: &mut Vec<LogicalJoinPathSlot>,
     path_by_var: &std::collections::HashMap<String, usize>,
 ) -> Result<JoinProjectionScope, GqlError> {
+    let has_aggregate = items
+        .iter()
+        .any(|item| matches!(&item.expr, ReturnExpr::Aggregate { .. }));
+    if has_aggregate
+        && items
+            .iter()
+            .any(|item| !matches!(&item.expr, ReturnExpr::Aggregate { .. }))
+    {
+        let span = items
+            .iter()
+            .find_map(|item| {
+                matches!(&item.expr, ReturnExpr::Aggregate { .. }).then_some(item.span)
+            })
+            .expect("has_aggregate found an aggregate item");
+        return Err(GqlError::unsupported(
+            span,
+            "grouped aggregate WITH projections require grouped row streams from a later read phase",
+        ));
+    }
     let mut nodes = std::collections::HashMap::with_capacity(items.len());
     let mut properties = std::collections::HashMap::with_capacity(items.len());
     let mut values = std::collections::HashMap::with_capacity(items.len());
@@ -966,12 +991,24 @@ fn bind_join_with_item(
                 property: property.text.clone(),
             }
         }
-        ReturnExpr::Aggregate { span, .. } => {
-            return Err(GqlError::unsupported(
-                *span,
-                "aggregate WITH projections require row-stream aggregation from a later read phase",
-            ));
-        }
+        ReturnExpr::Aggregate {
+            func,
+            distinct,
+            arg,
+            ..
+        } => JoinWithBinding::Value(ReturnBinding::Aggregate {
+            func: bind_aggregate_func(*func),
+            arg: bind_join_aggregate_arg(
+                *func,
+                arg,
+                node_slots,
+                slot_by_var,
+                rel_by_var,
+                path_by_var,
+            )?,
+            distinct: *distinct,
+            name: projection_name(item),
+        }),
         ReturnExpr::Func {
             name: func_name,
             args,
