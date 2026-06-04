@@ -687,7 +687,11 @@ fn bind_join_with_clauses(
     let mut aggregate_group_slots = Vec::new();
     let mut has_aggregate_projection = false;
     for clause in clauses {
-        if clause.distinct {
+        let has_direct_aggregate = clause
+            .items
+            .iter()
+            .any(|item| matches!(&item.expr, ReturnExpr::Aggregate { .. }));
+        if clause.distinct && !has_direct_aggregate {
             distinct_stages.push(bind_join_distinct_stage(
                 &clause.items,
                 node_slots,

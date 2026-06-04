@@ -2183,6 +2183,67 @@ fn multi_pattern_join_supports_with_aggregate_aliases() {
             serde_json::json!({"total": 1})
         ]
     );
+
+    let distinct = bind_statement_query(
+        "MATCH p=(u:users)-[r:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH DISTINCT c.name AS company, count(DISTINCT r) AS rels \
+         RETURN company, rels ORDER BY company",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(distinct_logical) = distinct else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(distinct_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(distinct_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    assert!(distinct_physical.distinct_stages.is_empty());
+    assert_eq!(distinct_physical.aggregate_group_slots.len(), 1);
+
+    let distinct_rows = execute_join(&engine_fixture(), &distinct_physical, None).unwrap();
+    let distinct_projected = project_join_rows(
+        distinct_rows,
+        &distinct_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        distinct_projected,
+        vec![
+            serde_json::json!({"company": "Acme", "rels": 1}),
+            serde_json::json!({"company": "Bell", "rels": 1})
+        ]
+    );
+
+    let distinct_all = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH DISTINCT count(*) AS rows \
+         RETURN rows",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(distinct_all_logical) = distinct_all else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(distinct_all_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(distinct_all_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+    let distinct_all_rows = execute_join(&engine_fixture(), &distinct_all_physical, None).unwrap();
+    let distinct_all_projected = project_join_rows(
+        distinct_all_rows,
+        &distinct_all_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(distinct_all_projected, vec![serde_json::json!({"rows": 2})]);
 }
 
 #[test]
@@ -2219,10 +2280,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
             "multi-pattern OPTIONAL MATCH requires a later join phase",
-        ),
-        (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH DISTINCT count(*) AS rows RETURN rows",
-            "aggregate WITH DISTINCT projections require grouped row streams from a later read phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH count(*) AS rows WITH DISTINCT rows AS total RETURN total",

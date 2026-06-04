@@ -1361,7 +1361,7 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
          FROM graph.gql(
              'MATCH p=(u:graph_test_users_pgtest)-[r:friend]->(c:graph_test_users_pgtest),
                     (v:graph_test_users_pgtest)-[:friend]->(c)
-              WITH c.name AS target, count(*) AS rows, count(DISTINCT r) AS rels,
+              WITH DISTINCT c.name AS target, count(*) AS rows, count(DISTINCT r) AS rels,
                    collect(p) AS paths
               RETURN target, rows, rels, paths
               ORDER BY rows DESC, target',
