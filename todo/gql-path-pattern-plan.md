@@ -450,8 +450,11 @@ path-value `count`/`collect`, and projected-row `RETURN DISTINCT`, plus node
 and node-property, relationship, and path `WITH` projections with
 `WITH DISTINCT`, path-function `WITH` projections, and aggregate `WITH`
 projections, plus bounded variable-length relationship patterns. Relationship
-properties and relationship/path property aggregate inputs remain planned within
-this phase.
+properties and relationship/path property aggregate inputs are deferred out of
+this path-pattern plan pending a relationship source-row hydration contract.
+The current row/value layer hydrates node coordinates only; adding relationship
+properties needs edge-row identity, ACL, stale-row recheck, and JSON projection
+semantics that should be designed as a separate relationship-hydration phase.
 
 Target examples:
 
@@ -506,7 +509,9 @@ Status: compatible path-node property predicates implemented and documented on
 2026-06-02. Verification is recorded in `todo/measurements.md` under
 "Phase 3C Wildcard Property Predicate Slice". Partially available and
 ambiguous JSONB path semantics are rejected with typed binding errors as of
-2026-06-04. Relationship properties remain planned.
+2026-06-04. Relationship properties are deferred to the relationship
+source-row hydration phase described in Phase 3B instead of being tracked as
+wildcard node-property predicate work.
 
 Target examples:
 
@@ -607,4 +612,8 @@ Phase 3 should not be treated as one large all-or-nothing milestone. Each subpha
 Status: parser fuzz target coverage for the GQL and Cypher frontends is in
 place. Local macOS fuzz builds use `graph/fuzz/build.sh` so `cargo-fuzz`
 preserves the pgrx dynamic-lookup linker flag; measurements are recorded in
-`todo/measurements.md` under "Phase 3 Parser Fuzz Gate".
+`todo/measurements.md` under "Phase 3 Parser Fuzz Gate". The path-pattern
+Phase 3 plan is complete for topology/path expansion, wildcard node-property
+predicates, bounded variable-length wildcard paths, and exact wildcard
+relationship deletes. Relationship source-row hydration and relationship
+property projection remain future work outside this plan.

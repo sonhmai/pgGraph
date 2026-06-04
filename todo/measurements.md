@@ -304,6 +304,11 @@
 - `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes `graph.gql()` relationship type alternation for wildcard path variables.
 - `cargo test --features pg17` from `graph/`: passed, 506 tests, 1 ignored.
 
+## 2026-06-04 Phase 3 Path-Pattern Completion Boundary
+
+- `git diff --check` from repository root: passed.
+- Documentation-only TODO update. Records that the Phase 3 path-pattern plan is complete for topology/path expansion, wildcard node-property predicates, bounded variable-length wildcard paths, and exact wildcard relationship deletes. Relationship source-row hydration and relationship property projection remain future work outside this plan.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.
