@@ -4,7 +4,7 @@ use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 use crate::safety::{GraphError, GraphResult};
 
-use super::execute::{GqlNodeCoordinate, GqlNodeRow, GqlRow};
+use super::execute::{GqlNodeCoordinate, GqlNodeRow, GqlPathRelationship, GqlRow};
 use super::logical_plan::{
     AggregateArg, AggregateFunc, BindingSide, BoundCmpOp, PathFunc, Predicate, SortBindingKey,
     ValueExpr,
@@ -239,6 +239,8 @@ fn flush_optional_source(
             rel_end: None,
             path_nodes: Vec::new(),
             path_relationships: Vec::new(),
+            join_node_slots: None,
+            join_relationships: None,
         };
         projectable.push(null_row);
     }
@@ -1784,6 +1786,8 @@ fn node_row_as_gql_row(row: &GqlNodeRow) -> GqlRow {
         rel_end: Some(row.node.clone()),
         path_nodes: vec![row.node.clone()],
         path_relationships: Vec::new(),
+        join_node_slots: None,
+        join_relationships: None,
     }
 }
 
@@ -1949,19 +1953,31 @@ fn join_relationship_value_by_slot(
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern relationship slot {slot_index}"),
         })?;
-    let Some(relationship) = row.path_relationships.get(slot.pattern_slot) else {
-        return Err(GraphError::GqlExecution {
-            reason: format!(
-                "multi-pattern relationship slot `{}` points at missing pattern {}",
-                slot.var, slot.pattern_slot
-            ),
-        });
+    let Some(relationship) = join_relationship(row, slot.pattern_slot)? else {
+        return Ok(serde_json::Value::Null);
     };
     Ok(serde_json::json!({
         "_type": &relationship.rel_type,
         "_start": join_relationship_endpoint(&relationship.start, plan)?,
         "_end": join_relationship_endpoint(&relationship.end, plan)?,
     }))
+}
+
+fn join_relationship(
+    row: &GqlRow,
+    pattern_slot: usize,
+) -> GraphResult<Option<&GqlPathRelationship>> {
+    if let Some(relationships) = &row.join_relationships {
+        let Some(relationship) = relationships.get(pattern_slot) else {
+            return Err(GraphError::GqlExecution {
+                reason: format!(
+                    "multi-pattern relationship pattern {pattern_slot} is out of range"
+                ),
+            });
+        };
+        return Ok(relationship.as_ref());
+    }
+    Ok(row.path_relationships.get(pattern_slot))
 }
 
 fn join_path_value(
@@ -2003,33 +2019,15 @@ fn join_path_value_by_slot(
                 slot.var, slot.pattern_slot
             ),
         })?;
-    let source =
-        row.path_nodes
-            .get(pattern.source_slot)
-            .ok_or_else(|| GraphError::GqlExecution {
-                reason: format!(
-                    "multi-pattern path slot `{}` source node slot {} is missing",
-                    slot.var, pattern.source_slot
-                ),
-            })?;
-    let target =
-        row.path_nodes
-            .get(pattern.target_slot)
-            .ok_or_else(|| GraphError::GqlExecution {
-                reason: format!(
-                    "multi-pattern path slot `{}` target node slot {} is missing",
-                    slot.var, pattern.target_slot
-                ),
-            })?;
-    let relationship = row
-        .path_relationships
-        .get(slot.pattern_slot)
-        .ok_or_else(|| GraphError::GqlExecution {
-            reason: format!(
-                "multi-pattern path slot `{}` relationship pattern {} is missing",
-                slot.var, slot.pattern_slot
-            ),
-        })?;
+    let Some(source) = coordinate(row, BindingSide::PathNode(pattern.source_slot)) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(target) = coordinate(row, BindingSide::PathNode(pattern.target_slot)) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(relationship) = join_relationship(row, slot.pattern_slot)? else {
+        return Ok(serde_json::Value::Null);
+    };
 
     Ok(serde_json::json!({
         "_path": {
@@ -2088,7 +2086,7 @@ fn join_path_length(row: &GqlRow, plan: &PhysicalJoinPlan, path_var: &str) -> Gr
         .ok_or_else(|| GraphError::GqlExecution {
             reason: format!("unknown multi-pattern path slot `{path_var}`"),
         })?;
-    Ok(if row.path_relationships.get(slot.pattern_slot).is_some() {
+    Ok(if join_relationship(row, slot.pattern_slot)?.is_some() {
         1
     } else {
         0
@@ -2253,7 +2251,10 @@ fn coordinate(row: &GqlRow, side: BindingSide) -> Option<&GqlNodeCoordinate> {
     match side {
         BindingSide::Source => Some(&row.source),
         BindingSide::Target => row.target.as_ref(),
-        BindingSide::PathNode(idx) => row.path_nodes.get(idx),
+        BindingSide::PathNode(idx) => match &row.join_node_slots {
+            Some(slots) => slots.get(idx).and_then(Option::as_ref),
+            None => row.path_nodes.get(idx),
+        },
     }
 }
 

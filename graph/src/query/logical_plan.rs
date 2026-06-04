@@ -133,6 +133,8 @@ pub(crate) struct LogicalNodeScan {
 /// Bound multi-pattern join query.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalJoinPlan {
+    /// Whether unmatched pattern expansions should be null-extended.
+    pub(crate) optional: bool,
     /// Node variables in row-slot order.
     pub(crate) node_slots: Vec<LogicalJoinNodeSlot>,
     /// Relationship variables in row-slot order.

@@ -45,6 +45,7 @@ pub(crate) fn lower_statement(statement: LogicalStatement) -> PhysicalStatement 
 
 fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
     PhysicalJoinPlan {
+        optional: plan.optional,
         node_slots: plan
             .node_slots
             .into_iter()

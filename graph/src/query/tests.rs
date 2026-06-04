@@ -2319,6 +2319,105 @@ fn multi_pattern_join_supports_with_aggregate_aliases() {
 }
 
 #[test]
+fn multi_pattern_optional_join_null_extends_missing_patterns() {
+    let statement = bind_statement_query(
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         RETURN u.name AS user, c.name AS company, v.name AS peer \
+         ORDER BY user, peer",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(logical) = statement else {
+        panic!("expected join read plan");
+    };
+    assert!(logical.optional);
+    let super::physical_plan::PhysicalStatement::JoinRead(physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(logical))
+    else {
+        panic!("expected physical join read plan");
+    };
+    assert!(physical.optional);
+
+    let mut optional_engine = engine_fixture();
+    let grace_idx = optional_engine.node_store.add_node(10, "u3".to_string());
+    optional_engine.resolution_insert(10, "u3", grace_idx);
+    optional_engine.insert_table_membership(10, grace_idx);
+    let mut optional_hydrated = hydrated_fixture();
+    optional_hydrated.insert(
+        (10, "u3".to_string()),
+        serde_json::json!({"id": "u3", "name": "Grace"}),
+    );
+    let rows = execute_join(&optional_engine, &physical, None).unwrap();
+    let projected = project_join_rows(
+        rows,
+        &physical,
+        &optional_hydrated,
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        projected,
+        vec![
+            serde_json::json!({"user": "Ada", "company": "Acme", "peer": "Ada"}),
+            serde_json::json!({"user": "Grace", "company": null, "peer": null}),
+            serde_json::json!({"user": "Linus", "company": "Bell", "peer": "Linus"})
+        ]
+    );
+
+    let optional_path = bind_statement_query(
+        "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), \
+         p=(v:users)-[r:friend]->(u) \
+         RETURN u.name AS user, c.name AS company, v.name AS peer, r, p, length(p) AS hops \
+         ORDER BY user",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(optional_path_logical) = optional_path
+    else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(optional_path_physical) = lower_statement(
+        super::logical_plan::LogicalStatement::JoinRead(optional_path_logical),
+    ) else {
+        panic!("expected physical join read plan");
+    };
+
+    let mut optional_path_engine = engine_fixture();
+    optional_path_engine.register_edge_type("friend").unwrap();
+    let optional_path_rows =
+        execute_join(&optional_path_engine, &optional_path_physical, None).unwrap();
+    let optional_path_projected = project_join_rows(
+        optional_path_rows,
+        &optional_path_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        optional_path_projected,
+        vec![
+            serde_json::json!({
+                "user": "Ada",
+                "company": "Acme",
+                "peer": null,
+                "r": null,
+                "p": null,
+                "hops": 0
+            }),
+            serde_json::json!({
+                "user": "Linus",
+                "company": "Bell",
+                "peer": null,
+                "r": null,
+                "p": null,
+                "hops": 0
+            })
+        ]
+    );
+}
+
+#[test]
 fn multi_pattern_join_rejects_deferred_shapes() {
     for (query, expected) in [
         (
@@ -2348,10 +2447,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "MATCH (u:users)-[:works_at {role: 'eng'}]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
             "relationship properties and variable length in multi-pattern joins require a later phase",
-        ),
-        (
-            "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
-            "multi-pattern OPTIONAL MATCH requires a later join phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH c AS company RETURN u",

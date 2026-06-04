@@ -1270,6 +1270,29 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
 
     assert!(join_path_function_shape);
 
+    let optional_join_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->>'source' = 'Alice'
+                    AND row->>'target' = 'Bob'
+                    AND row->'peer' = 'null'::jsonb
+                    AND row->'rel' = 'null'::jsonb
+                    AND row->'path' = 'null'::jsonb
+                    AND (row->>'hops')::integer = 0
+                )
+         FROM graph.gql(
+             'OPTIONAL MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    p=(v:graph_test_users_pgtest)-[r:friend]->(u)
+              WHERE u.name = ''Alice''
+              RETURN u.name AS source, c.name AS target, v.name AS peer,
+                     r AS rel, p AS path, length(p) AS hops',
+             hydrate := true
+         )",
+    )
+    .expect("multi-pattern optional projection query failed")
+    .unwrap_or(false);
+
+    assert!(optional_join_shape);
+
     let join_aggregate_shape = Spi::get_one::<bool>(
         "SELECT bool_and(
                     row->>'target' = 'Bob'

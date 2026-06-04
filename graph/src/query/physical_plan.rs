@@ -134,6 +134,8 @@ pub(crate) struct PhysicalPlan {
 /// Physical multi-pattern join query.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhysicalJoinPlan {
+    /// Whether unmatched pattern expansions should be null-extended.
+    pub(crate) optional: bool,
     /// Node variables in row-slot order.
     pub(crate) node_slots: Vec<PhysicalJoinNodeSlot>,
     /// Relationship variables in row-slot order.

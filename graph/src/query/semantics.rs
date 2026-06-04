@@ -180,12 +180,6 @@ fn bind_join_read(
     query: &crate::gql::ast::Query,
     catalog: &impl CatalogSnapshot,
 ) -> Result<LogicalJoinPlan, GqlError> {
-    if query.match_.optional {
-        return Err(GqlError::unsupported(
-            query.match_.span,
-            "multi-pattern OPTIONAL MATCH requires a later join phase",
-        ));
-    }
     validate_row_window(query)?;
 
     let mut node_slots = Vec::new();
@@ -297,6 +291,7 @@ fn bind_join_read(
     )?;
     let required_table_oids = node_slots.iter().map(|slot| slot.table_oid).collect();
     Ok(LogicalJoinPlan {
+        optional: query.match_.optional,
         node_slots,
         rel_slots,
         path_slots,

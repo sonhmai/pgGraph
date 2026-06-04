@@ -590,10 +590,12 @@ deduplicate projected aggregate aliases, final aggregate expressions can read
 projected aggregate aliases after an aggregate `WITH` boundary,
 `ORDER BY` can sort joined node properties or returned property aliases, and
 `RETURN DISTINCT`, `SKIP`, and `LIMIT` apply after projection. Distinct
-multi-pattern reads must order by returned scalar expressions. Multi-pattern
-reads currently reject optional matches, variable-length relationships,
-relationship properties, relationship/path property aggregate inputs, numeric
-aggregates over relationship/path values.
+multi-pattern reads must order by returned scalar expressions. Optional
+multi-pattern reads null-extend unmatched fixed single-hop pattern expansions
+and return JSON `null` for missing node, relationship, and path projections.
+Multi-pattern reads currently reject variable-length relationships,
+relationship properties, relationship/path property aggregate inputs, and
+numeric aggregates over relationship/path values.
 
 Path behavior:
 
@@ -632,8 +634,8 @@ Not included in this release's GQL subset:
 - Relationship source-row hydration.
 - Named variables on variable-length wildcard path segments.
 - Multi-pattern relationship/path property aggregate inputs, numeric
-  aggregates over relationship/path values, optional joins, and variable-length
-  relationships.
+  aggregates over relationship/path values, relationship properties, and
+  variable-length relationships.
 - Node-only optional matches.
 
 `CREATE (n:label {properties}) RETURN ...` is supported for a single node whose

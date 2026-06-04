@@ -37,6 +37,10 @@ pub(crate) struct GqlRow {
     pub(crate) path_nodes: Vec<GqlNodeCoordinate>,
     /// Path relationships in query traversal order.
     pub(crate) path_relationships: Vec<GqlPathRelationship>,
+    /// Multi-pattern join node slots by logical slot index.
+    pub(crate) join_node_slots: Option<Vec<Option<GqlNodeCoordinate>>>,
+    /// Multi-pattern join relationship slots by pattern index.
+    pub(crate) join_relationships: Option<Vec<Option<GqlPathRelationship>>>,
 }
 
 /// One relationship step in a GQL path.
@@ -199,7 +203,7 @@ pub(crate) fn execute_join(
     let row_cap = plan.execution_row_cap();
     let state = JoinState {
         node_slots: vec![None; plan.node_slots.len()],
-        relationships: Vec::with_capacity(plan.patterns.len()),
+        relationships: vec![None; plan.patterns.len()],
     };
     expand_join_pattern(
         engine,
@@ -239,13 +243,36 @@ fn expand_join_pattern(
         rows.push(project_join_state(engine, state)?);
         return Ok(());
     };
+    if plan.optional
+        && state
+            .relationships
+            .iter()
+            .take(pattern_idx)
+            .any(Option::is_none)
+    {
+        expand_join_pattern(
+            engine,
+            neighbors,
+            plan,
+            rel_type_ids,
+            tenant,
+            state,
+            pattern_idx + 1,
+            rows,
+            row_cap,
+        )?;
+        return Ok(());
+    }
     let source_candidates =
         join_source_candidates(engine, plan, &state, pattern.source_slot, tenant);
+    let null_extend_per_source = plan.optional && state.node_slots.iter().all(Option::is_none);
+    let mut matched_any_source = false;
     for source_idx in source_candidates {
         if !join_node_matches(engine, plan, pattern.source_slot, source_idx, tenant) {
             continue;
         }
         let state = state.with_node(pattern.source_slot, source_idx);
+        let mut matched_source = false;
         for target in neighbors.for_direction_any(pattern.direction, source_idx) {
             if target.type_id != rel_type_ids[pattern_idx]
                 || !join_node_matches(engine, plan, pattern.target_slot, target.node_idx, tenant)
@@ -255,7 +282,9 @@ fn expand_join_pattern(
             if state.node_slots[pattern.target_slot].is_some_and(|idx| idx != target.node_idx) {
                 continue;
             }
-            let next_state = state.with_target(pattern.target_slot, source_idx, target);
+            matched_source = true;
+            let next_state =
+                state.with_target(pattern_idx, pattern.target_slot, source_idx, target);
             expand_join_pattern(
                 engine,
                 neighbors,
@@ -270,6 +299,41 @@ fn expand_join_pattern(
             if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
                 return Ok(());
             }
+        }
+        if null_extend_per_source && !matched_source {
+            let next_state = state.without_relationship(pattern_idx);
+            expand_join_pattern(
+                engine,
+                neighbors,
+                plan,
+                rel_type_ids,
+                tenant,
+                next_state,
+                pattern_idx + 1,
+                rows,
+                row_cap,
+            )?;
+            if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+                return Ok(());
+            }
+        }
+        matched_any_source |= matched_source;
+    }
+    if plan.optional && !null_extend_per_source && !matched_any_source {
+        let next_state = state.without_relationship(pattern_idx);
+        expand_join_pattern(
+            engine,
+            neighbors,
+            plan,
+            rel_type_ids,
+            tenant,
+            next_state,
+            pattern_idx + 1,
+            rows,
+            row_cap,
+        )?;
+        if plan.limit.is_some() && !plan.cap_exhaustion_is_error() && rows.len() >= row_cap {
+            return Ok(());
         }
     }
     Ok(())
@@ -629,7 +693,7 @@ impl PathState {
 #[derive(Debug, Clone)]
 struct JoinState {
     node_slots: Vec<Option<u32>>,
-    relationships: Vec<GqlRelationshipStep>,
+    relationships: Vec<Option<GqlRelationshipStep>>,
 }
 
 impl JoinState {
@@ -639,15 +703,27 @@ impl JoinState {
         next
     }
 
-    fn with_target(&self, slot: usize, source_idx: u32, target: GqlStepTarget) -> Self {
+    fn with_target(
+        &self,
+        pattern_slot: usize,
+        node_slot: usize,
+        source_idx: u32,
+        target: GqlStepTarget,
+    ) -> Self {
         let mut next = self.clone();
-        next.node_slots[slot] = Some(target.node_idx);
-        next.relationships.push(GqlRelationshipStep {
+        next.node_slots[node_slot] = Some(target.node_idx);
+        next.relationships[pattern_slot] = Some(GqlRelationshipStep {
             from_idx: source_idx,
             to_idx: target.node_idx,
             orientation: target.orientation,
             type_id: target.type_id,
         });
+        next
+    }
+
+    fn without_relationship(&self, pattern_slot: usize) -> Self {
+        let mut next = self.clone();
+        next.relationships[pattern_slot] = None;
         next
     }
 }
@@ -910,44 +986,38 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
                 })
             })
             .collect::<GraphResult<Vec<_>>>()?,
+        join_node_slots: None,
+        join_relationships: None,
     })
 }
 
 fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> {
-    let node_indices = state
+    let join_node_slots = state
         .node_slots
-        .into_iter()
-        .map(|node| {
-            node.ok_or_else(|| GraphError::GqlExecution {
-                reason: "multi-pattern join produced an unbound node slot".to_string(),
-            })
-        })
-        .collect::<GraphResult<Vec<_>>>()?;
-    let path_nodes = node_indices
         .iter()
-        .map(|node_idx| coordinate(engine, *node_idx))
+        .map(|node| node.map(|node_idx| coordinate(engine, node_idx)))
+        .collect::<Vec<_>>();
+    let path_nodes = join_node_slots
+        .iter()
+        .filter_map(Clone::clone)
         .collect::<Vec<_>>();
     let Some(source) = path_nodes.first().cloned() else {
         return Err(GraphError::GqlExecution {
-            reason: "multi-pattern join produced no node slots".to_string(),
+            reason: "multi-pattern join produced no bound node slots".to_string(),
         });
     };
     let target = path_nodes.last().cloned();
-    let path_relationships = state
+    let join_relationships = state
         .relationships
         .iter()
         .map(|relationship| {
-            let (start_idx, end_idx) = match relationship.orientation {
-                EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
-                EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
-            };
-            Ok(GqlPathRelationship {
-                rel_type: edge_type_label(engine, relationship.type_id)?,
-                start: coordinate(engine, start_idx),
-                end: coordinate(engine, end_idx),
-            })
+            relationship
+                .as_ref()
+                .map(|relationship| gql_path_relationship(engine, relationship))
+                .transpose()
         })
         .collect::<GraphResult<Vec<_>>>()?;
+    let path_relationships = join_relationships.iter().filter_map(Clone::clone).collect();
     Ok(GqlRow {
         source,
         target,
@@ -955,6 +1025,23 @@ fn project_join_state(engine: &Engine, state: JoinState) -> GraphResult<GqlRow> 
         rel_end: None,
         path_nodes,
         path_relationships,
+        join_node_slots: Some(join_node_slots),
+        join_relationships: Some(join_relationships),
+    })
+}
+
+fn gql_path_relationship(
+    engine: &Engine,
+    relationship: &GqlRelationshipStep,
+) -> GraphResult<GqlPathRelationship> {
+    let (start_idx, end_idx) = match relationship.orientation {
+        EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
+        EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
+    };
+    Ok(GqlPathRelationship {
+        rel_type: edge_type_label(engine, relationship.type_id)?,
+        start: coordinate(engine, start_idx),
+        end: coordinate(engine, end_idx),
     })
 }
 
@@ -996,6 +1083,8 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
         rel_end,
         path_nodes,
         path_relationships,
+        join_node_slots: None,
+        join_relationships: None,
     })
 }
 
@@ -1007,6 +1096,8 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
         rel_end: None,
         path_nodes: Vec::new(),
         path_relationships: Vec::new(),
+        join_node_slots: None,
+        join_relationships: None,
     }
 }
 

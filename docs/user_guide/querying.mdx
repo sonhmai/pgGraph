@@ -215,10 +215,12 @@ direct aggregate `WITH DISTINCT`, later `WITH DISTINCT` over projected
 aggregate aliases, final aggregate expressions over projected aggregate
 aliases after aggregate `WITH` boundaries, and `SKIP`/`LIMIT`.
 When `RETURN DISTINCT` is combined with `ORDER BY`, the sort keys must be
-returned scalar expressions. Optional multi-pattern joins, variable-length
+returned scalar expressions. Optional multi-pattern joins null-extend
+unmatched fixed single-hop pattern expansions and return JSON `null` for
+missing node, relationship, and path projections. Variable-length
 relationships, relationship properties, relationship/path property aggregate
 inputs, and numeric aggregates over relationship/path values remain outside the
-current subset.
+current multi-pattern subset.
 
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
@@ -270,9 +272,9 @@ Planned outside this subset:
 
 - Relationship source-row hydration.
 - Named variables on variable-length wildcard path segments.
-- Multi-pattern optional joins, variable-length relationships, relationship
-  properties, relationship/path property aggregate inputs, numeric aggregates
-  over relationship/path values.
+- Multi-pattern variable-length relationships, relationship properties,
+  relationship/path property aggregate inputs, and numeric aggregates over
+  relationship/path values.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on
