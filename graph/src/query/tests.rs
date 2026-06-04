@@ -2126,7 +2126,10 @@ fn multi_pattern_join_supports_with_aggregate_aliases() {
     else {
         panic!("expected physical join read plan");
     };
-    assert!(physical.returns.iter().any(ReturnSlot::is_aggregate));
+    assert!(physical
+        .aggregate_projection
+        .iter()
+        .any(ReturnSlot::is_aggregate));
     assert_eq!(physical.aggregate_group_slots.len(), 1);
 
     let rows = execute_join(&engine_fixture(), &physical, None).unwrap();
@@ -2244,6 +2247,75 @@ fn multi_pattern_join_supports_with_aggregate_aliases() {
     .unwrap();
 
     assert_eq!(distinct_all_projected, vec![serde_json::json!({"rows": 2})]);
+
+    let later_distinct = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH c.name AS company, count(*) AS rows \
+         WITH DISTINCT rows AS total \
+         RETURN total ORDER BY total",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(later_distinct_logical) = later_distinct
+    else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(later_distinct_physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(
+            later_distinct_logical,
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let later_distinct_rows =
+        execute_join(&engine_fixture(), &later_distinct_physical, None).unwrap();
+    let later_distinct_projected = project_join_rows(
+        later_distinct_rows,
+        &later_distinct_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        later_distinct_projected,
+        vec![serde_json::json!({"total": 1})]
+    );
+
+    let post_aggregate = bind_statement_query(
+        "MATCH (u:users)-[:works_at]->(c:companies), \
+         (v:users)-[:works_at]->(c) \
+         WITH c.name AS company, count(*) AS rows \
+         RETURN sum(rows) AS total",
+    );
+    let super::logical_plan::LogicalStatement::JoinRead(post_aggregate_logical) = post_aggregate
+    else {
+        panic!("expected join read plan");
+    };
+    let super::physical_plan::PhysicalStatement::JoinRead(post_aggregate_physical) =
+        lower_statement(super::logical_plan::LogicalStatement::JoinRead(
+            post_aggregate_logical,
+        ))
+    else {
+        panic!("expected physical join read plan");
+    };
+
+    let post_aggregate_rows =
+        execute_join(&engine_fixture(), &post_aggregate_physical, None).unwrap();
+    let post_aggregate_projected = project_join_rows(
+        post_aggregate_rows,
+        &post_aggregate_physical,
+        &hydrated_fixture(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        post_aggregate_projected,
+        vec![serde_json::json!({"total": 2.0})]
+    );
 }
 
 #[test]
@@ -2280,14 +2352,6 @@ fn multi_pattern_join_rejects_deferred_shapes() {
         (
             "OPTIONAL MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) RETURN u",
             "multi-pattern OPTIONAL MATCH requires a later join phase",
-        ),
-        (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH count(*) AS rows WITH DISTINCT rows AS total RETURN total",
-            "aggregate WITH DISTINCT projections require grouped row streams from a later read phase",
-        ),
-        (
-            "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH count(*) AS rows RETURN count(*) AS total",
-            "aggregate RETURN expressions after aggregate WITH projections require grouped row streams from a later read phase",
         ),
         (
             "MATCH (u:users)-[:works_at]->(c:companies), (v:users)-[:works_at]->(c) WITH c AS company RETURN u",

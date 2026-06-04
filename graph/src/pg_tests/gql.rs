@@ -1372,6 +1372,38 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     .unwrap_or(false);
 
     assert!(join_aggregate_with_shape);
+
+    let join_post_aggregate_shape = Spi::get_one::<bool>(
+        "SELECT bool_and((row->>'total')::numeric = 1)
+         FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              WITH c.name AS target, count(*) AS rows
+              WITH DISTINCT rows AS total
+              RETURN total
+              ORDER BY total',
+             hydrate := false
+         )",
+    )
+    .expect("multi-pattern post-aggregate WITH DISTINCT query failed")
+    .unwrap_or(false);
+
+    assert!(join_post_aggregate_shape);
+
+    let join_post_aggregate_sum = Spi::get_one::<bool>(
+        "SELECT bool_and((row->>'total')::numeric = 1)
+         FROM graph.gql(
+             'MATCH (u:graph_test_users_pgtest)-[:friend]->(c:graph_test_users_pgtest),
+                    (v:graph_test_users_pgtest)-[:friend]->(c)
+              WITH c.name AS target, count(*) AS rows
+              RETURN sum(rows) AS total',
+             hydrate := false
+         )",
+    )
+    .expect("multi-pattern post-aggregate RETURN aggregate query failed")
+    .unwrap_or(false);
+
+    assert!(join_post_aggregate_sum);
 }
 
 #[pg_test]

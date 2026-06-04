@@ -144,10 +144,14 @@ pub(crate) struct PhysicalJoinPlan {
     pub(crate) patterns: Vec<PhysicalJoinPattern>,
     /// Return slots in requested order.
     pub(crate) returns: Vec<ReturnSlot>,
+    /// Visible row projection produced by the first aggregate `WITH` boundary.
+    pub(crate) aggregate_projection: Vec<ReturnSlot>,
     /// Hidden grouping slots introduced by grouped aggregate `WITH` clauses.
     pub(crate) aggregate_group_slots: Vec<ReturnSlot>,
     /// Row-stream DISTINCT projection stages introduced by `WITH DISTINCT`.
     pub(crate) distinct_stages: Vec<Vec<ReturnSlot>>,
+    /// Projected-row DISTINCT stages introduced after an aggregate `WITH`.
+    pub(crate) post_aggregate_distinct_stages: Vec<Vec<ReturnSlot>>,
     /// Whether final projected rows should be deduplicated.
     pub(crate) distinct: bool,
     /// Optional hydrated-row predicate evaluated after all joined slots bind.
@@ -428,6 +432,13 @@ pub(crate) enum ReturnSlot {
         /// Return column name.
         name: String,
     },
+    /// Value read from a projected row-stream column.
+    Projected {
+        /// Source projected column name.
+        source: String,
+        /// Return column name.
+        name: String,
+    },
     /// Aggregate value.
     Aggregate {
         /// Aggregate function.
@@ -450,6 +461,7 @@ impl ReturnSlot {
             | Self::Path { name }
             | Self::PathFunction { name, .. }
             | Self::Property { name, .. }
+            | Self::Projected { name, .. }
             | Self::Aggregate { name, .. } => name,
         }
     }
@@ -526,7 +538,11 @@ impl PhysicalJoinPlan {
 
     /// Maximum matches the executor should collect for this plan.
     pub(crate) fn execution_row_cap(&self) -> usize {
-        if !self.distinct_stages.is_empty() || has_aggregate_return(&self.returns) {
+        if !self.distinct_stages.is_empty()
+            || !self.post_aggregate_distinct_stages.is_empty()
+            || has_aggregate_return(&self.returns)
+            || !self.aggregate_projection.is_empty()
+        {
             return MAX_GQL_RESULT_ROWS;
         }
         if !self.distinct && self.predicate.is_none() && self.order_by.is_empty() {
@@ -545,7 +561,9 @@ impl PhysicalJoinPlan {
         self.limit.is_none()
             || self.distinct
             || !self.distinct_stages.is_empty()
+            || !self.post_aggregate_distinct_stages.is_empty()
             || has_aggregate_return(&self.returns)
+            || !self.aggregate_projection.is_empty()
             || self.predicate.is_some()
             || !self.order_by.is_empty()
     }

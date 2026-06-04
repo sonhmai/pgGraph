@@ -111,6 +111,41 @@ pub(crate) fn project_join_rows(
         })
         .collect::<GraphResult<Vec<_>>>()?;
     apply_distinct_stages_to_join_rows(&mut rows, plan, hydrated, hydrate_nodes)?;
+    if !plan.aggregate_projection.is_empty() {
+        let mut projected = aggregate_join_rows(
+            &rows,
+            &plan.aggregate_projection,
+            plan,
+            hydrated,
+            hydrate_nodes,
+        )?;
+        apply_distinct_stages_to_projected_rows(
+            &mut projected,
+            &plan.post_aggregate_distinct_stages,
+        )?;
+        if plan.returns.iter().any(ReturnSlot::is_aggregate) {
+            projected = aggregate_projected_rows(&projected, &plan.returns, plan)?;
+            if plan.distinct {
+                dedup_projected_rows(&mut projected)?;
+            }
+            sort_and_window(&mut projected, plan.skip, plan.limit);
+            return Ok(projected.into_iter().map(|row| row.row).collect());
+        }
+
+        let mut final_rows = Vec::with_capacity(projected.len());
+        for row in projected {
+            let output = project_projected_row(&row.row, &plan.returns)?;
+            final_rows.push(ProjectedRow {
+                sort_values: aggregate_sort_values(&output, plan.order_by.as_slice()),
+                row: output,
+            });
+        }
+        if plan.distinct {
+            dedup_projected_rows(&mut final_rows)?;
+        }
+        sort_and_window(&mut final_rows, plan.skip, plan.limit);
+        return Ok(final_rows.into_iter().map(|row| row.row).collect());
+    }
     if plan.returns.iter().any(ReturnSlot::is_aggregate) || !plan.aggregate_group_slots.is_empty() {
         let mut projected =
             aggregate_join_rows(&rows, &plan.returns, plan, hydrated, hydrate_nodes)?;
@@ -298,6 +333,18 @@ fn apply_distinct_stages_to_join_rows(
     Ok(())
 }
 
+fn apply_distinct_stages_to_projected_rows(
+    rows: &mut Vec<ProjectedRow>,
+    stages: &[Vec<ReturnSlot>],
+) -> GraphResult<()> {
+    for stage in stages {
+        dedup_by_slots(rows, stage, |row, slot| {
+            project_projected_slot_value(&row.row, slot)
+        })?;
+    }
+    Ok(())
+}
+
 fn dedup_by_slots<Row, KeyValue>(
     rows: &mut Vec<Row>,
     slots: &[ReturnSlot],
@@ -427,6 +474,21 @@ fn aggregate_join_rows(
         &plan.aggregate_group_slots,
         |row, slot| project_join_slot_value(row, slot, plan, hydrated, hydrate_nodes),
         |row, arg| aggregate_arg_value_for_join(row, arg, plan, hydrated, hydrate_nodes),
+        |output| aggregate_sort_values(output, plan.order_by.as_slice()),
+    )
+}
+
+fn aggregate_projected_rows(
+    rows: &[ProjectedRow],
+    returns: &[ReturnSlot],
+    plan: &PhysicalJoinPlan,
+) -> GraphResult<Vec<ProjectedRow>> {
+    aggregate_by(
+        rows,
+        returns,
+        &[],
+        |row, slot| project_projected_slot_value(&row.row, slot),
+        |row, arg| aggregate_arg_value_for_projected(&row.row, arg),
         |output| aggregate_sort_values(output, plan.order_by.as_slice()),
     )
 }
@@ -1286,6 +1348,11 @@ fn project_row(
                         .unwrap_or(serde_json::Value::Null),
                 );
             }
+            ReturnSlot::Projected { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "projected slots require an aggregate WITH row stream".to_string(),
+                });
+            }
             ReturnSlot::Aggregate { name, .. } => {
                 output.insert(name.clone(), serde_json::Value::Null);
             }
@@ -1335,9 +1402,11 @@ fn project_wildcard_path_row(
             ReturnSlot::Relationship { name } => {
                 output.insert(name.clone(), wildcard_relationship_value(row, plan)?);
             }
-            ReturnSlot::Property { .. } | ReturnSlot::Aggregate { .. } => {
+            ReturnSlot::Property { .. }
+            | ReturnSlot::Projected { .. }
+            | ReturnSlot::Aggregate { .. } => {
                 return Err(GraphError::GqlExecution {
-                    reason: "wildcard path plans cannot project properties or aggregates"
+                    reason: "wildcard path plans cannot project properties, projected values, or aggregates"
                         .to_string(),
                 });
             }
@@ -1408,9 +1477,64 @@ fn project_join_row(
                     reason: "unsupported multi-pattern join return slot".to_string(),
                 });
             }
+            ReturnSlot::Projected { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "projected slots require an aggregate WITH row stream".to_string(),
+                });
+            }
         }
     }
     Ok(serde_json::Value::Object(output))
+}
+
+fn project_projected_row(
+    row: &serde_json::Value,
+    returns: &[ReturnSlot],
+) -> GraphResult<serde_json::Value> {
+    let mut output = serde_json::Map::new();
+    for slot in returns {
+        match slot {
+            ReturnSlot::Projected { source, name } => {
+                output.insert(name.clone(), projected_value(row, source)?);
+            }
+            ReturnSlot::Aggregate { name, .. } => {
+                output.insert(name.clone(), serde_json::Value::Null);
+            }
+            _ => {
+                return Err(GraphError::GqlExecution {
+                    reason:
+                        "aggregate WITH row streams can only project projected values or aggregates"
+                            .to_string(),
+                });
+            }
+        }
+    }
+    Ok(serde_json::Value::Object(output))
+}
+
+fn project_projected_slot_value(
+    row: &serde_json::Value,
+    slot: &ReturnSlot,
+) -> GraphResult<serde_json::Value> {
+    match slot {
+        ReturnSlot::Projected { source, .. } => projected_value(row, source),
+        ReturnSlot::Aggregate { .. } => Err(GraphError::GqlExecution {
+            reason: "aggregate slots cannot be used as projected-row grouping values".to_string(),
+        }),
+        _ => Err(GraphError::GqlExecution {
+            reason: "aggregate WITH row streams can only read projected values".to_string(),
+        }),
+    }
+}
+
+fn projected_value(row: &serde_json::Value, source: &str) -> GraphResult<serde_json::Value> {
+    let object = row.as_object().ok_or_else(|| GraphError::GqlExecution {
+        reason: "projected row stream must contain JSON objects".to_string(),
+    })?;
+    Ok(object
+        .get(source)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 fn project_slot_value(
@@ -1434,6 +1558,9 @@ fn project_slot_value(
             .map(|coordinate| property_value(coordinate, hydrated, property))
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
+        ReturnSlot::Projected { .. } => Err(GraphError::GqlExecution {
+            reason: "projected slots require an aggregate WITH row stream".to_string(),
+        }),
         ReturnSlot::Aggregate { .. } => Err(GraphError::GqlExecution {
             reason: "aggregate slots cannot be used as grouping values".to_string(),
         }),
@@ -1472,6 +1599,9 @@ fn project_join_slot_value(
             .map(|coordinate| property_value(coordinate, hydrated, property))
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
+        ReturnSlot::Projected { .. } => Err(GraphError::GqlExecution {
+            reason: "projected slots require an aggregate WITH row stream".to_string(),
+        }),
         ReturnSlot::Aggregate { .. } => Err(GraphError::GqlExecution {
             reason: "aggregate slots cannot be used as grouping values".to_string(),
         }),
@@ -1509,6 +1639,11 @@ fn project_node_row(
             ReturnSlot::Aggregate { name, .. } => {
                 output.insert(name.clone(), serde_json::Value::Null);
             }
+            ReturnSlot::Projected { .. } => {
+                return Err(GraphError::GqlExecution {
+                    reason: "node-only MATCH cannot return projected values".to_string(),
+                });
+            }
         }
     }
     Ok(serde_json::Value::Object(output))
@@ -1534,6 +1669,9 @@ fn project_node_slot_value(
         }
         ReturnSlot::Aggregate { .. } => Err(GraphError::GqlExecution {
             reason: "aggregate slots cannot be used as grouping values".to_string(),
+        }),
+        ReturnSlot::Projected { .. } => Err(GraphError::GqlExecution {
+            reason: "node-only MATCH cannot group by projected values".to_string(),
         }),
     }
 }
@@ -1562,6 +1700,10 @@ fn aggregate_arg_value(
             .map(|coordinate| property_value(coordinate, hydrated, property))
             .transpose()
             .map(|value| value.unwrap_or(serde_json::Value::Null)),
+        AggregateArg::Projected { .. } => Err(GraphError::GqlExecution {
+            reason: "projected aggregate arguments require an aggregate WITH row stream"
+                .to_string(),
+        }),
     }
 }
 
@@ -1578,8 +1720,22 @@ fn aggregate_arg_value_for_node(
         AggregateArg::Property { property, .. } => property_value(&row.source, hydrated, property),
         AggregateArg::Relationship
         | AggregateArg::JoinRelationship(_)
-        | AggregateArg::JoinPath(_) => Err(GraphError::GqlExecution {
+        | AggregateArg::JoinPath(_)
+        | AggregateArg::Projected { .. } => Err(GraphError::GqlExecution {
             reason: "node-only MATCH cannot aggregate relationship values".to_string(),
+        }),
+    }
+}
+
+fn aggregate_arg_value_for_projected(
+    row: &serde_json::Value,
+    arg: &AggregateArg,
+) -> GraphResult<serde_json::Value> {
+    match arg {
+        AggregateArg::All => Ok(serde_json::Value::Bool(true)),
+        AggregateArg::Projected { name } => projected_value(row, name),
+        _ => Err(GraphError::GqlExecution {
+            reason: "aggregate WITH row streams can only aggregate projected values".to_string(),
         }),
     }
 }
@@ -1613,6 +1769,10 @@ fn aggregate_arg_value_for_join(
         AggregateArg::JoinPath(slot) => {
             join_path_value_by_slot(row, plan, *slot, hydrated, hydrate_nodes)
         }
+        AggregateArg::Projected { .. } => Err(GraphError::GqlExecution {
+            reason: "projected aggregate arguments require an aggregate WITH row stream"
+                .to_string(),
+        }),
     }
 }
 

@@ -211,12 +211,14 @@ path variable returns, path functions, aggregates, `WITH` aliases for nodes,
 node properties, relationships, paths, path functions, and supported aggregate
 inputs, including grouped aggregate `WITH` projections, `ORDER BY` over joined
 node properties or returned scalar aliases, projected-row `RETURN DISTINCT`,
-direct aggregate `WITH DISTINCT`, and `SKIP`/`LIMIT`.
+direct aggregate `WITH DISTINCT`, later `WITH DISTINCT` over projected
+aggregate aliases, final aggregate expressions over projected aggregate
+aliases after aggregate `WITH` boundaries, and `SKIP`/`LIMIT`.
 When `RETURN DISTINCT` is combined with `ORDER BY`, the sort keys must be
 returned scalar expressions. Optional multi-pattern joins, variable-length
-relationships, relationship properties, aggregate expressions after an
-aggregate `WITH` boundary, and later `WITH DISTINCT` stages over aggregate
-aliases in multi-pattern joins remain outside the current subset.
+relationships, relationship properties, relationship/path property aggregate
+inputs, and numeric aggregates over relationship/path values remain outside the
+current subset.
 
 Scalar properties are returned as their JSON representation: strings,
 numbers, booleans, arrays, objects, or JSON `null`. Unmatched `OPTIONAL MATCH`
@@ -270,8 +272,7 @@ Planned outside this subset:
 - Named variables on variable-length wildcard path segments.
 - Multi-pattern optional joins, variable-length relationships, relationship
   properties, relationship/path property aggregate inputs, numeric aggregates
-  over relationship/path values, aggregate expressions after aggregate `WITH`,
-  and later `WITH DISTINCT` stages over aggregate aliases.
+  over relationship/path values.
 
 Supported write coverage is intentionally narrow. `CREATE` can insert one node
 row into a registered source table, `SET` can update one mapped property on

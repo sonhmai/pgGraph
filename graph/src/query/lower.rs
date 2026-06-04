@@ -62,8 +62,10 @@ fn lower_join(plan: LogicalJoinPlan) -> PhysicalJoinPlan {
             .collect(),
         patterns: plan.patterns.into_iter().map(lower_join_pattern).collect(),
         returns: lower_returns(plan.returns),
+        aggregate_projection: lower_returns(plan.aggregate_projection),
         aggregate_group_slots: lower_returns(plan.aggregate_group_slots),
         distinct_stages: lower_return_stages(plan.distinct_stages),
+        post_aggregate_distinct_stages: lower_return_stages(plan.post_aggregate_distinct_stages),
         distinct: plan.distinct,
         predicate: plan.predicate,
         order_by: plan.order_by,
@@ -331,6 +333,7 @@ fn lower_returns(returns: Vec<ReturnBinding>) -> Vec<ReturnSlot> {
                 property,
                 name,
             },
+            ReturnBinding::Projected { source, name } => ReturnSlot::Projected { source, name },
             ReturnBinding::Aggregate {
                 func,
                 arg,

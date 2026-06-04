@@ -219,6 +219,16 @@
 - `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
 - `cargo test --features pg17` from `graph/`: passed, 496 tests, 1 ignored.
 
+## 2026-06-04 Phase 3B Multi-Pattern Post-Aggregate Boundary Slice
+
+- `cargo fmt --check` from `graph/`: passed.
+- `git diff --check` from repository root: passed.
+- `cargo test --features pg17 query::tests::multi_pattern_join_` from `graph/`: passed, 18 tests. Includes later `WITH DISTINCT` over projected aggregate aliases and final aggregate expressions over projected aggregate aliases after aggregate `WITH` boundaries.
+- `cargo test --features pg17 query::tests::` from `graph/`: passed, 141 tests.
+- `cargo test --features pg17 gql::tests::` from `graph/`: passed, 23 tests.
+- `cargo test --features pg17` from `graph/`: passed, 496 tests, 1 ignored.
+- `cargo pgrx test --features "pg17 development" gql_wildcard_path_values_and_functions_have_stable_shape` from `graph/`: passed, 1 pgrx test. Includes later aggregate-alias `WITH DISTINCT` and final aggregate expressions over aggregate `WITH` aliases through `graph.gql()`.
+
 ## 2026-06-03 Edge Registration Validation Slice
 
 - `cargo pgrx test --features "pg17 development" mixed_mode_junction_registration_fails_before_build` from `graph/`: passed, 1 pgrx test.
