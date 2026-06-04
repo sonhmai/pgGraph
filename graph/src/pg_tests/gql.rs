@@ -1211,6 +1211,26 @@ fn gql_wildcard_path_values_and_functions_have_stable_shape() {
     assert!(shape_matches);
     assert!(!coordinate_only_has_name);
 
+    let wildcard_var_len_named_shape = Spi::get_one::<bool>(
+        "SELECT bool_and(
+                    row->'s'->'_id'->>'id' = 'u1'
+                    AND row->'e'->'_id'->>'id' = 'u2'
+                    AND row->'r'->'_path'->'nodes'->0->'_id'->>'id' = 'u1'
+                    AND row->'r'->'_path'->'nodes'->1->'_id'->>'id' = 'u2'
+                    AND row->'r'->'_path'->'relationships'->0->>'_type' = 'friend'
+                    AND (row->>'len')::integer = 1
+                )
+         FROM graph.gql(
+             'MATCH p=(s:graph_test_users_pgtest)-[r:friend*1..1]->(e:graph_test_users_pgtest)
+              RETURN s, r, e, length(r) AS len',
+             hydrate := false
+         )",
+    )
+    .expect("wildcard variable-length named segment query failed")
+    .unwrap_or(false);
+
+    assert!(wildcard_var_len_named_shape);
+
     let join_relationship_shape = Spi::get_one::<bool>(
         "SELECT bool_and(
                     row->'r'->>'_type' = 'friend'

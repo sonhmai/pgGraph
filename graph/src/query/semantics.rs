@@ -1480,20 +1480,6 @@ fn bind_wildcard_path_read(
                 "relationship variables in multi-segment path variables require a later phase",
             ));
         }
-        if rel.var_len.is_some() {
-            if rel.var.is_some() {
-                return Err(GqlError::unsupported(
-                    rel.span,
-                    "relationship variables on variable-length wildcard paths require a later phase",
-                ));
-            }
-            if target.var.is_some() {
-                return Err(GqlError::unsupported(
-                    target.span,
-                    "named target nodes on variable-length wildcard paths require a later phase",
-                ));
-            }
-        }
         if let (Some(source_table_oid), Some(target_table_oid), Some(rel_type)) = (
             previous_table_filter,
             target_table_filter,
@@ -1591,34 +1577,49 @@ fn bind_wildcard_path_predicate(
     let Some(expr) = where_ else {
         return Ok(None);
     };
-    let node_positions = wildcard_node_var_positions(start, tail)?;
     let possible_tables = possible_wildcard_node_tables(start, tail, catalog)?;
+    let node_bindings = wildcard_node_var_bindings(start, tail, &possible_tables)?;
     let node_labels = catalog.node_labels();
     let properties_by_table = node_labels
         .iter()
         .map(|label| (label.table_oid, label.properties.clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    bind_wildcard_expr(
-        expr,
-        &node_positions,
-        &possible_tables,
-        &properties_by_table,
-        0,
-    )
-    .map(Some)
+    bind_wildcard_expr(expr, &node_bindings, &properties_by_table, 0).map(Some)
 }
 
-fn wildcard_node_var_positions(
+#[derive(Debug, Clone)]
+struct WildcardNodeBinding {
+    side: BindingSide,
+    possible_tables: std::collections::BTreeSet<u32>,
+}
+
+fn wildcard_node_var_bindings(
     start: &NodePat,
     tail: &[(RelPat, NodePat)],
-) -> Result<std::collections::HashMap<String, usize>, GqlError> {
-    let mut positions = std::collections::HashMap::new();
+    possible_tables: &[std::collections::BTreeSet<u32>],
+) -> Result<std::collections::HashMap<String, WildcardNodeBinding>, GqlError> {
+    let mut bindings = std::collections::HashMap::new();
     if let Some(var) = &start.var {
-        positions.insert(var.text.clone(), 0);
+        bindings.insert(
+            var.text.clone(),
+            WildcardNodeBinding {
+                side: BindingSide::PathNode(0),
+                possible_tables: possible_tables.first().cloned().unwrap_or_default(),
+            },
+        );
     }
-    for (idx, (_, target)) in tail.iter().enumerate() {
+    for (idx, (rel, target)) in tail.iter().enumerate() {
         if let Some(var) = &target.var {
-            if positions.insert(var.text.clone(), idx + 1).is_some() {
+            let side = if tail.len() == 1 && rel.var_len.is_some() {
+                BindingSide::Target
+            } else {
+                BindingSide::PathNode(idx + 1)
+            };
+            let binding = WildcardNodeBinding {
+                side,
+                possible_tables: possible_tables.get(idx + 1).cloned().unwrap_or_default(),
+            };
+            if bindings.insert(var.text.clone(), binding).is_some() {
                 return Err(GqlError::bind(
                     var.span,
                     format!("duplicate variable `{}` in MATCH scope", var.text),
@@ -1626,7 +1627,7 @@ fn wildcard_node_var_positions(
             }
         }
     }
-    Ok(positions)
+    Ok(bindings)
 }
 
 fn possible_wildcard_node_tables(
@@ -1752,8 +1753,7 @@ fn collect_possible_wildcard_table_paths(
 
 fn bind_wildcard_expr(
     expr: &Expr,
-    node_positions: &std::collections::HashMap<String, usize>,
-    possible_tables: &[std::collections::BTreeSet<u32>],
+    node_bindings: &std::collections::HashMap<String, WildcardNodeBinding>,
     properties_by_table: &std::collections::HashMap<u32, std::collections::BTreeSet<String>>,
     depth: usize,
 ) -> Result<Predicate, GqlError> {
@@ -1767,15 +1767,13 @@ fn bind_wildcard_expr(
         Expr::And { lhs, rhs, .. } => Ok(Predicate::And(
             Box::new(bind_wildcard_expr(
                 lhs,
-                node_positions,
-                possible_tables,
+                node_bindings,
                 properties_by_table,
                 depth + 1,
             )?),
             Box::new(bind_wildcard_expr(
                 rhs,
-                node_positions,
-                possible_tables,
+                node_bindings,
                 properties_by_table,
                 depth + 1,
             )?),
@@ -1783,39 +1781,29 @@ fn bind_wildcard_expr(
         Expr::Or { lhs, rhs, .. } => Ok(Predicate::Or(
             Box::new(bind_wildcard_expr(
                 lhs,
-                node_positions,
-                possible_tables,
+                node_bindings,
                 properties_by_table,
                 depth + 1,
             )?),
             Box::new(bind_wildcard_expr(
                 rhs,
-                node_positions,
-                possible_tables,
+                node_bindings,
                 properties_by_table,
                 depth + 1,
             )?),
         )),
         Expr::Not { expr, .. } => Ok(Predicate::Not(Box::new(bind_wildcard_expr(
             expr,
-            node_positions,
-            possible_tables,
+            node_bindings,
             properties_by_table,
             depth + 1,
         )?))),
         Expr::Compare { lhs, op, rhs, .. } => Ok(Predicate::Compare {
-            lhs: bind_wildcard_operand(lhs, node_positions, possible_tables, properties_by_table)?,
+            lhs: bind_wildcard_operand(lhs, node_bindings, properties_by_table)?,
             op: bind_cmp_op(*op),
             rhs: rhs
                 .as_ref()
-                .map(|operand| {
-                    bind_wildcard_operand(
-                        operand,
-                        node_positions,
-                        possible_tables,
-                        properties_by_table,
-                    )
-                })
+                .map(|operand| bind_wildcard_operand(operand, node_bindings, properties_by_table))
                 .transpose()?,
         }),
     }
@@ -1823,8 +1811,7 @@ fn bind_wildcard_expr(
 
 fn bind_wildcard_operand(
     operand: &Operand,
-    node_positions: &std::collections::HashMap<String, usize>,
-    possible_tables: &[std::collections::BTreeSet<u32>],
+    node_bindings: &std::collections::HashMap<String, WildcardNodeBinding>,
     properties_by_table: &std::collections::HashMap<u32, std::collections::BTreeSet<String>>,
 ) -> Result<ValueExpr, GqlError> {
     match operand {
@@ -1833,12 +1820,10 @@ fn bind_wildcard_operand(
             property,
             span: _,
         } => {
-            let node_idx = node_positions.get(&var.text).copied().ok_or_else(|| {
+            let binding = node_bindings.get(&var.text).ok_or_else(|| {
                 GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
             })?;
-            let possible = possible_tables.get(node_idx).ok_or_else(|| {
-                GqlError::bind(var.span, format!("unknown variable `{}`", var.text))
-            })?;
+            let possible = &binding.possible_tables;
             if possible.is_empty() {
                 return Err(GqlError::unsupported(
                     property.span,
@@ -1859,7 +1844,7 @@ fn bind_wildcard_operand(
                 ));
             }
             Ok(ValueExpr::Property {
-                side: BindingSide::PathNode(node_idx),
+                side: binding.side,
                 property: property.text.clone(),
             })
         }
@@ -1935,13 +1920,20 @@ fn bind_wildcard_path_returns(
             &mut scope,
             path_var,
             rel.var.as_ref(),
-            ScopedBinding::Relationship { var_len: false },
+            ScopedBinding::Relationship {
+                var_len: rel.var_len.is_some(),
+            },
         )?;
+        let target_side = if tail.len() == 1 && rel.var_len.is_some() {
+            BindingSide::Target
+        } else {
+            BindingSide::PathNode(idx + 1)
+        };
         insert_wildcard_binding(
             &mut scope,
             path_var,
             target.var.as_ref(),
-            ScopedBinding::Node(BindingSide::PathNode(idx + 1)),
+            ScopedBinding::Node(target_side),
         )?;
     }
     let mut seen = std::collections::HashSet::with_capacity(items.len());
@@ -1958,7 +1950,10 @@ fn bind_wildcard_path_returns(
             ReturnExpr::Var { var, span } => match scope.get(&var.text) {
                 Some(ScopedBinding::Path) => ReturnBinding::Path { name },
                 Some(ScopedBinding::Node(side)) => ReturnBinding::Node { side: *side, name },
-                Some(ScopedBinding::Relationship { .. }) => ReturnBinding::Relationship { name },
+                Some(ScopedBinding::Relationship { var_len: false }) => {
+                    ReturnBinding::Relationship { name }
+                }
+                Some(ScopedBinding::Relationship { var_len: true }) => ReturnBinding::Path { name },
                 Some(_) => unreachable!("wildcard path scope stores only element bindings"),
                 None => {
                     return Err(GqlError::bind(

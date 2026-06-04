@@ -170,17 +170,18 @@ FROM graph.gql(
 The supported wildcard forms include outbound `p=()-[]->()`, inbound
 `p=()<-[]-()`, undirected `p=()-[]-()`, and fixed multi-segment chains such as
 `p=()-[]->()-[]->()`. A single wildcard segment may use bounded variable length,
-such as `p=()-[*1..3]->()`, when no node or relationship variable is bound to
-that variable-length segment. Variable-length wildcard paths use bounded walk
-semantics: nodes and relationships may repeat within the explicit maximum hop
-bound, and row caps are still enforced before projection. These shapes can use concrete node labels or
-concrete relationship types as filters. `WHERE` may read properties from named
-path-node variables only when every possible concrete table for that variable
-exposes the same registered property or JSONB property path. This phase
+such as `p=(s)-[r*1..3]->(e)`. Named relationship variables on that bounded
+segment are path values, and named target nodes bind to the emitted endpoint.
+Variable-length wildcard paths use bounded walk semantics: nodes and
+relationships may repeat within the explicit maximum hop bound, and row caps
+are still enforced before projection. These shapes can use concrete node labels
+or concrete relationship types as filters. `WHERE` may read properties from
+named path-node variables only when every possible concrete table for that
+variable exposes the same registered property or JSONB property path. This phase
 intentionally keeps later clauses narrow: relationship properties, `WITH`,
 `ORDER BY`, `RETURN DISTINCT`, aggregates, optional matches, writes,
-relationship variables in multi-segment paths, and named variables on
-variable-length wildcard segments are rejected for wildcard path-variable reads.
+and relationship variables in multi-segment paths are rejected for wildcard
+path-variable reads.
 
 The `nodes(path)` function returns the `_path.nodes` array directly,
 `relationships(path)` returns the `_path.relationships` array directly, and
@@ -272,7 +273,6 @@ it does not satisfy `IS NULL`; explicit JSON `null` does.
 Planned outside this subset:
 
 - Relationship source-row hydration.
-- Named variables on variable-length wildcard path segments.
 - Multi-pattern relationship properties, relationship/path property aggregate
   inputs, and numeric aggregates over relationship/path values.
 
