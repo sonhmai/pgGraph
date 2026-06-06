@@ -16,6 +16,7 @@ every backend-local engine.
 | `sql_jobs.rs` | Durable job rows and dynamic background worker launch for build/maintenance |
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
+| `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
 
 ## Durable Tables
@@ -139,6 +140,14 @@ counts, payload offsets, CRC32 checksum, and reserved bytes that must remain
 zero. The loader validates offsets, checksum, row bounds, and section ownership
 before decoding edge topology/delete/weight sections or node, resolution,
 filter, and tenant sections.
+
+Before committed rows are written to segments, normalization sorts rows into a
+stable order, groups them by generation, direction, source, target, and edge
+type, cancels net-neutral insert/delete pairs, and lets delete rows win
+conflicts that still have a net effect. The bounded normalization buffer
+rejects oversized batches before segment encoding starts.
+Edge segment writers reject normalized node rows so node and edge deltas remain
+separate segment domains.
 
 Scheduler ownership intentionally stays outside the extension. PostgreSQL
 background-worker lifecycle, crash recovery, privilege boundaries, and cadence

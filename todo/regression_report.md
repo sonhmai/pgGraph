@@ -58,3 +58,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 projection::segment`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cargo check --manifest-path graph/fuzz/Cargo.toml` |
 | Result | Segment tests passed, two segment contract tests turned green, fuzz package compiled with existing sync-helper dead-code warnings. Full `cargo test --features pg17` is intentionally red with 542 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required until segments are produced by ingestion or consumed by layered reads, compaction, cleanup, or repair paths |
+
+## 2026-06-07: Microphase 4 Mutation Normalization
+
+| Field | Value |
+|---|---|
+| Scope | Committed mutation normalization, cancellation/delete precedence, bounded ingestion buffers, and normalized segment construction |
+| Code changes | Projection normalization under test/development gates; no traversal/read-path runtime adoption |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::normalize`; `cd graph && cargo test --features pg17 projection::segment`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cargo check --manifest-path graph/fuzz/Cargo.toml` |
+| Result | Normalization tests and segment writer integration passed, including node/edge domain separation and deterministic duplicate-sync tie breaks. The fuzz package compiled with existing sync-helper dead-code warnings. Full `cargo test --features pg17` is intentionally red with 553 passed, 3 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required until normalized rows are produced by ingestion or consumed by live segment publication |

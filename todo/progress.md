@@ -128,3 +128,38 @@ Microphase 3 implemented the complete segment-format checkpoint:
   - `git diff --check`: passed.
 - Regression report: no traversal, ingestion, compaction, GC, SQL, or runtime
   read-path code changed; benchmark baseline remains `pre_durable_projection`.
+
+Microphase 4 implemented the mutation-normalization checkpoint:
+
+- Added `graph/src/projection/normalize.rs` with committed mutation rows,
+  normalized mutation rows, deterministic grouping, insert/delete cancellation,
+  delete precedence, and bounded row/byte ingestion-buffer checks.
+- Grouping is by generation, direction, source, target, and edge type so
+  interleaved sync-log ids still normalize deterministically; output rows are
+  sorted by generation, sync-log id, source, direction, edge type, target, and
+  tombstone state.
+- Added `DeltaSegment::from_normalized_edges` so edge segment construction can
+  consume normalized edge batches directly and reject normalized node rows.
+- Added unit tests and a proptest covering deterministic output, cancellation,
+  delete precedence, grouping by direction/type, duplicate sync-id tie breaks,
+  node/edge domain separation, node operations, and oversized buffer rejection.
+- Updated public contributor docs with the normalization boundary and buffer
+  rejection policy.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 projection::normalize`: passed
+    with 9 normalization tests including a proptest.
+  - `cd graph && cargo test --features pg17 projection::segment`: passed
+    with 8 segment tests, including normalized edge segment construction and
+    node-row rejection.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 3 passed, 3 failed for future production features.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cargo check --manifest-path graph/fuzz/Cargo.toml`: passed
+    with existing fuzz-build dead-code warnings in sync helpers.
+  - `cd graph && cargo test --features pg17`: expected red; 553 passed, 3
+    failed future contracts, 1 ignored scale test.
+- Regression report: no traversal, ingestion, compaction, GC, SQL, or runtime
+  read-path code changed; benchmark baseline remains `pre_durable_projection`.

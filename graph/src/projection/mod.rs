@@ -6,6 +6,8 @@
 )]
 pub(crate) mod manifest;
 pub(crate) mod neighbors;
+#[cfg(any(test, feature = "development"))]
+pub(crate) mod normalize;
 #[cfg(any(test, feature = "fuzzing", feature = "development"))]
 pub(crate) mod segment;
 #[cfg(test)]

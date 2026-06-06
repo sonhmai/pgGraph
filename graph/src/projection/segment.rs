@@ -10,6 +10,8 @@ use std::path::Path;
 
 use crc32fast::Hasher;
 
+#[cfg(any(test, feature = "development"))]
+use crate::projection::normalize::NormalizedMutationBatch;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
@@ -184,6 +186,67 @@ impl DeltaSegment {
             filters: Vec::new(),
             tenants: Vec::new(),
         })
+    }
+
+    /// Build an edge segment from normalized mutation rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] if normalized rows are not valid for
+    /// the requested source range.
+    #[cfg(any(test, feature = "development"))]
+    pub(crate) fn from_normalized_edges(
+        batch: &NormalizedMutationBatch,
+        level: u8,
+        direction: TraversalDirection,
+        source_start: u32,
+        source_end: u32,
+    ) -> GraphResult<Self> {
+        let sync_watermark = match batch.rows.iter().map(|row| row.sync_id).max() {
+            Some(sync_id) => i64::try_from(sync_id)
+                .map_err(|_| GraphError::Internal("sync watermark exceeds i64".into()))?,
+            None => 0,
+        };
+        let mut segment = Self::new(
+            SegmentKind::Edge,
+            level,
+            direction,
+            source_start,
+            source_end,
+            sync_watermark,
+        )?;
+        for row in &batch.rows {
+            if row.direction != direction {
+                return Err(segment_corrupt(
+                    "normalized row direction mismatches segment",
+                ));
+            }
+            if !row.operation.is_edge() {
+                return Err(segment_corrupt(
+                    "normalized node row cannot be written to edge segment",
+                ));
+            }
+            let edge = SegmentEdge {
+                source: row.source,
+                target: row.target,
+                type_id: row.type_id,
+            };
+            if row.tombstone {
+                segment.edge_deletes.push(edge);
+            } else {
+                segment.edge_inserts.push(edge);
+                if let Some(weight) = row.weight {
+                    segment.edge_weights.push(SegmentEdgeWeight {
+                        source: row.source,
+                        target: row.target,
+                        type_id: row.type_id,
+                        weight,
+                    });
+                }
+            }
+        }
+        validate_segment(&segment)?;
+        Ok(segment)
     }
 
     /// Encode this segment to bytes.
@@ -795,6 +858,9 @@ fn segment_corrupt(reason: impl Into<String>) -> GraphError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::normalize::{
+        normalize_committed_mutations, CommittedMutation, MutationBufferLimits, MutationOperation,
+    };
 
     #[test]
     fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
@@ -926,6 +992,38 @@ mod tests {
     }
 
     #[test]
+    fn delta_segment_writer_accepts_normalized_edge_rows() {
+        let rows = vec![
+            committed(1, 0, 1, Some(7), MutationOperation::InsertEdge),
+            committed(2, 2, 3, None, MutationOperation::DeleteEdge),
+        ];
+        let batch = normalize_committed_mutations(&rows, MutationBufferLimits::new(10, 10_000))
+            .expect("rows normalize");
+
+        let segment = DeltaSegment::from_normalized_edges(&batch, 0, TraversalDirection::Out, 0, 4)
+            .expect("segment builds from normalized rows");
+        let decoded = DeltaSegment::from_bytes(&segment.to_bytes().expect("segment encodes"))
+            .expect("segment decodes");
+
+        assert_eq!(decoded.edge_inserts.len(), 1);
+        assert_eq!(decoded.edge_weights.len(), 1);
+        assert_eq!(decoded.edge_deletes.len(), 1);
+        assert_eq!(decoded.header.sync_watermark, 2);
+    }
+
+    #[test]
+    fn delta_segment_writer_rejects_normalized_node_rows() {
+        let rows = vec![committed(1, 0, 0, None, MutationOperation::UpsertNode)];
+        let batch = normalize_committed_mutations(&rows, MutationBufferLimits::new(10, 10_000))
+            .expect("rows normalize");
+
+        let err = DeltaSegment::from_normalized_edges(&batch, 0, TraversalDirection::Out, 0, 4)
+            .expect_err("node row cannot be written to edge segment");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    #[test]
     fn delta_segment_rejects_source_out_of_range() {
         let mut segment =
             DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 2, 42)
@@ -961,5 +1059,24 @@ mod tests {
         write_u32_at(bytes, CHECKSUM_OFFSET, 0);
         let checksum = checksum_segment_bytes(bytes);
         write_u32_at(bytes, CHECKSUM_OFFSET, checksum);
+    }
+
+    fn committed(
+        sync_id: u64,
+        source: u32,
+        target: u32,
+        weight: Option<u32>,
+        operation: MutationOperation,
+    ) -> CommittedMutation {
+        CommittedMutation {
+            sync_id,
+            generation_id: 1,
+            direction: TraversalDirection::Out,
+            source,
+            target,
+            type_id: 1,
+            weight,
+            operation,
+        }
     }
 }
