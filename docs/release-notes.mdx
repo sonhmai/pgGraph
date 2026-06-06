@@ -2,6 +2,59 @@
 
 Release notes are ordered newest first.
 
+## v0.1.6: Release Readiness Hardening
+
+`v0.1.6` is a release-readiness hardening update for the GQL mutable projection
+stack. It clears the final `pg17` release gate after the dependency refresh,
+clippy cleanup, transaction-delta rollback fixes, and persisted metadata
+serialization migration.
+
+### Highlights
+
+- Moved persisted `.pggraph` metadata sections from `bincode 1.3.3` to
+  `bincode 2.0.1` with serde support.
+- Kept the `.pggraph` artifact format at version 2 and made metadata decoding
+  reject trailing bytes instead of accepting partially consumed payloads.
+- Skipped the published `bincode 3.0.0` crate in dependency freshness checks
+  because that release contains a top-level compile error.
+- Fixed dirty transaction overlays so pending trigger sync rows are not applied
+  into backend-local base projection state while transaction-local deltas are
+  still uncommitted.
+- Tightened the build-lock regression fixture so the concurrent slow-build path
+  uses manual sync mode and does not trip trigger-sync behavior unrelated to
+  the advisory-lock check.
+- Cleared clippy blockers in GQL wildcard expansion, join binding, path-variable
+  binding, and SQL admin single-row handling without broad lint suppressions.
+- Documented the deferred `nixpkgs` and `rust-overlay` lock refresh as a
+  Nix-environment follow-up rather than a release blocker.
+
+### Upgrade Note
+
+<Callout type="warning">
+`.pggraph` artifacts written before `v0.1.6` must be regenerated with
+`SELECT graph.build();` after upgrading. These files are derived artifacts, not
+the source of truth; PostgreSQL source tables remain authoritative.
+</Callout>
+
+This release intentionally chooses regeneration over compatibility shims for
+old bincode metadata payloads. Future artifact tooling should move variable
+metadata sections toward a pgGraph-owned binary encoding so artifact
+compatibility is no longer tied to serializer crate behavior.
+
+### Validation
+
+The full post-bincode `pg17` release gate passed:
+
+```bash
+PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh
+```
+
+That gate includes fmt, clippy, docs, unit tests, pgrx SQL tests, cargo-deny,
+fuzz binary checks, package validation, fresh install smoke, metadata audit,
+SQLSTATE/ACL boundary tests, backup/restore, advisory-lock regressions,
+concurrency, synthetic smoke, rebuilt playground fixtures, pgbench sync stress,
+and GQL transaction lifecycle and race scripts.
+
 ## v0.1.5: GQL Mutable Projection Stabilization
 
 `v0.1.5` introduces pgGraph's GQL surface and the mutable projection path that

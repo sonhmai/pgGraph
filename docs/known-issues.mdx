@@ -2,8 +2,7 @@
 
 <Callout type="warning">
 pgGraph is currently alpha software. Do not use it for production workloads
-until the next correctness, SQL contract, persistence, and operational
-hardening update lands.
+without your own validation, backup, rollback, and load-testing plan.
 </Callout>
 
 <Callout type="info">
@@ -40,7 +39,7 @@ production use.
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Hardened | `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lock the PostgreSQL source row at the write boundary and re-evaluate the matched GQL predicate before mutating. A two-session heavy race gate covers the stale `SET` predicate case. |
+| KI-001 | GQL mutable writes should re-check matched predicates at the final PostgreSQL write boundary under concurrent source-row changes. | Hardened | `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lock the PostgreSQL source row at the write boundary and re-evaluate the matched GQL predicate before mutating. Heavy two-session race gates cover stale `SET`, `REMOVE`, tenant-scope drift, and stale delete predicate paths. |
 
 ### SQL Contract and Query Semantics
 
@@ -58,10 +57,9 @@ table SQL and discovery SQL parameterization work.
 
 ### Persistence and File Format
 
-<Callout type="info">
-No currently tracked next-update items remain in this category after artifact
-writes moved to a streaming writer for fixed graph sections.
-</Callout>
+| ID | Issue | Status | Notes |
+|---|---|---|---|
+| KI-011 | `.pggraph` variable metadata sections previously depended on bincode 1 payload behavior. | Hardened with rebuild requirement | `v0.1.6` moved metadata sections to bincode 2 serde encoding and rejects trailing bytes on decode. Existing derived `.pggraph` artifacts must be regenerated with `SELECT graph.build();` after upgrading. Future serializer-independent metadata encoding is tracked in [Roadmap](./roadmap). |
 
 ### Sync, Jobs, and Operator Semantics
 
@@ -121,6 +119,10 @@ Do not use this known-issues register for broad feature wishes that are not
 current limitations. Track these in [Roadmap](./roadmap) instead:
 
 - broader GQL syntax and multi-pattern planning;
+- relationship source-row hydration, relationship property projection, and
+  optional path-variable projection semantics;
+- a dedicated many-to-many relationship registration helper if post-fix user
+  reports show `graph.add_edge()` remains too easy to misuse;
 - public SQL/PGQ exposure;
 - broader openCypher compatibility;
 - semantic-guided search and pgVector ranking;
