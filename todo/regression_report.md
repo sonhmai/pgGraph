@@ -36,3 +36,14 @@ decision.
 | Command | `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo check --features pg17`; `python3 scripts/check_doc_references.py` |
 | Result | Manifest tests, non-test compile, and doc references passed. Full `cargo test --features pg17` is intentionally red with 528 passed, 5 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required until manifest loading affects engine status, reads, ingestion, or artifact publication |
+
+## 2026-06-07: Microphase 2 Atomic Manifest Publish And Load
+
+| Field | Value |
+|---|---|
+| Scope | Manifest filesystem store, atomic publish, latest-generation load, temp-file ignore, and active-reference validation |
+| Code changes | Projection manifest file I/O only; no traversal/read-path runtime adoption |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo check --features pg17`; `python3 scripts/check_doc_references.py` |
+| Result | Publish/load manifest tests, non-test compile, and doc references passed. Full `cargo test --features pg17` is intentionally red with 534 passed, 5 future durable-projection contract failures, and 1 ignored scale test. |
+| Decision | No benchmark comparison required until manifests are loaded by engine status, reads, ingestion, cleanup, or repair paths |

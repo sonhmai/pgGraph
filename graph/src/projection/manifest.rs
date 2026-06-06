@@ -4,7 +4,10 @@
 //! artifacts. Readers load a complete generation from a validated manifest
 //! instead of discovering segment files directly.
 
-use std::time::Duration;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +21,9 @@ pub(crate) const VALIDATION_STATUS_VALID: &str = "valid";
 pub(crate) const VALIDATION_STATUS_CORRUPT: &str = "corrupt";
 /// Validation state for a generation that is being repaired.
 pub(crate) const VALIDATION_STATUS_REPAIRING: &str = "repairing";
+
+const MANIFEST_FILE_PREFIX: &str = "projection-generation-";
+const MANIFEST_FILE_SUFFIX: &str = ".json";
 
 /// Human-readable manifest for one durable projection generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +146,167 @@ impl ProjectionManifest {
             .map_err(|err| manifest_corrupt(format!("manifest JSON decoding failed: {err}")))?;
         manifest.validate()?;
         Ok(manifest)
+    }
+}
+
+/// Filesystem store for durable projection manifest generations.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectionManifestStore {
+    root: PathBuf,
+}
+
+impl ProjectionManifestStore {
+    /// Create a manifest store rooted at `root`.
+    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Return the final manifest path for `generation_id`.
+    pub(crate) fn manifest_path(&self, generation_id: u64) -> PathBuf {
+        self.root.join(manifest_file_name(generation_id))
+    }
+
+    /// Atomically publish a validated manifest to its generation path.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors when the manifest is malformed or references
+    /// missing active artifacts. Returns [`GraphError::Internal`] when durable
+    /// filesystem operations fail.
+    pub(crate) fn publish(&self, manifest: &ProjectionManifest) -> GraphResult<PathBuf> {
+        manifest.validate()?;
+        self.validate_active_references(manifest)?;
+
+        fs::create_dir_all(&self.root)
+            .map_err(|err| manifest_io("create manifest directory", &self.root, err))?;
+        let json = manifest.to_pretty_json()?;
+        let final_path = self.manifest_path(manifest.generation_id);
+        if final_path.exists() {
+            return Err(manifest_corrupt(format!(
+                "generation {} already has a published manifest",
+                manifest.generation_id
+            )));
+        }
+        let (tmp_path, mut file) = self.create_temp_manifest_file(manifest.generation_id)?;
+
+        file.write_all(json.as_bytes())
+            .map_err(|err| manifest_io("write temp manifest", &tmp_path, err))?;
+        file.sync_all()
+            .map_err(|err| manifest_io("fsync temp manifest", &tmp_path, err))?;
+        drop(file);
+        sync_directory(&self.root)?;
+        if let Err(err) = fs::rename(&tmp_path, &final_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(manifest_io("rename manifest into place", &final_path, err));
+        }
+        sync_directory(&self.root)?;
+        let published = self.load_manifest_file(&final_path)?;
+        if published.generation_id != manifest.generation_id {
+            return Err(manifest_corrupt(format!(
+                "published generation {} reloaded as generation {}",
+                manifest.generation_id, published.generation_id
+            )));
+        }
+        self.validate_active_references(&published)?;
+
+        Ok(final_path)
+    }
+
+    /// Load the highest-generation valid manifest in this store.
+    ///
+    /// Unreferenced temporary and unrelated files are ignored. The selected
+    /// manifest must validate and reference existing active artifacts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError::CorruptFile`] for malformed selected manifests or
+    /// missing active references. Returns [`GraphError::Internal`] for
+    /// directory read failures other than a missing store directory.
+    pub(crate) fn load_latest_current(&self) -> GraphResult<Option<ProjectionManifest>> {
+        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+            return Ok(None);
+        };
+        let manifest = self.load_manifest_file(&path)?;
+        if manifest.generation_id != generation_id {
+            return Err(manifest_corrupt(format!(
+                "manifest filename generation {generation_id} does not match JSON generation {}",
+                manifest.generation_id
+            )));
+        }
+        self.validate_active_references(&manifest)?;
+        Ok(Some(manifest))
+    }
+
+    fn load_manifest_file(&self, path: &Path) -> GraphResult<ProjectionManifest> {
+        let raw =
+            fs::read_to_string(path).map_err(|err| manifest_io("read manifest", path, err))?;
+        ProjectionManifest::from_json(&raw)
+    }
+
+    fn latest_manifest_path(&self) -> GraphResult<Option<(u64, PathBuf)>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(manifest_io("read manifest directory", &self.root, err)),
+        };
+        let mut latest = None;
+        for entry in entries {
+            let entry = entry
+                .map_err(|err| manifest_io("read manifest directory entry", &self.root, err))?;
+            if !entry
+                .file_type()
+                .map_err(|err| manifest_io("read manifest file type", &entry.path(), err))?
+                .is_file()
+            {
+                continue;
+            }
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(generation_id) = parse_manifest_file_name(&file_name) else {
+                continue;
+            };
+            if latest
+                .as_ref()
+                .is_none_or(|(current_generation, _)| generation_id > *current_generation)
+            {
+                latest = Some((generation_id, entry.path()));
+            }
+        }
+        Ok(latest)
+    }
+
+    fn validate_active_references(&self, manifest: &ProjectionManifest) -> GraphResult<()> {
+        require_existing_reference(&self.root, &manifest.base_artifact_path, "base artifact")?;
+        for segment in &manifest.segments {
+            require_existing_reference(&self.root, &segment.path, "segment")?;
+        }
+        for chunk in &manifest.base_chunks {
+            require_existing_reference(&self.root, &chunk.path, "base chunk")?;
+        }
+        Ok(())
+    }
+
+    fn create_temp_manifest_file(&self, generation_id: u64) -> GraphResult<(PathBuf, File)> {
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| GraphError::Internal(format!("system clock before Unix epoch: {err}")))?
+            .as_nanos();
+        for attempt in 0..128 {
+            let path = self.root.join(format!(
+                "{}{generation_id:020}.tmp-{}-{created_at}-{attempt}",
+                MANIFEST_FILE_PREFIX,
+                std::process::id()
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((path, file)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(manifest_io("create temp manifest", &path, err)),
+            }
+        }
+        Err(GraphError::Internal(
+            "projection manifest temp path kept colliding".into(),
+        ))
     }
 }
 
@@ -284,6 +451,66 @@ fn manifest_corrupt(reason: impl Into<String>) -> GraphError {
     }
 }
 
+fn manifest_file_name(generation_id: u64) -> String {
+    format!("{MANIFEST_FILE_PREFIX}{generation_id:020}{MANIFEST_FILE_SUFFIX}")
+}
+
+fn parse_manifest_file_name(file_name: &str) -> Option<u64> {
+    let generation = file_name
+        .strip_prefix(MANIFEST_FILE_PREFIX)?
+        .strip_suffix(MANIFEST_FILE_SUFFIX)?;
+    if generation.len() != 20 || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    generation.parse().ok()
+}
+
+fn require_existing_reference(root: &Path, reference: &str, label: &str) -> GraphResult<()> {
+    let path = resolve_manifest_reference(root, reference)?;
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(manifest_corrupt(format!(
+            "{label} reference '{}' is missing",
+            path.display()
+        )))
+    }
+}
+
+fn resolve_manifest_reference(root: &Path, reference: &str) -> GraphResult<PathBuf> {
+    let path = Path::new(reference);
+    if path.is_absolute() {
+        return Err(manifest_corrupt(format!(
+            "reference '{reference}' must be relative to the artifact directory"
+        )));
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(manifest_corrupt(format!(
+                    "reference '{reference}' must stay inside the artifact directory"
+                )));
+            }
+        }
+    }
+    Ok(root.join(path))
+}
+
+fn sync_directory(path: &Path) -> GraphResult<()> {
+    let dir = File::open(path).map_err(|err| manifest_io("open manifest directory", path, err))?;
+    dir.sync_all()
+        .map_err(|err| manifest_io("fsync manifest directory", path, err))
+}
+
+fn manifest_io(operation: &str, path: &Path, err: std::io::Error) -> GraphError {
+    GraphError::Internal(format!(
+        "projection manifest {operation} failed for {}: {err}",
+        path.display()
+    ))
+}
+
 #[cfg(not(test))]
 pub(crate) fn record_active_generation_heartbeat(
     generation_id: u64,
@@ -336,6 +563,7 @@ pub(crate) fn expire_stale_generation_heartbeats() -> GraphResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::test_fixtures::ProjectionArtifactDir;
 
     #[test]
     fn projection_manifest_roundtrips_base_only_generation() {
@@ -477,5 +705,168 @@ mod tests {
             .expect("heartbeat refreshes");
         assert_eq!(refreshed.heartbeat_at_unix_micros, 3_000);
         assert_eq!(refreshed.expires_at_unix_micros, 253_000);
+    }
+
+    #[test]
+    fn projection_manifest_ignores_unreferenced_temp_files() {
+        let dir = ProjectionArtifactDir::new("projection_manifest_ignores_unreferenced_temp_files");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        write_artifact(
+            dir.path()
+                .join("projection-generation-99999999999999999999.tmp-orphan"),
+            b"partial",
+        );
+        let manifest = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:base", 2, 0, 1);
+        store.publish(&manifest).expect("manifest publishes");
+
+        let loaded = store
+            .load_latest_current()
+            .expect("manifest loads")
+            .expect("current manifest exists");
+
+        assert_eq!(loaded.generation_id, 1);
+        assert_eq!(loaded, manifest);
+    }
+
+    #[test]
+    fn projection_manifest_latest_current_generation_wins() {
+        let dir = ProjectionArtifactDir::new("projection_manifest_latest_current_generation_wins");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let second = ProjectionManifest::base_only(2, "base.pggraph", "xxh3:second", 2, 20, 2);
+        store.publish(&first).expect("first manifest publishes");
+        store.publish(&second).expect("second manifest publishes");
+
+        let loaded = store
+            .load_latest_current()
+            .expect("manifest loads")
+            .expect("current manifest exists");
+
+        assert_eq!(loaded, second);
+    }
+
+    #[test]
+    fn projection_manifest_publish_failure_keeps_previous_generation_current() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_publish_failure_keeps_previous_generation_current",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let invalid =
+            ProjectionManifest::base_only(2, "missing-base.pggraph", "xxh3:second", 2, 20, 2);
+        store.publish(&first).expect("first manifest publishes");
+
+        let err = store
+            .publish(&invalid)
+            .expect_err("missing base artifact rejects before publish");
+        let loaded = store
+            .load_latest_current()
+            .expect("manifest loads")
+            .expect("current manifest exists");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+        assert_eq!(loaded, first);
+        assert!(!store.manifest_path(2).exists());
+        assert_eq!(
+            manifest_temp_file_count(dir.path()),
+            0,
+            "failed validation should not leave temp manifests"
+        );
+    }
+
+    #[test]
+    fn projection_manifest_publish_rejects_duplicate_generation() {
+        let dir =
+            ProjectionArtifactDir::new("projection_manifest_publish_rejects_duplicate_generation");
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        let first = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:first", 2, 10, 1);
+        let duplicate = ProjectionManifest::base_only(1, "base.pggraph", "xxh3:second", 2, 20, 2);
+        store.publish(&first).expect("first manifest publishes");
+
+        let err = store
+            .publish(&duplicate)
+            .expect_err("duplicate generation rejects");
+        let loaded = store
+            .load_latest_current()
+            .expect("manifest loads")
+            .expect("current manifest exists");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+        assert_eq!(loaded, first);
+        assert_eq!(manifest_temp_file_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn projection_manifest_rejects_references_outside_artifact_root() {
+        let dir = ProjectionArtifactDir::new(
+            "projection_manifest_rejects_references_outside_artifact_root",
+        );
+        let outside = ProjectionArtifactDir::new(
+            "projection_manifest_rejects_references_outside_artifact_root_outside",
+        );
+        let store = ProjectionManifestStore::new(dir.path());
+        write_artifact(dir.path().join("base.pggraph"), b"base");
+        write_artifact(outside.path().join("outside.pggraph"), b"outside");
+
+        let absolute = ProjectionManifest::base_only(
+            1,
+            outside.path().join("outside.pggraph").to_string_lossy(),
+            "xxh3:absolute",
+            2,
+            0,
+            1,
+        );
+        let parent = ProjectionManifest::base_only(2, "../outside.pggraph", "xxh3:parent", 2, 0, 2);
+
+        let absolute_err = store
+            .publish(&absolute)
+            .expect_err("absolute reference rejects");
+        let parent_err = store
+            .publish(&parent)
+            .expect_err("parent traversal reference rejects");
+
+        assert!(matches!(absolute_err, GraphError::CorruptFile { .. }));
+        assert!(matches!(parent_err, GraphError::CorruptFile { .. }));
+        assert!(store
+            .load_latest_current()
+            .expect("empty store loads")
+            .is_none());
+    }
+
+    #[test]
+    fn projection_manifest_rejects_missing_referenced_file() {
+        let dir = ProjectionArtifactDir::new("projection_manifest_rejects_missing_referenced_file");
+        let store = ProjectionManifestStore::new(dir.path());
+        let manifest =
+            ProjectionManifest::base_only(1, "missing-base.pggraph", "xxh3:base", 2, 0, 1);
+        write_artifact(
+            store.manifest_path(1),
+            manifest
+                .to_pretty_json()
+                .expect("manifest encodes")
+                .as_bytes(),
+        );
+
+        let err = store
+            .load_latest_current()
+            .expect_err("missing referenced base rejects");
+
+        assert!(matches!(err, GraphError::CorruptFile { .. }));
+    }
+
+    fn write_artifact(path: impl AsRef<Path>, bytes: &[u8]) {
+        fs::write(path, bytes).expect("test artifact writes");
+    }
+
+    fn manifest_temp_file_count(path: &Path) -> usize {
+        fs::read_dir(path)
+            .expect("test artifact dir reads")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count()
     }
 }

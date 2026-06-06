@@ -60,3 +60,34 @@ Microphase 1 implemented the manifest and generation-table checkpoint:
   - `git diff --check`: passed.
 - Regression report: no traversal, ingestion, compaction, GC, or runtime
   read-path code changed; benchmark baseline remains `pre_durable_projection`.
+
+Microphase 2 implemented the atomic manifest publish/load checkpoint:
+
+- Added `ProjectionManifestStore` for durable manifest files rooted in the
+  projection artifact directory.
+- Added generation manifest filename parsing and final-path construction using
+  the existing `projection-generation-{generation}.json` convention.
+- Added atomic publish with temp-file creation, file fsync, directory fsync,
+  rename, final directory fsync, and bounded temp-name collision retry.
+- Added latest-generation loading that ignores unrelated and temporary files,
+  decodes and validates the selected manifest, and rejects missing active base,
+  segment, or chunk references.
+- Tightened artifact ownership after review: manifest references must remain
+  relative to the artifact directory, generation manifest files are immutable,
+  and publish reloads the renamed final manifest before reporting success.
+- Updated contributor docs to describe final-manifest selection, temp-file
+  ignore policy, atomic publish steps, and active-reference validation.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 projection::manifest`: passed
+    with 13 manifest, heartbeat, publish, and load tests.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 1 passed, 5 failed for future production features.
+  - `cd graph && cargo test --features pg17`: expected red; 534 passed, 5
+    failed future contracts, 1 ignored scale test.
+  - `git diff --check`: passed.
+- Regression report: no traversal, ingestion, compaction, GC, SQL, or runtime
+  read-path code changed; benchmark baseline remains `pre_durable_projection`.
