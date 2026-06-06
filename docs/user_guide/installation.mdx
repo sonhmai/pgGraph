@@ -147,9 +147,10 @@ pgGraph supports three Docker installation paths:
 ### Pre-built Docker Image
 
 A pre-built image is published on GitHub Container Registry for each release.
-This is the fastest Docker path — no build step is needed. The published image
-supports **linux/amd64** and **linux/arm64**, so it works on macOS, Linux, and
-Windows (via Docker Desktop or WSL2).
+This is the fastest Docker path — no build step is needed. Published images are
+available for PostgreSQL 14 through 18 and support **linux/amd64** and
+**linux/arm64**, so they work on macOS, Linux, and Windows (via Docker Desktop
+or WSL2).
 
 ```bash
 docker pull ghcr.io/evokoa/pggraph:0.1.6
@@ -157,8 +158,10 @@ docker pull ghcr.io/evokoa/pggraph:0.1.6
 
 | Tag | Description |
 |---|---|
-| `0.1.6` | Pinned reproducible tag — always resolves to the same image digest |
-| `latest` | Moving tag that points to the most recent stable release |
+| `0.1.6` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
+| `latest` | Moving tag that points to the most recent stable PostgreSQL 17 image |
+| `pg14-0.1.6` through `pg18-0.1.6` | Versioned image for a specific PostgreSQL major |
+| `pg14` through `pg18` | Latest stable image for a specific PostgreSQL major |
 
 Start the container:
 
@@ -176,11 +179,12 @@ Verify that `pg_cron` and `graph` are installed and loaded:
 psql -h localhost -U postgres -d graph -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('pg_cron','graph');"
 ```
 
-The image includes PostgreSQL 17, `pg_cron`, and pgGraph. On first
-initialization, `docker/init/01-create-extensions-and-schedule.sql` creates the
-`pg_cron` and `graph` extensions and schedules
-`graph.run_scheduled_maintenance()` every five minutes. For databases beyond the
-initial Docker database, create the extension explicitly with
+The default image includes PostgreSQL 17, `pg_cron`, and pgGraph. Use the
+`pg14-*` through `pg18-*` tags when you need a specific PostgreSQL major. On
+first initialization, `docker/init/01-create-extensions-and-schedule.sql`
+creates the `pg_cron` and `graph` extensions and schedules
+`graph.run_scheduled_maintenance()` every five minutes. For databases beyond
+the initial Docker database, create the extension explicitly with
 `CREATE EXTENSION graph;`.
 
 ### Build A PostgreSQL Image With pgGraph

@@ -143,8 +143,8 @@ Release dependencies must be pinned and reviewed before they move:
 
 - Rust direct dependencies use exact Cargo requirements plus committed lockfiles.
 - Python sandbox dependencies use exact `==` pins.
-- Docker base images use explicit version tags plus digests; digest or tag
-  updates require manual review.
+- Docker base images use explicit version tags, plus digests where the image is
+  fixed in the Dockerfile; digest or tag updates require manual review.
 - New dependency versions should not be adopted into a release until they are at
   least 6 hours old and any package-manager fetch or install goes through
   `sfw`, unless a security fix requires an explicit exception.
