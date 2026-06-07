@@ -2,6 +2,7 @@
 
 use crate::edge_store::EdgeStore;
 use crate::engine::Engine;
+use crate::projection::layered::LayeredNeighbors;
 use crate::projection::neighbors::EdgeOverlay;
 use crate::projection::neighbors::{CsrNeighbors, NeighborSource, OverlayNeighbors};
 use crate::safety::{GraphError, GraphResult};
@@ -89,7 +90,7 @@ pub(crate) fn execute(
         tenant,
     )?;
     let rel_type_id = edge_type_id(engine, &plan.rel_type)?;
-    let neighbors = GqlNeighbors::new(engine);
+    let neighbors = GqlNeighbors::new(engine)?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     for source_idx in source_nodes(engine, plan.source_table_oid, tenant) {
@@ -211,7 +212,7 @@ pub(crate) fn execute_join(
         .iter()
         .map(|pattern| edge_type_id(engine, &pattern.rel_type))
         .collect::<GraphResult<Vec<_>>>()?;
-    let neighbors = GqlNeighbors::new(engine);
+    let neighbors = GqlNeighbors::new(engine)?;
     let mut rows = Vec::new();
     let row_cap = plan.execution_row_cap();
     let state = JoinState {
@@ -438,7 +439,7 @@ pub(crate) fn execute_wildcard_path(
     if !engine.built {
         return Err(GraphError::NotBuilt);
     }
-    let neighbors = GqlNeighbors::new(engine);
+    let neighbors = GqlNeighbors::new(engine)?;
     let segment_filters = plan
         .segments
         .iter()
@@ -950,10 +951,11 @@ struct GqlNeighbors<'a> {
     in_store: &'a EdgeStore,
     out_overlay: Option<EdgeOverlay>,
     in_overlay: Option<EdgeOverlay>,
+    layered: Option<LayeredNeighbors<'a>>,
 }
 
 impl<'a> GqlNeighbors<'a> {
-    fn new(engine: &'a Engine) -> Self {
+    fn new(engine: &'a Engine) -> GraphResult<Self> {
         let (out_overlay, in_overlay) = if engine.has_edge_overlay() {
             (
                 Some(engine.traversal_edge_overlay(TraversalDirection::Out)),
@@ -963,12 +965,13 @@ impl<'a> GqlNeighbors<'a> {
             (None, None)
         };
 
-        Self {
+        Ok(Self {
             out_store: &engine.edge_store,
             in_store: &engine.reverse_edge_store,
             out_overlay,
             in_overlay,
-        }
+            layered: engine.layered_neighbors()?,
+        })
     }
 
     fn for_direction(
@@ -1038,6 +1041,11 @@ impl<'a> GqlNeighbors<'a> {
             }
             TraversalDirection::In => (self.in_store, self.in_overlay.as_ref()),
         };
+        if let Some(layered) = &self.layered {
+            let neighbors = layered.for_direction(direction);
+            append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
+            return;
+        }
         let Some((inserts, deletes)) = overlay else {
             let neighbors = CsrNeighbors::new(edge_store);
             append_matching_neighbors(&neighbors, node_idx, rel_type_id, orientation, out);
@@ -1060,6 +1068,11 @@ impl<'a> GqlNeighbors<'a> {
             }
             TraversalDirection::In => (self.in_store, self.in_overlay.as_ref()),
         };
+        if let Some(layered) = &self.layered {
+            let neighbors = layered.for_direction(direction);
+            append_all_neighbors(&neighbors, node_idx, orientation, out);
+            return;
+        }
         let Some((inserts, deletes)) = overlay else {
             let neighbors = CsrNeighbors::new(edge_store);
             append_all_neighbors(&neighbors, node_idx, orientation, out);

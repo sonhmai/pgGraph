@@ -10,6 +10,7 @@ use crate::edge_store::EdgeStore;
 use crate::filter_index::FilterIndex;
 use crate::node_store::NodeStore;
 use crate::path_finder;
+use crate::projection::layered::{LayeredNeighbors, ManifestSegmentProvider};
 use crate::projection::manifest::ProjectionManifest;
 use crate::projection::neighbors::{
     CsrNeighbors, EdgeOverlay, OverlayDeletes, OverlayInserts, OverlayNeighbors,
@@ -22,6 +23,7 @@ use crate::types::*;
 use pgrx::prelude::TimestampWithTimeZone;
 use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// Resolution storage backend.
 ///
@@ -95,6 +97,10 @@ pub struct Engine {
     pub(crate) projection_mode: crate::config::ProjectionMode,
     /// Durable projection generation loaded with the base artifact, if any.
     pub(crate) projection_manifest: Option<ProjectionManifestSnapshot>,
+    /// Full durable projection manifest for segment-backed runtime reads.
+    pub(crate) projection_manifest_full: Option<ProjectionManifest>,
+    /// Projection artifact directory for manifest-referenced segment files.
+    pub(crate) projection_manifest_root: Option<PathBuf>,
 
     /// When true, the engine is in read-only mode.
     /// Sync inserts/updates/deletes are rejected until a rebuild installs a
@@ -233,6 +239,8 @@ impl Engine {
             edge_buffer: Vec::new(),
             projection_mode: crate::config::ProjectionMode::CsrReadonly,
             projection_manifest: None,
+            projection_manifest_full: None,
+            projection_manifest_root: None,
             is_read_only: false,
             read_only_reason: None,
             applied_sync_id: 0,
@@ -338,8 +346,14 @@ impl Engine {
         self.projection_mode = projection_mode;
     }
 
-    pub(crate) fn install_projection_manifest(&mut self, manifest: &ProjectionManifest) {
+    pub(crate) fn install_projection_manifest(
+        &mut self,
+        manifest: &ProjectionManifest,
+        root: impl Into<PathBuf>,
+    ) {
         self.projection_manifest = Some(ProjectionManifestSnapshot::from(manifest));
+        self.projection_manifest_full = Some(manifest.clone());
+        self.projection_manifest_root = Some(root.into());
     }
 
     pub(crate) fn base_projection_manifest_status(&self) -> (Option<i64>, Option<i64>) {
@@ -352,6 +366,32 @@ impl Engine {
             .as_ref()
             .map(|manifest| manifest.sync_watermark);
         (generation, watermark)
+    }
+
+    fn segment_backed_projection_manifest(&self) -> Option<(&ProjectionManifest, &PathBuf)> {
+        if self.projection_mode == crate::config::ProjectionMode::CsrReadonly {
+            return None;
+        }
+        let manifest = self.projection_manifest_full.as_ref()?;
+        if manifest.segments.is_empty() {
+            return None;
+        }
+        Some((manifest, self.projection_manifest_root.as_ref()?))
+    }
+
+    pub(crate) fn layered_neighbors(&self) -> GraphResult<Option<LayeredNeighbors<'_>>> {
+        let Some((manifest, root)) = self.segment_backed_projection_manifest() else {
+            return Ok(None);
+        };
+        let provider = ManifestSegmentProvider::new(root, manifest);
+        LayeredNeighbors::from_provider_with_overlays(
+            &self.edge_store,
+            &self.reverse_edge_store,
+            &provider,
+            self.traversal_edge_overlay(TraversalDirection::Out),
+            self.traversal_edge_overlay(TraversalDirection::In),
+        )
+        .map(Some)
     }
 
     pub fn record_applied_sync_id(&mut self, sync_id: i64) {
@@ -697,11 +737,30 @@ impl Engine {
             TraversalDirection::In => &self.reverse_edge_store,
         };
 
-        let bfs_result = match strategy {
-            TraversalStrategy::Bfs => {
+        let layered_neighbors = self.layered_neighbors()?;
+        let bfs_result = match (strategy, layered_neighbors.as_ref()) {
+            (TraversalStrategy::Bfs, Some(layered)) => {
+                let neighbors = layered.for_direction(direction);
+                bfs::execute_with_neighbors(
+                    &self.node_store,
+                    &neighbors,
+                    &self.filter_index,
+                    &config,
+                )
+            }
+            (TraversalStrategy::Dfs, Some(layered)) => {
+                let neighbors = layered.for_direction(direction);
+                bfs::execute_dfs_with_neighbors(
+                    &self.node_store,
+                    &neighbors,
+                    &self.filter_index,
+                    &config,
+                )
+            }
+            (TraversalStrategy::Bfs, None) => {
                 bfs::execute(&self.node_store, edge_store, &self.filter_index, &config)
             }
-            TraversalStrategy::Dfs => {
+            (TraversalStrategy::Dfs, None) => {
                 bfs::execute_dfs(&self.node_store, edge_store, &self.filter_index, &config)
             }
         };
@@ -833,14 +892,36 @@ impl Engine {
                 })?;
 
         let result = if !self.has_edge_overlay() {
-            let neighbors = CsrNeighbors::new(&self.edge_store);
+            if let Some(neighbors) = self.layered_neighbors()? {
+                path_finder::shortest_path_with_neighbors(
+                    &self.node_store,
+                    &neighbors,
+                    source,
+                    target,
+                    max_depth,
+                    true,
+                    &self.edge_type_registry,
+                )
+            } else {
+                let neighbors = CsrNeighbors::new(&self.edge_store);
+                path_finder::shortest_path_with_neighbors(
+                    &self.node_store,
+                    &neighbors,
+                    source,
+                    target,
+                    max_depth,
+                    self.has_unidirectional_edges,
+                    &self.edge_type_registry,
+                )
+            }
+        } else if let Some(neighbors) = self.layered_neighbors()? {
             path_finder::shortest_path_with_neighbors(
                 &self.node_store,
                 &neighbors,
                 source,
                 target,
                 max_depth,
-                self.has_unidirectional_edges,
+                true,
                 &self.edge_type_registry,
             )
         } else {
@@ -876,11 +957,19 @@ impl Engine {
         if !self.built {
             return Err(GraphError::NotBuilt);
         }
-        if self.has_edge_overlay() {
+        let layered_neighbors = self.layered_neighbors()?;
+        if self.has_edge_overlay() && layered_neighbors.is_none() {
             return Err(GraphError::UnsupportedOperation {
                 operation: "graph.weighted_shortest_path() with pending edge overlays"
                     .to_string(),
                 reason: "pending edge overlays do not carry stable edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
+            });
+        }
+        if !self.edge_buffer.is_empty() && layered_neighbors.is_some() {
+            return Err(GraphError::UnsupportedOperation {
+                operation: "graph.weighted_shortest_path() with pending edge overlays"
+                    .to_string(),
+                reason: "pending committed edge_buffer overlays do not carry stable edge weights until graph.vacuum() or graph.maintenance() merges them".to_string(),
             });
         }
 
@@ -898,14 +987,24 @@ impl Engine {
                     pk: target_id.to_string(),
                 })?;
 
-        Ok(path_finder::weighted_shortest_path(
-            &self.node_store,
-            &self.edge_store,
-            source,
-            target,
-            &self.edge_type_registry,
-        ))
-        .map(|path| path.unwrap_or_default())
+        let path = if let Some(neighbors) = layered_neighbors {
+            path_finder::weighted_shortest_path_with_neighbors(
+                &self.node_store,
+                &neighbors,
+                source,
+                target,
+                &self.edge_type_registry,
+            )
+        } else {
+            path_finder::weighted_shortest_path(
+                &self.node_store,
+                &self.edge_store,
+                source,
+                target,
+                &self.edge_type_registry,
+            )
+        };
+        Ok(path).map(|path| path.unwrap_or_default())
     }
 
     /// Get engine status.
@@ -1076,6 +1175,14 @@ impl Engine {
     ) -> GraphResult<crate::connected_components::ComponentResult> {
         if !self.built {
             return Err(GraphError::NotBuilt);
+        }
+        if let Some(neighbors) = self.layered_neighbors()? {
+            return Ok(
+                crate::connected_components::compute_components_with_neighbors(
+                    &self.node_store,
+                    &neighbors,
+                ),
+            );
         }
         if !self.has_edge_overlay() {
             return Ok(crate::connected_components::compute_components(
@@ -1428,6 +1535,56 @@ mod tests {
         eng.reverse_edge_store = eng.edge_store.reversed();
         eng.built = true;
         eng
+    }
+
+    fn install_edge_segment_manifest(
+        engine: &mut Engine,
+        test_name: &str,
+        fill: impl FnOnce(&mut crate::projection::segment::DeltaSegment),
+    ) -> crate::projection::test_fixtures::ProjectionArtifactDir {
+        let dir = crate::projection::test_fixtures::ProjectionArtifactDir::new(test_name);
+        let root = dir.path().to_path_buf();
+        let segment_path = dir.segment_path(1, 0);
+        let mut segment = crate::projection::segment::DeltaSegment::new(
+            crate::projection::segment::SegmentKind::Edge,
+            0,
+            TraversalDirection::Out,
+            0,
+            engine.node_store.node_count(),
+            1,
+        )
+        .expect("segment builds");
+        fill(&mut segment);
+        segment
+            .write_to_path(&segment_path)
+            .expect("segment writes");
+        let bytes = std::fs::read(&segment_path).expect("segment reads for checksum");
+        let relative = segment_path
+            .strip_prefix(&root)
+            .expect("segment stays inside root")
+            .to_string_lossy()
+            .to_string();
+        let mut manifest = ProjectionManifest::base_only(
+            1,
+            "base.pggraph",
+            "crc32:base",
+            crate::persistence::graph_artifact_version(),
+            segment.header.sync_watermark,
+            1,
+        );
+        manifest
+            .segments
+            .push(crate::projection::manifest::ManifestSegmentRef {
+                path: relative,
+                checksum: format!("crc32:{:08x}", crc32fast::hash(&bytes)),
+                level: segment.header.level,
+                source_start: segment.header.source_start,
+                source_end: segment.header.source_end,
+                sync_watermark: segment.header.sync_watermark,
+            });
+        engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
+        engine.install_projection_manifest(&manifest, root);
+        dir
     }
 
     // ─── traverse() ───
@@ -1946,6 +2103,307 @@ mod tests {
             Err(GraphError::UnsupportedOperation { .. })
         ));
         tx_delta::clear_for_test();
+    }
+
+    #[test]
+    fn shortest_path_uses_layered_manifest_snapshot() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "shortest_path_layered", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                });
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "D"]
+        );
+    }
+
+    #[test]
+    fn csr_readonly_base_only_manifest_bypasses_segment_lookup() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "csr_readonly_bypass", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                });
+        });
+        eng.set_projection_mode(crate::config::ProjectionMode::CsrReadonly);
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C", "D"]
+        );
+    }
+
+    #[test]
+    fn traversal_uses_layered_manifest_snapshot() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "traversal_layered", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                });
+        });
+
+        let rows = eng
+            .traverse(
+                100,
+                "A",
+                1,
+                100,
+                100,
+                None,
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(rows.iter().any(|row| row.node_id == "D"));
+    }
+
+    #[test]
+    fn traversal_layered_manifest_preserves_pending_edge_buffer_overlay() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "traversal_layered_edge_buffer", |_| {});
+        eng.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let rows = eng
+            .traverse(
+                100,
+                "E",
+                1,
+                100,
+                100,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::Out,
+            )
+            .unwrap();
+
+        assert!(rows.iter().any(|row| row.node_id == "D"));
+    }
+
+    #[test]
+    fn traversal_in_direction_uses_layered_manifest_snapshot() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "traversal_in_layered", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                });
+        });
+
+        let rows = eng
+            .traverse(
+                100,
+                "D",
+                1,
+                100,
+                100,
+                None,
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::In,
+            )
+            .unwrap();
+
+        assert!(rows.iter().any(|row| row.node_id == "A"));
+    }
+
+    #[test]
+    fn traversal_in_direction_uses_layered_base_reverse_csr() {
+        let mut eng = build_test_engine();
+        let _dir = install_edge_segment_manifest(&mut eng, "traversal_in_layered_base", |_| {});
+
+        let rows = eng
+            .traverse(
+                100,
+                "D",
+                1,
+                100,
+                100,
+                Some(vec!["linked".to_string()]),
+                None,
+                None,
+                TraversalStrategy::Bfs,
+                TraversalDirection::In,
+            )
+            .unwrap();
+
+        assert!(rows.iter().any(|row| row.node_id == "C"));
+    }
+
+    #[test]
+    fn shortest_path_layered_manifest_preserves_pending_edge_buffer_overlay() {
+        let mut eng = build_test_engine();
+        let _dir =
+            install_edge_segment_manifest(&mut eng, "shortest_path_layered_edge_buffer", |_| {});
+        eng.has_unidirectional_edges = true;
+        eng.edge_buffer.push(EdgeMutation {
+            source: 4,
+            target: 3,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let steps = eng.shortest_path(100, "A", 100, "D", 10).unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "E", "D"]
+        );
+    }
+
+    #[test]
+    fn weighted_shortest_path_uses_layered_manifest_snapshot() {
+        let mut eng = build_test_engine();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            5,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: Some(10),
+            }],
+            true,
+        );
+        eng.reverse_edge_store = eng.edge_store.reversed();
+        let _dir = install_edge_segment_manifest(&mut eng, "weighted_layered", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                });
+            segment
+                .edge_weights
+                .push(crate::projection::segment::SegmentEdgeWeight {
+                    source: 0,
+                    target: 3,
+                    type_id: 1,
+                    weight: 2,
+                });
+        });
+
+        let steps = eng.weighted_shortest_path(100, "A", 100, "D").unwrap();
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.node_id.as_str(), step.step_cost))
+                .collect::<Vec<_>>(),
+            vec![("A", 0), ("D", 2)]
+        );
+    }
+
+    #[test]
+    fn components_use_layered_manifest_snapshot() {
+        let mut eng = Engine::new();
+        for (idx, pk) in ["A", "B", "C", "D"].iter().enumerate() {
+            eng.node_store.add_node(100, pk.to_string());
+            eng.resolution_insert(100, pk, idx as u32);
+        }
+        eng.register_edge_type("linked").unwrap();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            4,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            }],
+            false,
+        );
+        eng.reverse_edge_store = eng.edge_store.reversed();
+        eng.built = true;
+        let _dir = install_edge_segment_manifest(&mut eng, "components_layered", |segment| {
+            segment
+                .edge_inserts
+                .push(crate::projection::segment::SegmentEdge {
+                    source: 2,
+                    target: 3,
+                    type_id: 1,
+                });
+        });
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
+        assert_eq!(result.largest_component_size, 2);
+    }
+
+    #[test]
+    fn components_layered_manifest_preserves_pending_edge_buffer_overlay() {
+        let mut eng = Engine::new();
+        for (idx, pk) in ["A", "B", "C", "D"].iter().enumerate() {
+            eng.node_store.add_node(100, pk.to_string());
+            eng.resolution_insert(100, pk, idx as u32);
+        }
+        eng.register_edge_type("linked").unwrap();
+        eng.edge_store = crate::edge_store::EdgeStore::from_edges(
+            4,
+            vec![crate::edge_store::RawEdge {
+                source: 0,
+                target: 1,
+                type_id: 1,
+                weight: None,
+            }],
+            false,
+        );
+        eng.reverse_edge_store = eng.edge_store.reversed();
+        eng.built = true;
+        let _dir =
+            install_edge_segment_manifest(&mut eng, "components_layered_edge_buffer", |_| {});
+        eng.edge_buffer.push(EdgeMutation {
+            source: 2,
+            target: 3,
+            type_id: 1,
+            kind: MutationKind::Insert,
+        });
+
+        let result = eng.connected_components().unwrap();
+
+        assert_eq!(result.num_components, 2);
+        assert_eq!(result.largest_component_size, 2);
     }
 
     // ─── connected_components() ───

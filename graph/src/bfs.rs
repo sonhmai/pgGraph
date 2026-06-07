@@ -220,9 +220,124 @@ fn use_sparse_metadata(node_count: usize, max_nodes: u32) -> bool {
 ///
 /// # Returns
 /// BfsResult containing visited set, depth map, and parent metadata.
+#[inline]
 pub fn execute(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+) -> BfsResult {
+    let node_count = node_store.node_count() as usize;
+    let sparse_metadata = use_sparse_metadata(node_count, config.max_nodes);
+    let expected_visits = expected_visit_capacity(node_count, config.max_nodes);
+
+    let mut visited = RoaringBitmap::new();
+    let mut depth_map = TraversalDepthMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent = TraversalParentMap::new(node_count, sparse_metadata, expected_visits);
+    let mut parent_edge_type =
+        TraversalParentEdgeTypes::new(node_count, sparse_metadata, expected_visits);
+    if config.seed_node as usize >= node_count {
+        return BfsResult {
+            visited,
+            depth: depth_map,
+            parent,
+            parent_edge_type,
+        };
+    }
+
+    let mut frontier = VecDeque::with_capacity(config.max_frontier as usize);
+    let mut nodes_visited: u32 = 0;
+
+    let seed = config.seed_node;
+    visited.insert(seed);
+    depth_map.set(seed, 0);
+    parent.set(seed, seed);
+    parent_edge_type.set(seed, 0);
+    frontier.push_back(seed);
+    nodes_visited += 1;
+
+    if matches!(
+        config.edge_type_filter,
+        crate::types::EdgeTypeFilter::NoneMatched
+    ) {
+        return BfsResult {
+            visited,
+            depth: depth_map,
+            parent,
+            parent_edge_type,
+        };
+    }
+
+    let has_filters = !config.filter_ops.is_empty();
+    let neighbors = OverlayNeighbors::new(
+        edge_store,
+        &config.overlay_insert_edges,
+        &config.overlay_deleted_edges,
+    );
+
+    while let Some(current) = frontier.pop_front() {
+        let current_depth = depth_map.get(current).unwrap_or(-1);
+
+        if current_depth >= config.max_depth {
+            continue;
+        }
+
+        for neighbor in neighbors.neighbors(current) {
+            if !candidate_allowed(
+                node_store,
+                filter_index,
+                config,
+                neighbor.target,
+                neighbor.type_id,
+                &visited,
+                has_filters,
+            ) {
+                continue;
+            }
+
+            visited.insert(neighbor.target);
+            depth_map.set(neighbor.target, current_depth + 1);
+            parent.set(neighbor.target, current);
+            parent_edge_type.set(neighbor.target, neighbor.type_id);
+            nodes_visited += 1;
+
+            if nodes_visited >= config.max_nodes {
+                return BfsResult {
+                    visited,
+                    depth: depth_map,
+                    parent,
+                    parent_edge_type,
+                };
+            }
+
+            if current_depth + 1 < config.max_depth {
+                frontier.push_back(neighbor.target);
+
+                if frontier.len() as u32 >= config.max_frontier {
+                    return BfsResult {
+                        visited,
+                        depth: depth_map,
+                        parent,
+                        parent_edge_type,
+                    };
+                }
+            }
+        }
+    }
+
+    BfsResult {
+        visited,
+        depth: depth_map,
+        parent,
+        parent_edge_type,
+    }
+}
+
+/// Execute BFS traversal over a supplied neighbor source.
+#[inline]
+pub(crate) fn execute_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
@@ -269,12 +384,6 @@ pub fn execute(
     }
 
     let has_filters = !config.filter_ops.is_empty();
-    let neighbors = OverlayNeighbors::new(
-        edge_store,
-        &config.overlay_insert_edges,
-        &config.overlay_deleted_edges,
-    );
-
     // BFS loop — traversal state is allocated before this point.
     while let Some(current) = frontier.pop_front() {
         let current_depth = depth_map.get(current).unwrap_or(-1);
@@ -339,9 +448,26 @@ pub fn execute(
 }
 
 /// Execute depth-first traversal from a seed node.
+#[inline]
 pub fn execute_dfs(
     node_store: &NodeStore,
     edge_store: &EdgeStore,
+    filter_index: &FilterIndex,
+    config: &BfsConfig,
+) -> BfsResult {
+    let neighbors = OverlayNeighbors::new(
+        edge_store,
+        &config.overlay_insert_edges,
+        &config.overlay_deleted_edges,
+    );
+    execute_dfs_with_neighbors(node_store, &neighbors, filter_index, config)
+}
+
+/// Execute DFS traversal over a supplied neighbor source.
+#[inline]
+pub(crate) fn execute_dfs_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl NeighborSource,
     filter_index: &FilterIndex,
     config: &BfsConfig,
 ) -> BfsResult {
@@ -394,7 +520,7 @@ pub fn execute_dfs(
 
         let mut push = DfsPushContext {
             node_store,
-            edge_store,
+            neighbors,
             filter_index,
             config,
             visited: &mut visited,
@@ -462,7 +588,7 @@ fn candidate_allowed(
 
 struct DfsPushContext<'a> {
     node_store: &'a NodeStore,
-    edge_store: &'a EdgeStore,
+    neighbors: &'a dyn NeighborSource,
     filter_index: &'a FilterIndex,
     config: &'a BfsConfig,
     visited: &'a mut RoaringBitmap,
@@ -476,12 +602,7 @@ struct DfsPushContext<'a> {
 
 impl DfsPushContext<'_> {
     fn push_neighbors(&mut self, current: u32, current_depth: i32) -> bool {
-        let neighbors = OverlayNeighbors::new(
-            self.edge_store,
-            &self.config.overlay_insert_edges,
-            &self.config.overlay_deleted_edges,
-        );
-        for neighbor in neighbors.neighbors_reversed(current) {
+        for neighbor in self.neighbors.neighbors_reversed(current) {
             if self.push_candidate(current, current_depth, neighbor.target, neighbor.type_id) {
                 continue;
             }

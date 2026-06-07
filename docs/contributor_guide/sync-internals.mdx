@@ -172,21 +172,26 @@ keeps its behavior.
 
 The layered projection runtime merges base CSR neighbors, durable edge
 insert/delete/weight segments, durable node visibility and tenant membership
-deltas, and transaction-local edge deltas in a fixed order. Base CSR is read
-first, durable tombstones suppress older base or segment edges, later durable
-inserts can reactivate an edge, duplicate edges are suppressed, and
-transaction-local deltas are applied last for read-your-own-writes semantics.
-The runtime also exposes a weighted-neighbor view for the later weighted
-shortest-path adoption. Public SQL reads do not select the layered runtime until
-the read-path adoption phase.
+deltas, committed engine edge-buffer overlays, and transaction-local edge
+deltas in a fixed order. Base CSR is read first, durable tombstones suppress
+older base or segment edges, later durable inserts can reactivate an edge,
+duplicate edges are suppressed, committed `engine.edge_buffer` changes remain
+visible while a manifest-backed snapshot is active, and transaction-local
+deltas are applied last for read-your-own-writes semantics.
+When a loaded projection manifest references durable segments, traversal,
+unweighted shortest path, weighted shortest path, connected components, and GQL
+relationship expansion select this layered runtime. `csr_readonly` mode and
+base-only manifests keep the clean CSR fast path and avoid segment lookup.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,
 the engine installs only manifests that reference the loaded `.pggraph` file,
 match the current artifact format version and CRC32 checksum, and have no
 segment or chunk references. The active read path remains CSR for those
-manifests; the engine keeps only the base manifest generation and sync watermark
-as status metadata.
+manifests. Segment-backed manifests are installed with mutable-overlay read
+mode so public read APIs consume durable L0/L1/L2 segment deltas after reload.
+The engine keeps only the base manifest generation and sync watermark as status
+metadata until the status/diagnostics phase.
 The SQL `graph.status()` table is already at pgrx's tuple-return arity limit, so
 new durable projection SQL status fields are deferred to the status/diagnostics
 phase that can refactor the SQL shape deliberately.

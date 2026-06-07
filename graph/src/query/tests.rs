@@ -17,10 +17,14 @@ use super::value::{
     QueryParams,
 };
 use crate::edge_store::{EdgeStore, RawEdge};
-use crate::engine::Engine;
+use crate::engine::{EdgeMutation, Engine, MutationKind};
 use crate::gql::errors::GqlErrorKind;
 use crate::gql::parse;
+use crate::projection::manifest::{ManifestSegmentRef, ProjectionManifest};
+use crate::projection::segment::{DeltaSegment, SegmentEdge, SegmentKind};
+use crate::projection::test_fixtures::ProjectionArtifactDir;
 use crate::safety::GraphError;
+use crate::types::TraversalDirection;
 use std::collections::HashMap;
 
 fn fake_catalog() -> FakeCatalog {
@@ -3709,6 +3713,52 @@ fn value_projection_returns_relationship_coordinates() {
 }
 
 #[test]
+fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let _dir = install_query_edge_segment_manifest(&mut engine, "gql_layered", |segment| {
+        segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 3,
+            type_id: 1,
+        });
+    });
+
+    let rows = execute(&engine, &physical, None).unwrap();
+    let target_ids = rows
+        .iter()
+        .filter_map(|row| row.target.as_ref().map(|target| target.node_id.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(target_ids.contains(&"c2"));
+}
+
+#[test]
+fn gql_relationship_expansion_layered_manifest_preserves_pending_edge_buffer_overlay() {
+    let logical = bind_query("MATCH (u:users)-[:works_at]->(c:companies) RETURN u, c");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let _dir = install_query_edge_segment_manifest(&mut engine, "gql_layered_edge_buffer", |_| {});
+    engine.edge_buffer.push(EdgeMutation {
+        source: 1,
+        target: 2,
+        type_id: 1,
+        kind: MutationKind::Insert,
+    });
+
+    let rows = execute(&engine, &physical, None).unwrap();
+
+    assert!(rows.iter().any(|row| {
+        row.source.node_id == "u2"
+            && row
+                .target
+                .as_ref()
+                .is_some_and(|target| target.node_id == "c1")
+    }));
+}
+
+#[test]
 fn value_projection_returns_inbound_relationship_orientation() {
     let logical = bind_query("MATCH (c:companies)<-[r:works_at]-(u:users) RETURN r");
     let physical = lower(logical);
@@ -5270,4 +5320,45 @@ fn engine_fixture() -> Engine {
     engine.reverse_edge_store = engine.edge_store.reversed();
     engine.built = true;
     engine
+}
+
+fn install_query_edge_segment_manifest(
+    engine: &mut Engine,
+    test_name: &str,
+    fill: impl FnOnce(&mut DeltaSegment),
+) -> ProjectionArtifactDir {
+    let dir = ProjectionArtifactDir::new(test_name);
+    let root = dir.path().to_path_buf();
+    let segment_path = dir.segment_path(1, 0);
+    let mut segment = DeltaSegment::new(
+        SegmentKind::Edge,
+        0,
+        TraversalDirection::Out,
+        0,
+        engine.node_store.node_count(),
+        1,
+    )
+    .expect("segment builds");
+    fill(&mut segment);
+    segment
+        .write_to_path(&segment_path)
+        .expect("segment writes");
+    let bytes = std::fs::read(&segment_path).expect("segment reads for checksum");
+    let relative = segment_path
+        .strip_prefix(&root)
+        .expect("segment stays inside root")
+        .to_string_lossy()
+        .to_string();
+    let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 1, 1);
+    manifest.segments.push(ManifestSegmentRef {
+        path: relative,
+        checksum: format!("crc32:{:08x}", crc32fast::hash(&bytes)),
+        level: segment.header.level,
+        source_start: segment.header.source_start,
+        source_end: segment.header.source_end,
+        sync_watermark: segment.header.sync_watermark,
+    });
+    engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
+    engine.install_projection_manifest(&manifest, root);
+    dir
 }

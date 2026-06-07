@@ -297,3 +297,60 @@ Microphase 7 implemented the layered runtime checkpoint:
   Benchmark baseline remains `pre_durable_projection`; read-path regression
   benchmarking is deferred to Microphase 8 when Engine adoption changes query
   behavior.
+
+Microphase 8 routed public read paths through segment-backed layered snapshots:
+
+- `Engine` now stores the full projection manifest and artifact root, builds
+  manifest-backed `LayeredNeighbors` for segment-backed mutable-overlay reads,
+  and keeps `csr_readonly` plus base-only manifests on the CSR fast path.
+- Traversal, DFS, unweighted shortest path, weighted shortest path, connected
+  components, and read-only GQL relationship expansion now select layered
+  neighbors when a loaded manifest references durable segments. Transaction
+  deltas remain the final read-your-own-writes layer.
+- Independent-review fixes keep committed `Engine.edge_buffer` overlays visible
+  while segment-backed layered snapshots are active and use the reverse CSR
+  store for inbound layered base reads instead of scanning the full base graph
+  on each inbound lookup. Segment files are still decoded per read; that
+  performance follow-up is deferred to the Microphase 12 benchmark/caching pass.
+- Segment-backed `.pggraph` reloads now activate mutable-overlay read mode so
+  loaded durable segments are not bypassed by the default CSR-only engine mode.
+- Added pgrx coverage that builds persisted mutable graphs, publishes real L0
+  segments through `graph.ingest_projection()`, reloads the backend engine, and
+  verifies traversal, shortest path, weighted shortest path, components, and
+  GQL consume the durable snapshot.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 layered_manifest_snapshot`:
+    passed with 6 layered read-adoption tests.
+  - `cd graph && cargo test --features pg17 projection::layered`: passed
+    with 12 layered-runtime tests.
+  - `cd graph && cargo test --features pg17
+    layered_manifest_preserves_pending_edge_buffer_overlay`: passed with 4
+    regression tests covering traversal, shortest path, components, and GQL.
+  - `cd graph && cargo test --features pg17
+    traversal_in_direction_uses_layered_base_reverse_csr`: passed.
+  - `cd graph && cargo test --features pg17 transaction_delta_edge_overlay`:
+    passed.
+  - `cd graph && cargo test --features pg17
+    persistence::tests::engine_loads_segment_backed_projection_manifest`:
+    passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    traversal_and_shortest_path_use_layered_manifest_snapshot`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    weighted_shortest_path_uses_layered_manifest_snapshot`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    connected_components_use_layered_manifest_snapshot`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17
+    gql_relationship_expansion_uses_layered_manifest_snapshot`: passed.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 5 passed, 1 failed for the future status/diagnostics
+    contract.
+  - `cd graph && cargo test --features pg17`: expected red; 592 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+- Regression report: Microphase 8 changes traversal, GQL, shortest-path,
+  weighted-path, and component read selection. Criterion comparison against
+  `pre_durable_projection` was run for this checkpoint and recorded in
+  `todo/regression_report.md`.

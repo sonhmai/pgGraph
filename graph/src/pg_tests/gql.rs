@@ -67,6 +67,25 @@ fn gql_single_directed_match_matches_traverse_fixture() {
 }
 
 #[pg_test]
+fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
+    build_persisted_mutable_friendship_graph();
+    publish_friendship_segment_and_reload("f-layered-gql", "u2", "u1");
+
+    let target = Spi::get_one::<String>(
+        "SELECT row #>> '{v,_id,id}'
+             FROM graph.gql(
+                'MATCH (u:graph_test_users_pgtest)-[:friend]->(v:graph_test_users_pgtest)
+                 RETURN u, v'
+             )
+             WHERE row #>> '{u,_id,id}' = 'u1'",
+    )
+    .expect("layered GQL relationship expansion failed")
+    .unwrap_or_default();
+
+    assert_eq!(target, "u2");
+}
+
+#[pg_test]
 fn gql_explain_uses_registered_table_labels_after_catalog_read() {
     reset_and_create_fixtures();
     build_friendship_fixture_graph();

@@ -55,6 +55,79 @@ fn component_helper_apis_return_paginated_nodes() {
 }
 
 #[pg_test]
+fn connected_components_use_layered_manifest_snapshot() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable automatic query sync failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_users_pgtest (id, name, age)
+             VALUES ('u3', 'Carol', 29), ('u4', 'Dora', 31)",
+    )
+    .expect("insert component users failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+             ADD COLUMN parent_id TEXT NULL REFERENCES public.graph_test_users_pgtest(id)",
+    )
+    .expect("add component self-edge column failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age', 'parent_id']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_users_pgtest'::regclass,
+                'parent_id',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build persisted mutable component graph failed");
+    Spi::run(
+        "UPDATE public.graph_test_users_pgtest
+             SET parent_id = 'u4'
+             WHERE id = 'u3'",
+    )
+    .expect("update layered component edge failed");
+    let segments = Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
+        .expect("ingest component projection failed")
+        .unwrap_or(0);
+    assert!(segments > 0, "ingest_projection must publish a component segment");
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    super::ENGINE.with(|engine| {
+        *engine.borrow_mut() = super::engine::Engine::new();
+    });
+
+    let (components, largest) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT num_components, largest_component FROM graph.component_stats()",
+                None,
+                &[],
+            )
+            .expect("layered component stats failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i32>(1)?.unwrap_or(0),
+            row.get::<i32>(2)?.unwrap_or(0),
+        ))
+    })
+    .expect("component stats read failed");
+
+    assert_eq!(components, 3);
+    assert_eq!(largest, 2);
+}
+
+#[pg_test]
 fn build_overload_status_and_node_ref_are_available() {
     reset_and_create_fixtures();
     Spi::run(

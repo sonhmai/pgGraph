@@ -674,6 +674,115 @@ fn edge_and_weighted_path_v1_acceptance() {
 }
 
 #[pg_test]
+fn traversal_and_shortest_path_use_layered_manifest_snapshot() {
+    build_persisted_mutable_friendship_graph();
+    publish_friendship_segment_and_reload("f-layered", "u2", "u1");
+
+    let traversal_count = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                1,
+                edge_types := ARRAY['friend'],
+                hydrate := false
+             )
+             WHERE node_id = 'u2'",
+    )
+    .expect("layered traversal query failed")
+    .unwrap_or(0);
+    let shortest = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, '->' ORDER BY step)
+             FROM graph.shortest_path(
+                'graph_test_users_pgtest'::regclass,
+                'u1',
+                'graph_test_users_pgtest'::regclass,
+                'u2',
+                5,
+                hydrate := false
+             )",
+    )
+    .expect("layered shortest path query failed")
+    .unwrap_or_default();
+
+    assert_eq!(traversal_count, 1);
+    assert_eq!(shortest, "u1->u2");
+}
+
+#[pg_test]
+fn weighted_shortest_path_uses_layered_manifest_snapshot() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable automatic query sync failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_weighted_nodes_pgtest (
+                id   TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                parent_id TEXT NULL REFERENCES public.graph_test_weighted_nodes_pgtest(id),
+                cost INT NOT NULL DEFAULT 1
+            )",
+    )
+    .expect("create weighted nodes failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_weighted_nodes_pgtest (id, name) VALUES
+                ('a', 'A'), ('b', 'B'), ('d', 'D')",
+    )
+    .expect("insert weighted nodes failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id', 'cost']
+            )",
+    )
+    .expect("add weighted nodes failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                from_column := 'parent_id',
+                to_table := 'graph_test_weighted_nodes_pgtest'::regclass,
+                to_column := 'id',
+                label := 'route',
+                bidirectional := false,
+                weight_column := 'cost'
+            )",
+    )
+    .expect("add weighted edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build persisted mutable weighted graph failed");
+    Spi::run(
+        "UPDATE public.graph_test_weighted_nodes_pgtest
+             SET parent_id = 'd', cost = 2
+             WHERE id = 'a'",
+    )
+    .expect("update layered weighted edge failed");
+    let segments = Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
+        .expect("ingest weighted projection failed")
+        .unwrap_or(0);
+    assert!(segments > 0, "ingest_projection must publish a weighted segment");
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    super::ENGINE.with(|engine| {
+        *engine.borrow_mut() = super::engine::Engine::new();
+    });
+
+    let weighted = Spi::get_one::<String>(
+        "SELECT string_agg(node_id, '->' ORDER BY step) || ':' || max(total_cost)::text
+             FROM graph.weighted_shortest_path(
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'a',
+                'graph_test_weighted_nodes_pgtest'::regclass,
+                'd'
+             )",
+    )
+    .expect("layered weighted shortest path failed")
+    .unwrap_or_default();
+
+    assert_eq!(weighted, "a->d:2");
+}
+
+#[pg_test]
 fn traverse_accepts_dfs_out_and_returns_path_coordinates() {
     reset_and_create_fixtures();
     Spi::run(

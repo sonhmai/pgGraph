@@ -233,6 +233,59 @@ fn build_friendship_fixture_graph() {
     Spi::run("SELECT * FROM graph.build()").expect("build friendship graph failed");
 }
 
+fn build_persisted_mutable_friendship_graph() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set trigger sync failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable projection failed");
+    Spi::run("SET graph.query_freshness = 'off'").expect("disable automatic query sync failed");
+    Spi::run(
+        "ALTER TABLE public.graph_test_users_pgtest
+             ADD COLUMN parent_id TEXT NULL REFERENCES public.graph_test_users_pgtest(id)",
+    )
+    .expect("add self-edge column failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age', 'parent_id']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_users_pgtest'::regclass,
+                'parent_id',
+                'graph_test_users_pgtest'::regclass,
+                'id',
+                'friend',
+                bidirectional := false
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build persisted mutable friendship graph failed");
+}
+
+fn publish_friendship_segment_and_reload(_edge_id: &str, user_id: &str, friend_id: &str) {
+    Spi::run(&format!(
+        "UPDATE public.graph_test_users_pgtest
+             SET parent_id = {}
+             WHERE id = {}",
+        super::sql_literal(user_id),
+        super::sql_literal(friend_id)
+    ))
+    .expect("update durable friendship edge failed");
+    let segments = Spi::get_one::<i64>("SELECT segments_published FROM graph.ingest_projection()")
+        .expect("ingest friendship projection failed")
+        .unwrap_or(0);
+    assert!(segments > 0, "ingest_projection must publish a segment");
+    Spi::run("SET graph.auto_load = on").expect("enable auto_load failed");
+    super::ENGINE.with(|engine| {
+        *engine.borrow_mut() = super::engine::Engine::new();
+    });
+}
+
 fn reset_and_create_synthetic_fixture(node_count: i32, hub_fanout: i32, persist: bool) {
     assert!(node_count >= 100, "synthetic fixture needs at least 100 nodes");
     assert!(hub_fanout >= 2, "synthetic fixture needs hub fanout >= 2");

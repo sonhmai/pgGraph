@@ -827,36 +827,35 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
     }
-    if let Some(manifest) = load_base_only_projection_manifest(path, computed_crc)? {
-        engine.install_projection_manifest(&manifest);
+    let manifest_root = projection_manifest_root(path);
+    if let Some(manifest) = load_projection_manifest(path, computed_crc, &manifest_root)? {
+        if !manifest.segments.is_empty() {
+            engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
+        }
+        engine.install_projection_manifest(&manifest, manifest_root);
     }
 
     Ok(engine)
 }
 
-fn load_base_only_projection_manifest(
+fn load_projection_manifest(
     path: &Path,
     artifact_crc: u32,
+    manifest_root: &Path,
 ) -> GraphResult<Option<ProjectionManifest>> {
-    let store = ProjectionManifestStore::new(projection_manifest_root(path));
+    let store = ProjectionManifestStore::new(manifest_root);
     let Some(manifest) = store.load_latest_current()? else {
         return Ok(None);
     };
-    validate_base_only_projection_manifest(path, artifact_crc, &manifest)?;
+    validate_projection_manifest_base(path, artifact_crc, &manifest)?;
     Ok(Some(manifest))
 }
 
-fn validate_base_only_projection_manifest(
+fn validate_projection_manifest_base(
     path: &Path,
     artifact_crc: u32,
     manifest: &ProjectionManifest,
 ) -> GraphResult<()> {
-    if !manifest.is_base_only() {
-        return Err(GraphError::CorruptFile {
-            reason: "projection manifest: engine can only load base-only manifests in this phase"
-                .to_string(),
-        });
-    }
     if manifest.base_artifact_version != VERSION {
         return Err(GraphError::IncompatibleVersion(format!(
             "projection manifest references base artifact version {}; expected {}",
@@ -1306,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_rejects_non_base_only_projection_manifest() {
+    fn engine_loads_segment_backed_projection_manifest() {
         let engine = graph_with_relationship();
         let path = temp_graph_path("base-manifest-segmented");
         write_graph_file(&engine, &path).unwrap();
@@ -1332,13 +1331,11 @@ mod tests {
         });
         publish_manifest(root, manifest);
 
-        let err = match load_graph_file(&path) {
-            Ok(_) => panic!("segmented manifest was accepted as base-only"),
-            Err(err) => err,
-        };
+        let loaded = load_graph_file(&path).expect("segment-backed manifest loads");
+        let status = loaded.base_projection_manifest_status();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert!(matches!(err, GraphError::CorruptFile { reason } if reason.contains("base-only")));
+        assert_eq!(status, (Some(12), Some(0)));
     }
 
     #[test]
@@ -1347,7 +1344,7 @@ mod tests {
         let manifest =
             ProjectionManifest::base_only(11, "main.pggraph", "checksum", VERSION, 99, 1);
 
-        engine.install_projection_manifest(&manifest);
+        engine.install_projection_manifest(&manifest, PathBuf::from("."));
 
         assert_eq!(
             engine.base_projection_manifest_status(),

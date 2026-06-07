@@ -102,6 +102,46 @@ pub(crate) struct Neighbor {
     pub(crate) type_id: u8,
 }
 
+/// Weighted neighbor stream item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WeightedNeighbor {
+    /// Target node index.
+    pub(crate) target: u32,
+    /// Edge type identifier.
+    pub(crate) type_id: u8,
+    /// Edge weight.
+    pub(crate) weight: u32,
+}
+
+/// Source of weighted graph neighbors for shortest-path algorithms.
+pub(crate) trait WeightedNeighborSource {
+    /// Whether this source can expose weighted edges.
+    fn has_weighted_edges(&self) -> bool;
+
+    /// Return weighted neighbors for `node_idx`.
+    fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor>;
+}
+
+impl WeightedNeighborSource for EdgeStore {
+    fn has_weighted_edges(&self) -> bool {
+        self.has_weights()
+    }
+
+    fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
+        let (targets, type_ids, weights) = self.neighbors_weighted(node_idx);
+        targets
+            .iter()
+            .zip(type_ids.iter())
+            .zip(weights.iter())
+            .map(|((&target, &type_id), &weight)| WeightedNeighbor {
+                target,
+                type_id,
+                weight,
+            })
+            .collect()
+    }
+}
+
 /// Neighbor iterator for clean and overlay-backed sources.
 pub(crate) enum NeighborIter<'a> {
     Csr(CsrNeighborIter<'a>),

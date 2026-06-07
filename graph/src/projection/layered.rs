@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use crate::edge_store::EdgeStore;
 use crate::projection::manifest::{ManifestSegmentRef, ProjectionManifest};
-use crate::projection::neighbors::{Neighbor, NeighborIter, NeighborSource};
+use crate::projection::neighbors::{
+    EdgeOverlay, Neighbor, NeighborIter, NeighborSource, OverlayDeletes, OverlayInserts,
+    WeightedNeighbor, WeightedNeighborSource,
+};
 use crate::projection::segment::{DeltaSegment, SegmentKind};
 use crate::projection::tx_delta;
 use crate::safety::{GraphError, GraphResult};
@@ -107,8 +110,13 @@ fn read_manifest_segment(root: &Path, segment: &ManifestSegmentRef) -> GraphResu
 /// Immutable layered neighbor source for one manifest snapshot.
 pub(crate) struct LayeredNeighbors<'a> {
     base: &'a EdgeStore,
+    base_in: Option<&'a EdgeStore>,
     durable_out: HashMap<u32, DurableEdges>,
     durable_in: HashMap<u32, DurableEdges>,
+    committed_out_inserts: OverlayInserts,
+    committed_out_deletes: OverlayDeletes,
+    committed_in_inserts: OverlayInserts,
+    committed_in_deletes: OverlayDeletes,
     active_nodes: HashMap<u32, bool>,
     tenant_memberships: HashMap<u64, HashSet<u32>>,
     tenant_filter: Option<u64>,
@@ -126,13 +134,32 @@ impl<'a> LayeredNeighbors<'a> {
         segments: Vec<DeltaSegment>,
         tenant_filter: Option<u64>,
     ) -> Self {
+        Self::new_with_options(base, None, segments, tenant_filter, None, None)
+    }
+
+    /// Build a layered source with reverse base CSR and committed overlays.
+    pub(crate) fn new_with_options(
+        base: &'a EdgeStore,
+        base_in: Option<&'a EdgeStore>,
+        segments: Vec<DeltaSegment>,
+        tenant_filter: Option<u64>,
+        committed_out: Option<EdgeOverlay>,
+        committed_in: Option<EdgeOverlay>,
+    ) -> Self {
         let mut builder = LayeredBuilder::new(base);
         builder.apply_segments(segments);
         let output = builder.finish();
+        let (committed_out_inserts, committed_out_deletes) = committed_out.unwrap_or_default();
+        let (committed_in_inserts, committed_in_deletes) = committed_in.unwrap_or_default();
         Self {
             base,
+            base_in,
             durable_out: output.durable_out,
             durable_in: output.durable_in,
+            committed_out_inserts,
+            committed_out_deletes,
+            committed_in_inserts,
+            committed_in_deletes,
             active_nodes: output.active_nodes,
             tenant_memberships: output.tenant_memberships,
             tenant_filter,
@@ -151,12 +178,51 @@ impl<'a> LayeredNeighbors<'a> {
         Ok(Self::new(base, provider.load_segments()?))
     }
 
+    /// Build a layered source from a provider plus Engine-owned read overlays.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider errors when segment loading fails.
+    pub(crate) fn from_provider_with_overlays(
+        base: &'a EdgeStore,
+        base_in: &'a EdgeStore,
+        provider: &impl SegmentProvider,
+        committed_out: EdgeOverlay,
+        committed_in: EdgeOverlay,
+    ) -> GraphResult<Self> {
+        Ok(Self::new_with_options(
+            base,
+            Some(base_in),
+            provider.load_segments()?,
+            None,
+            Some(committed_out),
+            Some(committed_in),
+        ))
+    }
+
+    /// Borrow this layered snapshot as a neighbor source for `direction`.
+    pub(crate) fn for_direction(
+        &self,
+        direction: TraversalDirection,
+    ) -> DirectionalLayeredNeighbors<'_, 'a> {
+        DirectionalLayeredNeighbors {
+            layered: self,
+            direction,
+        }
+    }
+
     /// Return weighted outgoing neighbors after durable deltas and transaction
     /// overlays have been applied.
-    pub(crate) fn weighted_neighbors(&self, node_idx: u32) -> Vec<(u32, u8, u32)> {
+    pub(crate) fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
         self.merged_neighbors(TraversalDirection::Out, node_idx, false)
             .into_iter()
-            .filter_map(|(target, edge)| edge.weight.map(|weight| (target, edge.type_id, weight)))
+            .filter_map(|(target, edge)| {
+                edge.weight.map(|weight| WeightedNeighbor {
+                    target,
+                    type_id: edge.type_id,
+                    weight,
+                })
+            })
             .collect()
     }
 
@@ -173,6 +239,7 @@ impl<'a> LayeredNeighbors<'a> {
         let mut merged = BTreeMap::<(u32, u8), LayeredEdge>::new();
         self.merge_base(direction, node_idx, &mut merged);
         self.merge_durable(direction, node_idx, &mut merged);
+        self.merge_committed_overlay(direction, node_idx, &mut merged);
         self.merge_tx_delta(direction, node_idx, &mut merged);
 
         let mut neighbors = merged
@@ -208,28 +275,47 @@ impl<'a> LayeredNeighbors<'a> {
                 }
             }
             TraversalDirection::In => {
-                for source in 0..self.base.node_count() {
-                    let (targets, type_ids) = self.base.neighbors(source);
-                    let weights = base_weight_slice(self.base, source);
+                if let Some(base_in) = self.base_in {
+                    let (targets, type_ids) = base_in.neighbors(node_idx);
+                    let weights = base_weight_slice(base_in, node_idx);
                     for (idx, (&target, &type_id)) in
                         targets.iter().zip(type_ids.iter()).enumerate()
                     {
-                        if target == node_idx {
-                            merged.insert(
-                                (source, type_id),
-                                LayeredEdge {
-                                    target: source,
-                                    type_id,
-                                    weight: weights.and_then(|weights| weights.get(idx).copied()),
-                                },
-                            );
-                        }
+                        merged.insert(
+                            (target, type_id),
+                            LayeredEdge {
+                                target,
+                                type_id,
+                                weight: weights.and_then(|weights| weights.get(idx).copied()),
+                            },
+                        );
                     }
+                } else {
+                    self.merge_base_in_by_scan(node_idx, merged);
                 }
             }
             TraversalDirection::Any => {
                 self.merge_base(TraversalDirection::Out, node_idx, merged);
                 self.merge_base(TraversalDirection::In, node_idx, merged);
+            }
+        }
+    }
+
+    fn merge_base_in_by_scan(&self, node_idx: u32, merged: &mut BTreeMap<(u32, u8), LayeredEdge>) {
+        for source in 0..self.base.node_count() {
+            let (targets, type_ids) = self.base.neighbors(source);
+            let weights = base_weight_slice(self.base, source);
+            for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
+                if target == node_idx {
+                    merged.insert(
+                        (source, type_id),
+                        LayeredEdge {
+                            target: source,
+                            type_id,
+                            weight: weights.and_then(|weights| weights.get(idx).copied()),
+                        },
+                    );
+                }
             }
         }
     }
@@ -246,6 +332,42 @@ impl<'a> LayeredNeighbors<'a> {
             TraversalDirection::Any => {
                 merge_durable_map(&self.durable_out, node_idx, merged);
                 merge_durable_map(&self.durable_in, node_idx, merged);
+            }
+        }
+    }
+
+    fn merge_committed_overlay(
+        &self,
+        direction: TraversalDirection,
+        node_idx: u32,
+        merged: &mut BTreeMap<(u32, u8), LayeredEdge>,
+    ) {
+        match direction {
+            TraversalDirection::Out => merge_committed_overlay_maps(
+                &self.committed_out_inserts,
+                &self.committed_out_deletes,
+                node_idx,
+                merged,
+            ),
+            TraversalDirection::In => merge_committed_overlay_maps(
+                &self.committed_in_inserts,
+                &self.committed_in_deletes,
+                node_idx,
+                merged,
+            ),
+            TraversalDirection::Any => {
+                merge_committed_overlay_maps(
+                    &self.committed_out_inserts,
+                    &self.committed_out_deletes,
+                    node_idx,
+                    merged,
+                );
+                merge_committed_overlay_maps(
+                    &self.committed_in_inserts,
+                    &self.committed_in_deletes,
+                    node_idx,
+                    merged,
+                );
             }
         }
     }
@@ -325,6 +447,60 @@ impl NeighborSource for LayeredNeighbors<'_> {
     }
 }
 
+/// Direction-specific neighbor source backed by one layered snapshot.
+pub(crate) struct DirectionalLayeredNeighbors<'a, 'b> {
+    layered: &'a LayeredNeighbors<'b>,
+    direction: TraversalDirection,
+}
+
+impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
+    fn neighbors(&self, node_idx: u32) -> NeighborIter<'_> {
+        NeighborIter::Owned(
+            self.layered
+                .merged_neighbors(self.direction, node_idx, false)
+                .into_iter()
+                .map(|(target, edge)| Neighbor {
+                    target,
+                    type_id: edge.type_id,
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
+    }
+
+    fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_> {
+        NeighborIter::Owned(
+            self.layered
+                .merged_neighbors(self.direction, node_idx, true)
+                .into_iter()
+                .map(|(target, edge)| Neighbor {
+                    target,
+                    type_id: edge.type_id,
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
+    }
+}
+
+impl WeightedNeighborSource for LayeredNeighbors<'_> {
+    fn has_weighted_edges(&self) -> bool {
+        self.base.has_weights()
+            || self
+                .durable_out
+                .values()
+                .any(|edges| edges.inserts.iter().any(|edge| edge.weight.is_some()))
+            || tx_delta::weighted_edge_overlay(TraversalDirection::Out)
+                .0
+                .values()
+                .any(|edges| edges.iter().any(|edge| edge.weight.is_some()))
+    }
+
+    fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
+        self.weighted_neighbors(node_idx)
+    }
+}
+
 fn base_weight_slice(base: &EdgeStore, node_idx: u32) -> Option<&[u32]> {
     let (_, _, weights) = base.neighbors_weighted(node_idx);
     (!weights.is_empty()).then_some(weights)
@@ -341,6 +517,31 @@ fn merge_durable_map(
         }
         for edge in &edges.inserts {
             merged.insert((edge.target, edge.type_id), *edge);
+        }
+    }
+}
+
+fn merge_committed_overlay_maps(
+    inserts: &OverlayInserts,
+    deletes: &OverlayDeletes,
+    node_idx: u32,
+    merged: &mut BTreeMap<(u32, u8), LayeredEdge>,
+) {
+    if let Some(deleted) = deletes.get(&node_idx) {
+        for &(target, type_id) in deleted {
+            merged.remove(&(target, type_id));
+        }
+    }
+    if let Some(inserted) = inserts.get(&node_idx) {
+        for &(target, type_id) in inserted {
+            merged.insert(
+                (target, type_id),
+                LayeredEdge {
+                    target,
+                    type_id,
+                    weight: None,
+                },
+            );
         }
     }
 }
@@ -463,12 +664,28 @@ impl<'a> LayeredBuilder<'a> {
                     },
                     DurableEdgeState::Present(weight),
                 );
+                self.in_edges.insert(
+                    EdgeKey {
+                        source: target,
+                        target: source,
+                        type_id,
+                    },
+                    DurableEdgeState::Present(weight),
+                );
             }
             TraversalDirection::In => {
                 self.in_edges.insert(
                     EdgeKey {
                         source,
                         target,
+                        type_id,
+                    },
+                    DurableEdgeState::Present(weight),
+                );
+                self.out_edges.insert(
+                    EdgeKey {
+                        source: target,
+                        target: source,
                         type_id,
                     },
                     DurableEdgeState::Present(weight),
@@ -498,12 +715,28 @@ impl<'a> LayeredBuilder<'a> {
                     },
                     DurableEdgeState::Deleted,
                 );
+                self.in_edges.insert(
+                    EdgeKey {
+                        source: target,
+                        target: source,
+                        type_id,
+                    },
+                    DurableEdgeState::Deleted,
+                );
             }
             TraversalDirection::In => {
                 self.in_edges.insert(
                     EdgeKey {
                         source,
                         target,
+                        type_id,
+                    },
+                    DurableEdgeState::Deleted,
+                );
+                self.out_edges.insert(
+                    EdgeKey {
+                        source: target,
+                        target: source,
                         type_id,
                     },
                     DurableEdgeState::Deleted,
@@ -576,7 +809,7 @@ fn base_edge_exists(base: &EdgeStore, key: EdgeKey) -> bool {
 mod tests {
     use super::*;
     use crate::projection::manifest::{ManifestSegmentRef, ProjectionManifest};
-    use crate::projection::neighbors::{CsrNeighbors, Neighbor};
+    use crate::projection::neighbors::{CsrNeighbors, Neighbor, WeightedNeighbor};
     use crate::projection::segment::{
         SegmentEdge, SegmentEdgeWeight, SegmentNodeState, SegmentTenant,
     };
@@ -738,7 +971,21 @@ mod tests {
         });
         let layered = LayeredNeighbors::new(&base, vec![segment]);
 
-        assert_eq!(layered.weighted_neighbors(0), vec![(1, 1, 10), (2, 1, 3)]);
+        assert_eq!(
+            layered.weighted_neighbors(0),
+            vec![
+                WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 10,
+                },
+                WeightedNeighbor {
+                    target: 2,
+                    type_id: 1,
+                    weight: 3,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -779,7 +1026,21 @@ mod tests {
         .expect("record weighted tx insert");
         let layered = LayeredNeighbors::new(&base, Vec::new());
 
-        assert_eq!(layered.weighted_neighbors(0), vec![(1, 1, 10), (2, 1, 4)]);
+        assert_eq!(
+            layered.weighted_neighbors(0),
+            vec![
+                WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 10,
+                },
+                WeightedNeighbor {
+                    target: 2,
+                    type_id: 1,
+                    weight: 4,
+                },
+            ]
+        );
         tx_delta::clear_for_test();
     }
 

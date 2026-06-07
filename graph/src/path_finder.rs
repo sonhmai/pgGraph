@@ -14,7 +14,7 @@ use crate::edge_store::EdgeStore;
 use crate::node_store::NodeStore;
 #[cfg(test)]
 use crate::projection::neighbors::CsrNeighbors;
-use crate::projection::neighbors::NeighborSource;
+use crate::projection::neighbors::{NeighborSource, WeightedNeighborSource};
 use crate::types::{PathStep, TableOid, WeightedPathStep};
 
 #[derive(Debug, Clone, Copy)]
@@ -380,11 +380,28 @@ pub fn weighted_shortest_path(
     target: u32,
     edge_type_registry: &[String],
 ) -> Option<Vec<WeightedPathStep>> {
+    weighted_shortest_path_with_neighbors(
+        node_store,
+        edge_store,
+        source,
+        target,
+        edge_type_registry,
+    )
+}
+
+/// Dijkstra's algorithm over a supplied weighted neighbor source.
+pub(crate) fn weighted_shortest_path_with_neighbors(
+    node_store: &NodeStore,
+    neighbors: &impl WeightedNeighborSource,
+    source: u32,
+    target: u32,
+    edge_type_registry: &[String],
+) -> Option<Vec<WeightedPathStep>> {
     if source >= node_store.node_count() || target >= node_store.node_count() {
         return None;
     }
 
-    if !edge_store.has_weights() {
+    if !neighbors.has_weighted_edges() {
         return None;
     }
 
@@ -412,10 +429,9 @@ pub fn weighted_shortest_path(
             continue; // Stale entry
         }
 
-        let (targets, type_ids, weights) = edge_store.neighbors_weighted(current);
-        for i in 0..targets.len() {
-            let neighbor = targets[i];
-            let edge_weight = weights[i];
+        for edge in neighbors.weighted_neighbors(current) {
+            let neighbor = edge.target;
+            let edge_weight = edge.weight;
             let edge_cost = u64::from(edge_weight);
             let Some(new_cost) = cost.checked_add(edge_cost) else {
                 continue;
@@ -430,7 +446,7 @@ pub fn weighted_shortest_path(
                     neighbor,
                     WeightedParentStep {
                         parent: current,
-                        edge_type: type_ids[i],
+                        edge_type: edge.type_id,
                         edge_weight,
                     },
                 );
