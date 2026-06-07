@@ -17,6 +17,7 @@ every backend-local engine.
 | `engine.rs` | Edge mutation buffer, read-only flag, overlay reduction |
 | `persistence.rs` | `.pggraph` load/write plus base-only projection manifest discovery |
 | `projection/ingest.rs` | Core committed-row to L0 segment publication logic |
+| `projection/layered.rs` | Base CSR plus durable-segment plus transaction-delta layered read source |
 | `projection/manifest.rs` | Projection manifest metadata and active-generation heartbeats |
 | `projection/normalize.rs` | Deterministic committed-mutation normalization and ingest buffer limits |
 | `projection/segment.rs` | Durable delta segment format for future layered projections |
@@ -168,6 +169,16 @@ persisted `main.pggraph` artifact. The base graph must be persisted, such as by
 building with `graph.persist_on_build = on`; scheduled maintenance treats a
 missing persisted artifact as a no-op so existing in-memory sync maintenance
 keeps its behavior.
+
+The layered projection runtime merges base CSR neighbors, durable edge
+insert/delete/weight segments, durable node visibility and tenant membership
+deltas, and transaction-local edge deltas in a fixed order. Base CSR is read
+first, durable tombstones suppress older base or segment edges, later durable
+inserts can reactivate an edge, duplicate edges are suppressed, and
+transaction-local deltas are applied last for read-your-own-writes semantics.
+The runtime also exposes a weighted-neighbor view for the later weighted
+shortest-path adoption. Public SQL reads do not select the layered runtime until
+the read-path adoption phase.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,

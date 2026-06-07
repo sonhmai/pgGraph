@@ -414,6 +414,38 @@ pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
     })
 }
 
+/// Return transaction-local edge overlays while preserving inserted weights.
+pub(crate) fn weighted_edge_overlay(
+    direction: TraversalDirection,
+) -> (HashMap<u32, Vec<DeltaEdge>>, OverlayDeletes) {
+    TX_DELTA.with(|delta| {
+        let borrowed = delta.borrow();
+        let Some(delta) = borrowed.as_ref() else {
+            return (HashMap::new(), OverlayDeletes::new());
+        };
+
+        let mut inserts = HashMap::<u32, Vec<DeltaEdge>>::new();
+        for (&source, edges) in &delta.added_edges {
+            for edge in edges {
+                let (source, target) = orient_edge(direction, source, edge.target);
+                inserts.entry(source).or_default().push(DeltaEdge {
+                    target,
+                    type_id: edge.type_id,
+                    weight: edge.weight,
+                });
+            }
+        }
+
+        let mut deletes = OverlayDeletes::new();
+        for &(source, target, type_id) in &delta.deleted_edges {
+            let (source, target) = orient_edge(direction, source, target);
+            deletes.entry(source).or_default().insert((target, type_id));
+        }
+
+        (inserts, deletes)
+    })
+}
+
 fn enforce_limit(kind: &str, requested: usize, limit: usize) -> GraphResult<()> {
     if requested > limit {
         return Err(GraphError::OverlayLimit {

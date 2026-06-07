@@ -102,3 +102,14 @@ decision.
 | Command | `cd graph && cargo fmt`; `cd graph && cargo test --features pg17 projection::ingest -- --list`; `cd graph && cargo test --features pg17 projection::ingest`; `cd graph && cargo check --features pg17`; `cd graph && cargo pgrx test --features "pg17 development" pg17 ingest_projection`; `cd graph && cargo pgrx test --features "pg17 development" pg17 scheduled_maintenance`; `cd graph && cargo test --features pg17` |
 | Result | Unit loader smoke and core ingestion tests passed. The pgrx SQL signature, persisted sync-log ingestion, base-checkpoint watermark, and no-row watermark-advance tests passed, and scheduled maintenance still applies sync/starts maintenance while treating absent persisted projection artifacts as a no-op. Full `cargo test --features pg17` is intentionally red with 567 passed, 2 future durable-projection contract failures, and 1 ignored scale test. |
 | Decision | No benchmark comparison required because runtime traversal, GQL, components, shortest-path, compaction, GC, and durable read-path adoption are unchanged; record this as an artifact-write-path checkpoint |
+
+## 2026-06-07: Microphase 7 Layered Runtime
+
+| Field | Value |
+|---|---|
+| Scope | Pure layered neighbor runtime over base CSR, durable segments, and transaction-local deltas |
+| Code changes | Added production-visible `projection/layered.rs`, an owned neighbor iterator variant, durable segment-provider boundary, deterministic durable insert/delete/weight merging, node visibility and tenant-membership filtering, and weighted-neighbor lookup |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo fmt --check`; `cd graph && cargo test --features pg17 projection::layered`; `cd graph && cargo test --features pg17 projection::neighbors`; `cd graph && cargo test --features pg17 projection::test_contracts`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 --doc`; `python3 scripts/check_doc_references.py`; `git diff --check`; `cd graph && cargo test --features pg17` |
+| Result | Layered, neighbor, compile, doctest, docs, and whitespace gates passed. Feature contracts are intentionally red only for the future status/diagnostics contract: 5 passed, 1 failed. Full unit tests are expected-red with 580 passed, 1 failed future status/diagnostics contract, and 1 ignored scale test. Independent-review findings were fixed before promotion: tx node tombstones, tx weighted inserts, manifest checksum checks, and real-provider/proptest coverage. |
+| Decision | No benchmark comparison required in this checkpoint because Engine and SQL read paths still use the existing CSR/overlay selection; run read-latency and BFS comparisons in Microphase 8 when layered reads become query-visible |

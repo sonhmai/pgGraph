@@ -3,6 +3,11 @@
 pub(crate) mod ingest;
 #[allow(
     dead_code,
+    reason = "Microphase 7 adds the layered runtime before Microphase 8 routes Engine reads through it"
+)]
+pub(crate) mod layered;
+#[allow(
+    dead_code,
     reason = "durable projection manifest metadata is introduced before readers consume it"
 )]
 pub(crate) mod manifest;

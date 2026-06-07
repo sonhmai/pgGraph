@@ -257,3 +257,43 @@ Microphase 6 SQL ingestion checkpoint wired committed sync-log publication:
   exists. Runtime traversal, GQL, components, shortest-path, compaction, GC, and
   durable read-path adoption remain unchanged; benchmark baseline remains
   `pre_durable_projection`.
+
+Microphase 7 implemented the layered runtime checkpoint:
+
+- Added `graph/src/projection/layered.rs` with a pure layered read source that
+  merges base CSR neighbors, durable edge insert/delete/weight segments,
+  durable node visibility and tenant membership segments, and transaction-local
+  edge deltas in deterministic order.
+- Added a segment-provider boundary for real manifest-backed segment loading
+  while keeping public Engine read-path selection deferred to Microphase 8.
+- Extended the shared neighbor iterator with an owned variant for merged
+  layered results and turned the layered-neighbor contract green. The remaining
+  default-red contract now tracks status and diagnostics only.
+- Fixed independent-review findings before promotion: transaction-local node
+  tombstones now suppress layered sources and targets, transaction-local
+  weighted edge inserts preserve weights, manifest-backed segment loading
+  verifies manifest CRC32 checksums, and the gate includes real-provider plus
+  proptest coverage.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 projection::layered`: passed with
+    12 layered-runtime tests covering full-rebuild equivalence, transaction
+    delta precedence, inbound direction, duplicate suppression, weighted
+    durable edges, tenant filtering, node visibility, provider loading, and
+    durable delete/reinsert ordering.
+  - `cd graph && cargo test --features pg17 projection::neighbors`: passed
+    with 3 neighbor-source tests.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 5 passed, 1 failed for the future status/diagnostics
+    contract.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `git diff --check`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 580 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+- Regression report: the runtime merge implementation is production-visible but
+  not yet selected by SQL traversal, GQL, components, or shortest-path reads.
+  Benchmark baseline remains `pre_durable_projection`; read-path regression
+  benchmarking is deferred to Microphase 8 when Engine adoption changes query
+  behavior.

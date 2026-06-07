@@ -106,6 +106,11 @@ pub(crate) struct Neighbor {
 pub(crate) enum NeighborIter<'a> {
     Csr(CsrNeighborIter<'a>),
     Overlay(OverlayNeighborIter<'a>),
+    #[allow(
+        dead_code,
+        reason = "Layered runtime owns merged neighbor vectors until Engine read-path adoption uses it in production"
+    )]
+    Owned(std::vec::IntoIter<Neighbor>),
 }
 
 impl Iterator for NeighborIter<'_> {
@@ -115,6 +120,7 @@ impl Iterator for NeighborIter<'_> {
         match self {
             Self::Csr(iter) => iter.next(),
             Self::Overlay(iter) => iter.next(),
+            Self::Owned(iter) => iter.next(),
         }
     }
 }

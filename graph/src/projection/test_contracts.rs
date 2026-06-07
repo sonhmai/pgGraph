@@ -4,8 +4,11 @@
 //! projection modules must turn green. Implemented contracts pass; future
 //! contracts fail by default so phase progress is visible in the normal suite.
 
-use super::test_fixtures::{edge_store_from_tuples, NormalizedMutation, ProjectionArtifactDir};
+use super::test_fixtures::{
+    assert_full_csr_equivalence, edge_store_from_tuples, NormalizedMutation, ProjectionArtifactDir,
+};
 use crate::projection::ingest::{ProjectionIngester, ProjectionSyncRow};
+use crate::projection::layered::LayeredNeighbors;
 use crate::projection::manifest::{
     ProjectionManifest, ProjectionManifestStore, VALIDATION_STATUS_VALID,
 };
@@ -184,10 +187,26 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
 
 #[test]
 fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
+    let base = edge_store_from_tuples(4, &[(0, 1, 1), (0, 2, 1)]);
+    let mut insert = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 1)
+        .expect("insert segment");
+    insert.edge_inserts.push(SegmentEdge {
+        source: 0,
+        target: 3,
+        type_id: 1,
+    });
+    let mut delete = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 2)
+        .expect("delete segment");
+    delete.edge_deletes.push(SegmentEdge {
+        source: 0,
+        target: 1,
+        type_id: 1,
+    });
     let full_rebuild = edge_store_from_tuples(4, &[(0, 2, 1), (0, 3, 1)]);
-    let _expected = CsrNeighbors::new(&full_rebuild);
+    let expected = CsrNeighbors::new(&full_rebuild);
+    let layered = LayeredNeighbors::new(&base, vec![insert, delete]);
 
-    production_feature_absent("layered neighbors over durable segment sequences");
+    assert_full_csr_equivalence(4, &expected, &layered);
 }
 
 #[test]
