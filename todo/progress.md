@@ -753,7 +753,25 @@ Microphase 16 is in progress with release benchmark coverage started:
   metadata audit, SQLSTATE/ACL boundary, backup/restore, background lock,
   build lock, concurrency stress, synthetic release smoke, and GQL
   create/set/delete/merge lifecycle gates.
-- Remaining Microphase 16 blockers: crash/tx-delta-crash proof with disposable
-  `PGDATA`, playground/pgbench/Docker or explicit release-owner waiver for
-  those external gates, stable docs merge from `todo/` into `docs/`, and
-  `todo/` deletion before release.
+- Fixed `tests/heavy/crash_recovery.sh` so the post-restart explicit
+  `graph.apply_sync()` proof runs before default query-time auto catch-up can
+  consume the surviving sync row, and so the corrupt-artifact check mutates the
+  file magic instead of a byte in the all-active node bitmap.
+- Disposable PostgreSQL 17 crash proof passed on
+  `/private/tmp/pggraph-crash-pg17.hFQNpW/data` with an isolated socket/port:
+  - `PGHOST=/private/tmp/pggraph-crash-pg17.hFQNpW PGPORT=55437
+    PGDATA=/private/tmp/pggraph-crash-pg17.hFQNpW/data
+    POSTGRES_CTL=/opt/homebrew/opt/postgresql@17/bin/pg_ctl
+    POSTGRES_OPTS="-p 55437 -k /private/tmp/pggraph-crash-pg17.hFQNpW"
+    DBNAME=pggraph_release_m16_crash ./tests/heavy/crash_recovery.sh`:
+    passed.
+  - `PGHOST=/private/tmp/pggraph-crash-pg17.hFQNpW PGPORT=55437
+    PGDATA=/private/tmp/pggraph-crash-pg17.hFQNpW/data
+    POSTGRES_CTL=/opt/homebrew/opt/postgresql@17/bin/pg_ctl
+    POSTGRES_OPTS="-p 55437 -k /private/tmp/pggraph-crash-pg17.hFQNpW"
+    PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config
+    PG_VERSION_FEATURE=pg17 DBNAME=pggraph_release_m16_tx_delta_crash
+    ./tests/heavy/tx_delta_crash_recovery.sh`: passed.
+- Remaining Microphase 16 blockers: playground/pgbench/Docker or explicit
+  release-owner waiver for those external gates, stable docs merge from
+  `todo/` into `docs/`, and `todo/` deletion before release.

@@ -68,6 +68,11 @@ DECLARE
     traversed BIGINT;
     applied BIGINT;
 BEGIN
+    SELECT inserts_applied + updates_applied + deletes_applied INTO applied FROM graph.apply_sync();
+    IF applied <= 0 THEN
+        RAISE EXCEPTION 'committed trigger rows were not recoverable after restart';
+    END IF;
+
     SELECT count(*) INTO traversed FROM graph.traverse('public.graph_crash_nodes'::regclass, '1', 3);
     IF traversed = 0 THEN
         RAISE EXCEPTION 'post-restart traversal returned no rows';
@@ -78,11 +83,6 @@ BEGIN
         RAISE EXCEPTION 'auto-load after restart returned incomplete graph: nodes %, edges %', nodes, edges;
     END IF;
 
-    SELECT inserts_applied + updates_applied + deletes_applied INTO applied FROM graph.apply_sync();
-    IF applied <= 0 THEN
-        RAISE EXCEPTION 'committed trigger rows were not recoverable after restart';
-    END IF;
-
     PERFORM * FROM graph.maintenance();
 END
 $$;
@@ -90,7 +90,7 @@ SQL
 
 graph_file="$PGDATA/graph/main.pggraph"
 if [[ -f "$graph_file" ]]; then
-  printf '\377' | dd of="$graph_file" bs=1 seek=140 count=1 conv=notrunc status=none
+  printf 'X' | dd of="$graph_file" bs=1 seek=0 count=1 conv=notrunc status=none
   "$POSTGRES_CTL" -D "$PGDATA" -m immediate stop
   start_postgres
   wait_for_postgres
