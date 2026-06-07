@@ -10,6 +10,11 @@ pub(crate) mod chunk;
     reason = "Microphase 10 adds compaction helpers before scheduled maintenance wires compaction policy"
 )]
 pub(crate) mod compact;
+#[allow(
+    dead_code,
+    reason = "Microphase 12 adds generation-aware GC before scheduled maintenance wires it"
+)]
+pub(crate) mod gc;
 pub(crate) mod ingest;
 #[allow(
     dead_code,

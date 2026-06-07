@@ -467,3 +467,44 @@ Microphase 11 added active generation heartbeats:
 - Regression report: Microphase 11 changes metadata/status paths only. No BFS
   or read-path benchmark comparison is required; preserve the existing
   `graph.status()` ABI and verify SQL callers before promotion.
+
+Microphase 12 added generation-aware projection GC:
+
+- Added `graph/src/projection/gc.rs` with a metadata-only scanner for valid
+  projection manifests. It protects references from the newest retained valid
+  generations and any generation with an unexpired active-backend heartbeat.
+- GC candidates are limited to manifest-declared `obsolete_files`; missing
+  obsolete files are ignored so repeated cleanup is idempotent, and current
+  manifests are not rewritten during deletion.
+- Added `graph.projection_retention_generations` as the GUC-backed retention
+  floor and `graph.projection_gc()` as the admin-facing cleanup entry point.
+- Added GC tests for referenced-file refusal, active-generation refusal,
+  unmatched active-generation fail-closed behavior, obsolete unreferenced
+  segment deletion after retention, and crash shape that preserves the current
+  generation.
+- Independent-review fixes ensure active heartbeat generations are collected
+  before deletion and GC refuses to proceed if an active generation no longer
+  has a valid manifest to supply protected references. SQL-level tests now
+  cover the `graph.projection_gc()` behavior path, and the pgrx GUC contract
+  includes the new retention setting and range.
+- Tests run:
+  - `cd graph && cargo test --features pg17 projection::gc`: passed with 5 GC
+    unit/crash-shape tests.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_gc`:
+    passed with 5 GC unit tests plus SQL deletion/idempotence and signature
+    coverage.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 guc_contract_defaults_ranges_and_contexts_are_registered`:
+    passed with the retention GUC registered at default 2 and range 1-1000.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_generation_heartbeat`:
+    passed with heartbeat record, refresh, stale expiry, and active-generation
+    predicate coverage after GC began scanning active generation IDs.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 613 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+- Regression report: Microphase 12 changes projection artifact metadata
+  cleanup and a new admin SQL function. No traversal benchmark comparison is
+  required for the checkpoint because read-path code is unchanged; preserve the
+  expected-red future status/diagnostics contract before commit.

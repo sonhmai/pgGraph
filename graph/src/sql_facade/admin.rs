@@ -361,6 +361,56 @@ fn active_generation_count() -> i32 {
     })
 }
 
+/// Delete obsolete durable projection files that are no longer retained.
+#[pg_extern(schema = "graph")]
+#[allow(
+    clippy::type_complexity,
+    reason = "pgrx SQL ABI row shape is intentionally explicit"
+)]
+fn projection_gc() -> TableIterator<
+    'static,
+    (
+        name!(valid_generations_scanned, i32),
+        name!(retained_generations, Vec<i64>),
+        name!(active_generations, Vec<i64>),
+        name!(obsolete_candidates, i32),
+        name!(protected_candidates, i32),
+        name!(deleted_files, i32),
+        name!(deleted_bytes, i64),
+    ),
+> {
+    with_panic_boundary("projection_gc()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        crate::projection::manifest::expire_stale_generation_heartbeats()
+            .unwrap_or_else(|err| err.report());
+        let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
+        let root = crate::persistence::projection_manifest_root(&artifact);
+        let summary = crate::projection::gc::collect_projection_garbage(&root)
+            .unwrap_or_else(|err| err.report());
+        TableIterator::new(vec![(
+            saturating_i32(summary.valid_generations_scanned),
+            u64_vec_to_i64(summary.retained_generations),
+            u64_vec_to_i64(summary.active_generations),
+            saturating_i32(summary.obsolete_candidates),
+            saturating_i32(summary.protected_candidates),
+            saturating_i32(summary.deleted_files),
+            saturating_i64(summary.deleted_bytes),
+        )])
+    })
+}
+
+fn saturating_i32(value: usize) -> i32 {
+    value.min(i32::MAX as usize) as i32
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
+fn u64_vec_to_i64(values: Vec<u64>) -> Vec<i64> {
+    values.into_iter().map(saturating_i64).collect()
+}
+
 /// Return backend-local and projected instance memory estimates.
 ///
 /// `concurrent_backends` is an operator-supplied sizing assumption, not a live

@@ -149,6 +149,10 @@ pub static MAX_OVERLAY_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 /// Default: 50000. Range: 1-10000000.
 pub static COMPACTION_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(50_000);
 
+/// Minimum number of valid projection manifest generations retained by GC.
+/// Default: 2. Range: 1-1000.
+pub static PROJECTION_RETENTION_GENERATIONS: GucSetting<i32> = GucSetting::<i32>::new(2);
+
 /// Whether tenanted graphs require a query or session tenant.
 /// Default: true.
 pub static ENFORCE_TENANT_SCOPE: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -348,6 +352,11 @@ pub fn max_overlay_memory_bytes() -> usize {
 /// Return the delta/tombstone threshold at which compaction is recommended.
 pub fn compaction_threshold() -> usize {
     COMPACTION_THRESHOLD.get().max(1) as usize
+}
+
+/// Return the minimum number of valid projection generations retained by GC.
+pub fn projection_retention_generations() -> usize {
+    PROJECTION_RETENTION_GENERATIONS.get().max(1) as usize
 }
 
 /// Return the bounded sync replay batch size.
@@ -701,6 +710,17 @@ pub fn register_gucs() {
         &COMPACTION_THRESHOLD,
         1,
         10_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"graph.projection_retention_generations",
+        c"Minimum valid projection manifest generations retained by GC.",
+        c"GC also retains any generation with an unexpired active-backend heartbeat.",
+        &PROJECTION_RETENTION_GENERATIONS,
+        1,
+        1_000,
         GucContext::Userset,
         GucFlags::default(),
     );

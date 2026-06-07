@@ -11,7 +11,7 @@ All functions live in the `graph` schema.
 | Registration | `add_table`, `add_edge`, `add_filter_column`, `registered_tables`, `registered_edges`, `remove_table`, `remove_edge`, `estimate` |
 | Discovery | `auto_discover`, `auto_discover_tables` |
 | Build jobs | `build`, `build_status` |
-| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `vacuum`, `maintenance`, `maintenance_status` |
+| Sync and maintenance | `enable_sync`, `apply_sync`, `run_scheduled_maintenance`, `projection_gc`, `vacuum`, `maintenance`, `maintenance_status` |
 | GQL | `gql`, `gql_explain` |
 | Search | `search`, `search_nodes` |
 | Traversal | `traverse`, `traverse_search`, `node_ref`, `node_ref_string`, `format_path` |
@@ -87,6 +87,26 @@ RETURNS int
 
 Returns the number of unexpired backend heartbeats currently retaining durable
 projection generations for generation-aware cleanup.
+
+### `graph.projection_gc()`
+
+```sql
+graph.projection_gc()
+RETURNS TABLE (
+  valid_generations_scanned int,
+  retained_generations bigint[],
+  active_generations bigint[],
+  obsolete_candidates int,
+  protected_candidates int,
+  deleted_files int,
+  deleted_bytes bigint
+)
+```
+
+Admin-only. Deletes manifest-declared obsolete projection files only after they
+are no longer referenced by retained valid generations or unexpired active
+generation heartbeats. Missing obsolete files are ignored so repeated calls are
+idempotent. Retention uses `graph.projection_retention_generations`.
 
 ### `graph.memory_profile()`
 

@@ -278,6 +278,18 @@ FROM graph.status();
 
 Use `graph.active_generation_count()` to inspect unexpired backend heartbeats
 that retain durable projection generations for generation-aware cleanup.
+Run `graph.projection_gc()` to delete manifest-declared obsolete projection
+files after the configured generation retention floor and active-generation
+heartbeats no longer protect them:
+
+```sql
+SELECT *
+FROM graph.projection_gc();
+```
+
+`protected_candidates` counts obsolete files that were still referenced by a
+retained valid manifest or active backend generation. `deleted_files` and
+`deleted_bytes` report files actually removed during that call.
 
 ## Operational Patterns
 

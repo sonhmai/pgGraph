@@ -174,6 +174,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert_eq!(crate::config::MAX_TX_DELTA_EDGES.get(), 100_000);
     assert_eq!(crate::config::MAX_OVERLAY_MEMORY_MB.get(), 256);
     assert_eq!(crate::config::COMPACTION_THRESHOLD.get(), 50_000);
+    assert_eq!(crate::config::PROJECTION_RETENTION_GENERATIONS.get(), 2);
 
     let registered = Spi::get_one::<bool>(
         "WITH expected(name, context, min_val, max_val) AS (
@@ -189,7 +190,8 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                     ('graph.max_tx_delta_nodes', 'user', '0', '10000000'),
                     ('graph.max_tx_delta_edges', 'user', '0', '10000000'),
                     ('graph.max_overlay_memory_mb', 'user', '1', '32768'),
-                    ('graph.compaction_threshold', 'user', '1', '10000000')
+                    ('graph.compaction_threshold', 'user', '1', '10000000'),
+                    ('graph.projection_retention_generations', 'user', '1', '1000')
              ),
              matched AS (
                 SELECT e.name,
@@ -199,7 +201,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
                 FROM expected e
                 JOIN pg_settings s ON s.name = e.name
              )
-             SELECT count(*) = 12 AND bool_and(ok)
+             SELECT count(*) = 13 AND bool_and(ok)
              FROM matched",
     )
     .expect("pg_settings inspection failed")
@@ -213,6 +215,7 @@ fn guc_contract_defaults_ranges_and_contexts_are_registered() {
     assert!(sql_raises("SET graph.max_tx_delta_edges = -1"));
     assert!(sql_raises("SET graph.max_overlay_memory_mb = 0"));
     assert!(sql_raises("SET graph.compaction_threshold = 0"));
+    assert!(sql_raises("SET graph.projection_retention_generations = 0"));
 }
 
 #[pg_test]

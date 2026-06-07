@@ -473,11 +473,11 @@ fn manifest_corrupt(reason: impl Into<String>) -> GraphError {
     }
 }
 
-fn manifest_file_name(generation_id: u64) -> String {
+pub(crate) fn manifest_file_name(generation_id: u64) -> String {
     format!("{MANIFEST_FILE_PREFIX}{generation_id:020}{MANIFEST_FILE_SUFFIX}")
 }
 
-fn parse_manifest_file_name(file_name: &str) -> Option<u64> {
+pub(crate) fn parse_manifest_file_name(file_name: &str) -> Option<u64> {
     let generation = file_name
         .strip_prefix(MANIFEST_FILE_PREFIX)?
         .strip_suffix(MANIFEST_FILE_SUFFIX)?;
@@ -499,7 +499,7 @@ fn require_existing_reference(root: &Path, reference: &str, label: &str) -> Grap
     }
 }
 
-fn resolve_manifest_reference(root: &Path, reference: &str) -> GraphResult<PathBuf> {
+pub(crate) fn resolve_manifest_reference(root: &Path, reference: &str) -> GraphResult<PathBuf> {
     let path = Path::new(reference);
     if path.is_absolute() {
         return Err(manifest_corrupt(format!(
@@ -624,6 +624,39 @@ pub(crate) fn generation_has_active_heartbeat(generation_id: u64) -> GraphResult
 #[cfg(test)]
 pub(crate) fn generation_has_active_heartbeat(_generation_id: u64) -> GraphResult<bool> {
     Ok(false)
+}
+
+#[cfg(not(test))]
+pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
+    let rows = pgrx::Spi::connect(|client| {
+        let mut result = client.select(
+            "SELECT DISTINCT generation_id
+             FROM graph._projection_generations
+             WHERE backend_pid <> 0
+               AND database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND expires_at > now()
+             ORDER BY generation_id",
+            None,
+            &[],
+        )?;
+        let mut generations = Vec::new();
+        while let Some(row) = result.next() {
+            generations.push(row.get::<i64>(1)?.unwrap_or(0));
+        }
+        Ok::<_, pgrx::spi::SpiError>(generations)
+    })
+    .map_err(|err| GraphError::Internal(format!("projection heartbeat scan failed: {err}")))?;
+    rows.into_iter()
+        .map(|generation_id| {
+            u64::try_from(generation_id)
+                .map_err(|_| GraphError::Internal("projection generation id is negative".into()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn active_generation_ids() -> GraphResult<Vec<u64>> {
+    Ok(Vec::new())
 }
 
 #[cfg(not(test))]

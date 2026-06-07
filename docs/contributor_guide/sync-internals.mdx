@@ -128,8 +128,11 @@ The durable projection metadata table records published generations and the
 backend heartbeats that keep older generations alive while a backend is still
 using them. Cleanup logic can only remove derived projection files after they
 are no longer referenced by retained manifests or unexpired active-generation
-rows. The table is extension-owned operational state; PostgreSQL source tables
-remain the authoritative graph data.
+rows. `projection::gc` scans valid manifest metadata, treats the newest
+`graph.projection_retention_generations` generations and any generation with an
+active heartbeat as protected, and deletes only files that a manifest lists in
+`obsolete_files`. The table is extension-owned operational state; PostgreSQL
+source tables remain the authoritative graph data.
 
 Projection manifests are published with a temp-file write, file fsync,
 directory fsync, atomic rename, and final directory fsync. Loaders select the

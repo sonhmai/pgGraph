@@ -1506,6 +1506,145 @@ fn scheduled_maintenance_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn projection_gc_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(valid_generations_scanned integer, retained_generations bigint[], active_generations bigint[], obsolete_candidates integer, protected_candidates integer, deleted_files integer, deleted_bytes bigint)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'projection_gc'",
+        )
+        .expect("projection_gc signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
+fn projection_gc_sql_deletes_obsolete_files_after_retention() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    reset_and_create_fixtures();
+    Spi::run("DELETE FROM graph._projection_generations WHERE backend_pid <> 0")
+        .expect("clear heartbeat fixture failed");
+    Spi::run("SET graph.projection_retention_generations = 1")
+        .expect("set projection retention failed");
+
+    let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
+    let root = crate::persistence::projection_manifest_root(&graph_path);
+    let store = crate::projection::manifest::ProjectionManifestStore::new(&root);
+    let base_path = root.join("projection-gc-sql-base.pggraph");
+    let old_segment = root.join("projection-gc-sql-old.pggraph-delta");
+    let current_segment = root.join("projection-gc-sql-current.pggraph-delta");
+    let old_manifest_path = store.manifest_path(9_100_001);
+    let current_manifest_path = store.manifest_path(9_100_002);
+    for path in [
+        &base_path,
+        &old_segment,
+        &current_segment,
+        &old_manifest_path,
+        &current_manifest_path,
+    ] {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::write(&base_path, b"base").expect("base artifact writes");
+    std::fs::write(&old_segment, b"old").expect("old segment writes");
+    std::fs::write(&current_segment, b"current").expect("current segment writes");
+
+    let mut old = crate::projection::manifest::ProjectionManifest::base_only(
+        9_100_001,
+        relative_projection_test_path(&root, &base_path),
+        "crc32:base",
+        1,
+        1,
+        1,
+    );
+    old.segments
+        .push(crate::projection::manifest::ManifestSegmentRef {
+            path: relative_projection_test_path(&root, &old_segment),
+            checksum: "crc32:old".to_string(),
+            level: 0,
+            source_start: 0,
+            source_end: 1,
+            sync_watermark: 1,
+        });
+    store.publish(&old).expect("old manifest publishes");
+
+    let mut current = crate::projection::manifest::ProjectionManifest::base_only(
+        9_100_002,
+        relative_projection_test_path(&root, &base_path),
+        "crc32:base",
+        1,
+        2,
+        2,
+    );
+    current.previous_generation_id = Some(old.generation_id);
+    current
+        .segments
+        .push(crate::projection::manifest::ManifestSegmentRef {
+            path: relative_projection_test_path(&root, &current_segment),
+            checksum: "crc32:current".to_string(),
+            level: 0,
+            source_start: 0,
+            source_end: 1,
+            sync_watermark: 2,
+        });
+    current
+        .obsolete_files
+        .push(crate::projection::manifest::ManifestFileRef {
+            path: relative_projection_test_path(&root, &old_segment),
+            bytes: 3,
+        });
+    store.publish(&current).expect("current manifest publishes");
+
+    let deleted = Spi::get_one::<bool>(
+        "SELECT valid_generations_scanned = 2
+                AND retained_generations = ARRAY[9100002]::bigint[]
+                AND active_generations = ARRAY[]::bigint[]
+                AND obsolete_candidates = 1
+                AND protected_candidates = 0
+                AND deleted_files = 1
+                AND deleted_bytes = 3
+         FROM graph.projection_gc()",
+    )
+    .expect("projection_gc SQL call failed")
+    .unwrap_or(false);
+    let repeated_deleted = Spi::get_one::<i32>("SELECT deleted_files FROM graph.projection_gc()")
+        .expect("repeat projection_gc SQL call failed")
+        .unwrap_or(-1);
+
+    assert!(deleted);
+    assert!(!old_segment.exists());
+    assert!(current_segment.exists());
+    assert_eq!(repeated_deleted, 0);
+
+    for path in [
+        &base_path,
+        &current_segment,
+        &old_manifest_path,
+        &current_manifest_path,
+    ] {
+        let _ = std::fs::remove_file(path);
+    }
+    Spi::run("RESET graph.projection_retention_generations")
+        .expect("reset projection retention failed");
+}
+
+fn relative_projection_test_path(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .expect("path is under projection root")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[pg_test]
 fn ingest_projection_exposes_operator_contract_field_names() {
     reset_and_create_fixtures();
     let signature_matches = Spi::get_one::<bool>(
