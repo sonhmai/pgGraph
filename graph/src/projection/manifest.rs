@@ -367,6 +367,12 @@ pub(crate) struct ManifestChunkRef {
     pub(crate) source_start: u32,
     /// Exclusive source-node range end covered by the chunk.
     pub(crate) source_end: u32,
+    /// Dirty source-node count that caused this chunk rewrite.
+    #[serde(default)]
+    pub(crate) dirty_source_count: u32,
+    /// Dirty edge-row count that caused this chunk rewrite.
+    #[serde(default)]
+    pub(crate) dirty_edge_count: u32,
 }
 
 impl ManifestChunkRef {
@@ -377,9 +383,9 @@ impl ManifestChunkRef {
         if self.checksum.trim().is_empty() {
             return Err(manifest_corrupt("base chunk checksum is required"));
         }
-        if self.source_start > self.source_end {
+        if self.source_start >= self.source_end {
             return Err(manifest_corrupt(
-                "base chunk source_start must not exceed source_end",
+                "base chunk source_start must be less than source_end",
             ));
         }
         Ok(())

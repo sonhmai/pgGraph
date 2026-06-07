@@ -10,7 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::edge_store::EdgeStore;
-use crate::projection::manifest::{ManifestSegmentRef, ProjectionManifest};
+use crate::projection::chunk::SourceRange;
+use crate::projection::manifest::{ManifestChunkRef, ManifestSegmentRef, ProjectionManifest};
 use crate::projection::neighbors::{
     EdgeOverlay, Neighbor, NeighborIter, NeighborSource, OverlayDeletes, OverlayInserts,
     WeightedNeighbor, WeightedNeighborSource,
@@ -54,6 +55,15 @@ pub(crate) trait SegmentProvider {
     ///
     /// Returns segment loading or validation errors from the backing store.
     fn load_segments(&self) -> GraphResult<Vec<DeltaSegment>>;
+
+    /// Load decoded base chunks that replace source-node ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns chunk loading or validation errors from the backing store.
+    fn load_base_chunks(&self) -> GraphResult<Vec<DeltaSegment>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Segment provider backed by a manifest and projection artifact directory.
@@ -85,6 +95,14 @@ impl SegmentProvider for ManifestSegmentProvider<'_> {
             .map(|segment| read_manifest_segment(self.root, segment))
             .collect()
     }
+
+    fn load_base_chunks(&self) -> GraphResult<Vec<DeltaSegment>> {
+        self.manifest
+            .base_chunks
+            .iter()
+            .map(|chunk| read_manifest_chunk(self.root, chunk))
+            .collect()
+    }
 }
 
 #[allow(
@@ -107,10 +125,42 @@ fn read_manifest_segment(root: &Path, segment: &ManifestSegmentRef) -> GraphResu
     DeltaSegment::from_bytes(&bytes)
 }
 
+fn read_manifest_chunk(root: &Path, chunk: &ManifestChunkRef) -> GraphResult<DeltaSegment> {
+    let path = root.join(PathBuf::from(&chunk.path));
+    let bytes = fs::read(&path)
+        .map_err(|err| GraphError::Internal(format!("base chunk read failed: {err}")))?;
+    let checksum = format!("crc32:{:08x}", crc32fast::hash(&bytes));
+    if checksum != chunk.checksum {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "projection base chunk checksum mismatch for {}: expected {}, got {}",
+                chunk.path, chunk.checksum, checksum
+            ),
+        });
+    }
+    let segment = DeltaSegment::from_bytes(&bytes)?;
+    if segment.header.source_start != chunk.source_start
+        || segment.header.source_end != chunk.source_end
+        || segment.header.kind != SegmentKind::Edge
+        || segment.header.direction != TraversalDirection::Out
+    {
+        return Err(GraphError::CorruptFile {
+            reason: format!(
+                "projection base chunk {} metadata does not match manifest range {}..{}",
+                chunk.path, chunk.source_start, chunk.source_end
+            ),
+        });
+    }
+    Ok(segment)
+}
+
 /// Immutable layered neighbor source for one manifest snapshot.
 pub(crate) struct LayeredNeighbors<'a> {
     base: &'a EdgeStore,
     base_in: Option<&'a EdgeStore>,
+    base_chunk_ranges: Vec<SourceRange>,
+    base_chunk_out: HashMap<u32, DurableEdges>,
+    base_chunk_in: HashMap<u32, DurableEdges>,
     durable_out: HashMap<u32, DurableEdges>,
     durable_in: HashMap<u32, DurableEdges>,
     committed_out_inserts: OverlayInserts,
@@ -146,6 +196,36 @@ impl<'a> LayeredNeighbors<'a> {
         committed_out: Option<EdgeOverlay>,
         committed_in: Option<EdgeOverlay>,
     ) -> Self {
+        Self::new_with_base_chunks(
+            base,
+            base_in,
+            Vec::new(),
+            segments,
+            tenant_filter,
+            committed_out,
+            committed_in,
+        )
+    }
+
+    fn new_with_base_chunks(
+        base: &'a EdgeStore,
+        base_in: Option<&'a EdgeStore>,
+        base_chunks: Vec<DeltaSegment>,
+        segments: Vec<DeltaSegment>,
+        tenant_filter: Option<u64>,
+        committed_out: Option<EdgeOverlay>,
+        committed_in: Option<EdgeOverlay>,
+    ) -> Self {
+        let base_chunk_ranges = base_chunks
+            .iter()
+            .map(|chunk| SourceRange {
+                start: chunk.header.source_start,
+                end: chunk.header.source_end,
+            })
+            .collect::<Vec<_>>();
+        let mut base_chunk_builder = LayeredBuilder::new(base);
+        base_chunk_builder.apply_segments(base_chunks);
+        let base_chunk_output = base_chunk_builder.finish_replacement();
         let mut builder = LayeredBuilder::new(base);
         builder.apply_segments(segments);
         let output = builder.finish();
@@ -154,6 +234,9 @@ impl<'a> LayeredNeighbors<'a> {
         Self {
             base,
             base_in,
+            base_chunk_ranges,
+            base_chunk_out: base_chunk_output.durable_out,
+            base_chunk_in: base_chunk_output.durable_in,
             durable_out: output.durable_out,
             durable_in: output.durable_in,
             committed_out_inserts,
@@ -175,7 +258,15 @@ impl<'a> LayeredNeighbors<'a> {
         base: &'a EdgeStore,
         provider: &impl SegmentProvider,
     ) -> GraphResult<Self> {
-        Ok(Self::new(base, provider.load_segments()?))
+        Ok(Self::new_with_base_chunks(
+            base,
+            None,
+            provider.load_base_chunks()?,
+            provider.load_segments()?,
+            None,
+            None,
+            None,
+        ))
     }
 
     /// Build a layered source from a provider plus Engine-owned read overlays.
@@ -190,9 +281,10 @@ impl<'a> LayeredNeighbors<'a> {
         committed_out: EdgeOverlay,
         committed_in: EdgeOverlay,
     ) -> GraphResult<Self> {
-        Ok(Self::new_with_options(
+        Ok(Self::new_with_base_chunks(
             base,
             Some(base_in),
+            provider.load_base_chunks()?,
             provider.load_segments()?,
             None,
             Some(committed_out),
@@ -261,23 +353,11 @@ impl<'a> LayeredNeighbors<'a> {
     ) {
         match direction {
             TraversalDirection::Out => {
-                let (targets, type_ids) = self.base.neighbors(node_idx);
-                let weights = base_weight_slice(self.base, node_idx);
-                for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
-                    merged.insert(
-                        (target, type_id),
-                        LayeredEdge {
-                            target,
-                            type_id,
-                            weight: weights.and_then(|weights| weights.get(idx).copied()),
-                        },
-                    );
-                }
-            }
-            TraversalDirection::In => {
-                if let Some(base_in) = self.base_in {
-                    let (targets, type_ids) = base_in.neighbors(node_idx);
-                    let weights = base_weight_slice(base_in, node_idx);
+                if self.base_chunk_covers(node_idx) {
+                    merge_durable_map(&self.base_chunk_out, node_idx, merged);
+                } else {
+                    let (targets, type_ids) = self.base.neighbors(node_idx);
+                    let weights = base_weight_slice(self.base, node_idx);
                     for (idx, (&target, &type_id)) in
                         targets.iter().zip(type_ids.iter()).enumerate()
                     {
@@ -290,9 +370,31 @@ impl<'a> LayeredNeighbors<'a> {
                             },
                         );
                     }
+                }
+            }
+            TraversalDirection::In => {
+                if let Some(base_in) = self.base_in {
+                    let (targets, type_ids) = base_in.neighbors(node_idx);
+                    let weights = base_weight_slice(base_in, node_idx);
+                    for (idx, (&target, &type_id)) in
+                        targets.iter().zip(type_ids.iter()).enumerate()
+                    {
+                        if self.base_chunk_covers(target) {
+                            continue;
+                        }
+                        merged.insert(
+                            (target, type_id),
+                            LayeredEdge {
+                                target,
+                                type_id,
+                                weight: weights.and_then(|weights| weights.get(idx).copied()),
+                            },
+                        );
+                    }
                 } else {
                     self.merge_base_in_by_scan(node_idx, merged);
                 }
+                merge_durable_map(&self.base_chunk_in, node_idx, merged);
             }
             TraversalDirection::Any => {
                 self.merge_base(TraversalDirection::Out, node_idx, merged);
@@ -303,6 +405,9 @@ impl<'a> LayeredNeighbors<'a> {
 
     fn merge_base_in_by_scan(&self, node_idx: u32, merged: &mut BTreeMap<(u32, u8), LayeredEdge>) {
         for source in 0..self.base.node_count() {
+            if self.base_chunk_covers(source) {
+                continue;
+            }
             let (targets, type_ids) = self.base.neighbors(source);
             let weights = base_weight_slice(self.base, source);
             for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
@@ -318,6 +423,13 @@ impl<'a> LayeredNeighbors<'a> {
                 }
             }
         }
+        merge_durable_map(&self.base_chunk_in, node_idx, merged);
+    }
+
+    fn base_chunk_covers(&self, source: u32) -> bool {
+        self.base_chunk_ranges
+            .iter()
+            .any(|range| range.contains(source))
     }
 
     fn merge_durable(
@@ -486,6 +598,10 @@ impl NeighborSource for DirectionalLayeredNeighbors<'_, '_> {
 impl WeightedNeighborSource for LayeredNeighbors<'_> {
     fn has_weighted_edges(&self) -> bool {
         self.base.has_weights()
+            || self
+                .base_chunk_out
+                .values()
+                .any(|edges| edges.inserts.iter().any(|edge| edge.weight.is_some()))
             || self
                 .durable_out
                 .values()
@@ -750,6 +866,17 @@ impl<'a> LayeredBuilder<'a> {
     }
 
     fn finish(self) -> LayeredBuildOutput {
+        self.finish_with_base_duplicate_filter(true)
+    }
+
+    fn finish_replacement(self) -> LayeredBuildOutput {
+        self.finish_with_base_duplicate_filter(false)
+    }
+
+    fn finish_with_base_duplicate_filter(
+        self,
+        suppress_base_duplicates: bool,
+    ) -> LayeredBuildOutput {
         let Self {
             base,
             out_edges,
@@ -758,8 +885,8 @@ impl<'a> LayeredBuilder<'a> {
             tenant_memberships,
         } = self;
         LayeredBuildOutput {
-            durable_out: finish_direction(base, out_edges),
-            durable_in: finish_direction(base, in_edges),
+            durable_out: finish_direction(base, out_edges, suppress_base_duplicates),
+            durable_in: finish_direction(base, in_edges, suppress_base_duplicates),
             active_nodes,
             tenant_memberships,
         }
@@ -769,12 +896,13 @@ impl<'a> LayeredBuilder<'a> {
 fn finish_direction(
     base: &EdgeStore,
     edges: BTreeMap<EdgeKey, DurableEdgeState>,
+    suppress_base_duplicates: bool,
 ) -> HashMap<u32, DurableEdges> {
     let mut out = HashMap::<u32, DurableEdges>::new();
     for (key, state) in edges {
         match state {
             DurableEdgeState::Present(weight) => {
-                if base_edge_exists(base, key) && weight.is_none() {
+                if suppress_base_duplicates && base_edge_exists(base, key) && weight.is_none() {
                     continue;
                 }
                 out.entry(key.source)

@@ -354,3 +354,46 @@ Microphase 8 routed public read paths through segment-backed layered snapshots:
   weighted-path, and component read selection. Criterion comparison against
   `pre_durable_projection` was run for this checkpoint and recorded in
   `todo/regression_report.md`.
+
+Microphase 9 added base chunk rewrite and targeted repair:
+
+- Added `graph/src/projection/chunk.rs` as the testable base chunk publication
+  boundary. It builds full replacement edge chunks for dirty source-node
+  ranges, publishes the next manifest generation, records replaced chunk files
+  as obsolete, and repairs corrupted chunk files by publishing a fresh
+  replacement generation.
+- Extended manifest chunk references with dirty source/edge pressure counters
+  and tightened chunk validation to require non-empty source ranges.
+- Extended manifest-backed `LayeredNeighbors` loading so active base chunks
+  replace covered source-node ranges while preserving old-generation chunk
+  readability, inbound equivalence, durable segment overlays, committed
+  `Engine.edge_buffer` overlays, and transaction-local deltas.
+- Partial dirty rewrites now expand across overlapping existing chunks so a
+  later targeted rewrite does not discard still-valid portions of a previous
+  base replacement.
+- Independent-review fixes ensure base chunks preserve unchanged unweighted
+  edges inside rewritten ranges and reject non-outbound chunk files before they
+  can suppress covered base rows.
+- Tests run:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo test --features pg17 base_chunk_`: passed with 7 base
+    chunk manifest, rewrite, old-generation, overlap, malformed-chunk, and
+    repair tests.
+  - `cd graph && cargo test --features pg17 projection::manifest`: passed
+    with 13 manifest tests.
+  - `cd graph && cargo test --features pg17 projection::layered`: passed
+    with 12 layered-runtime tests.
+  - `cd graph && cargo test --features pg17 projection::test_contracts`:
+    expected red; 5 passed, 1 failed for the future status/diagnostics
+    contract.
+  - `cd graph && cargo test --features pg17`: expected red; 599 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `git diff --check`: passed.
+- Regression report: Microphase 9 adds an inactive write/repair boundary plus
+  manifest-backed read semantics for chunked generations. It does not change
+  default CSR/base-only reads or add a SQL scheduling path yet, so no new
+  benchmark comparison is required until compaction/GC or SQL repair scheduling
+  makes chunk rewrite operationally active.

@@ -172,16 +172,26 @@ keeps its behavior.
 
 The layered projection runtime merges base CSR neighbors, durable edge
 insert/delete/weight segments, durable node visibility and tenant membership
-deltas, committed engine edge-buffer overlays, and transaction-local edge
-deltas in a fixed order. Base CSR is read first, durable tombstones suppress
-older base or segment edges, later durable inserts can reactivate an edge,
-duplicate edges are suppressed, committed `engine.edge_buffer` changes remain
-visible while a manifest-backed snapshot is active, and transaction-local
-deltas are applied last for read-your-own-writes semantics.
+deltas, manifest-referenced base chunk replacements, committed engine
+edge-buffer overlays, and transaction-local edge deltas in a fixed order. Base
+CSR is read first, base chunks replace their covered source-node ranges,
+durable tombstones suppress older base or segment edges, later durable inserts
+can reactivate an edge, duplicate edges are suppressed, committed
+`engine.edge_buffer` changes remain visible while a manifest-backed snapshot is
+active, and transaction-local deltas are applied last for read-your-own-writes
+semantics.
 When a loaded projection manifest references durable segments, traversal,
 unweighted shortest path, weighted shortest path, connected components, and GQL
 relationship expansion select this layered runtime. `csr_readonly` mode and
 base-only manifests keep the clean CSR fast path and avoid segment lookup.
+
+Dirty base CSR ranges are repaired by publishing immutable base chunk files and
+referencing them from the next projection manifest generation. A base chunk is a
+full replacement for an inclusive/exclusive source-node range and carries its
+own checksum plus dirty source/edge counters. Publishing a replacement manifest
+does not remove older chunk files, so older generations remain readable until
+generation-aware cleanup makes them obsolete. If a chunk checksum fails,
+targeted repair rewrites the corrupted range into a new generation.
 
 When a `.pggraph` artifact is loaded, the loader scans the artifact directory
 for the latest `projection-generation-*.json` manifest. In the base-only phase,

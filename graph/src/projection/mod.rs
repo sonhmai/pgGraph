@@ -1,5 +1,10 @@
 //! Projection read helpers shared by graph algorithms.
 
+#[allow(
+    dead_code,
+    reason = "Microphase 9 adds base chunk rewrite helpers before compaction and SQL repair scheduling consume them"
+)]
+pub(crate) mod chunk;
 pub(crate) mod ingest;
 #[allow(
     dead_code,

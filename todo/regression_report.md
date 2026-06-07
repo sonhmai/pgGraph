@@ -124,3 +124,14 @@ decision.
 | Command | `cd graph && cargo bench --features pg17 --bench bfs_bench -- --baseline pre_durable_projection`; targeted follow-ups: `d1_supernode/500k`, `d1_supernode/2M_panama`, and `d3_leaf/2M_panama` |
 | Result | Full comparison completed. Existing mutable-overlay guardrail improved: `no_overlay_d3` -4.94%, `sparse_overlay_d3` -6.08%, `dense_overlay_d3` -2.81%. Filter traversal improved: sparse -6.23%, dense -2.67%. Several deeper raw BFS cases improved. A first `d1_supernode/500k` regression was reduced to no-change after restoring the concrete BFS hot path (`+0.95%`, p = 0.23). Residual targeted raw-BFS regressions remain on the 2M Panama fixture: `d1_supernode/2M_panama` +4.07% and `d3_leaf/2M_panama` +6.33%. |
 | Decision | Promote the Microphase 8 checkpoint with the residual 2M raw-BFS regressions recorded for follow-up because the directly relevant existing overlay guardrail improved and segment-backed layered SQL reads now pass pgrx correctness gates. Segment files are still decoded per read and should be cached or otherwise benchmarked before release. Do not treat this as a release-ready performance signoff; Microphase 12 must add durable segment-specific BFS, weighted, and GQL benchmarks before production replacement. |
+
+## 2026-06-07: Microphase 9 Base Chunk Rewrite
+
+| Field | Value |
+|---|---|
+| Scope | Base chunk manifest metadata, checked chunk rewrite publication, targeted corrupt-chunk repair, and layered base-range replacement semantics |
+| Code changes | Added `projection::chunk` for source-range chunk publication and repair; added dirty source/edge counters to `ManifestChunkRef`; manifest-backed layered reads now load base chunks, replace covered outgoing base ranges, suppress covered inbound base edges, and merge chunk inbound edges |
+| Baseline | `todo/measurements.md`, Criterion baseline `pre_durable_projection` |
+| Command | `cd graph && cargo fmt --check`; `cd graph && cargo check --features pg17`; `cd graph && cargo test --features pg17 base_chunk_`; `cd graph && cargo test --features pg17 projection::manifest`; `cd graph && cargo test --features pg17 projection::layered`; `cd graph && cargo test --features pg17 projection::test_contracts` |
+| Result | Base chunk manifest, rewrite equivalence, old-generation readability, partial-overlap expansion, unchanged-edge preservation, malformed inbound chunk rejection, and corruption repair tests passed. Manifest and layered tests passed. Feature contracts remain intentionally red only for the future status/diagnostics contract: 5 passed, 1 failed. |
+| Decision | No new benchmark comparison required for this checkpoint because chunk rewrite is a publication/repair boundary and only affects manifests that already opt into chunked generations. Default CSR/base-only reads and existing SQL read-path selection are unchanged; benchmark chunked generation reads when compaction or repair scheduling makes chunks operationally active. |
