@@ -20,6 +20,10 @@ fn reset() {
         if checkpoint_path.exists() {
             std::fs::remove_file(&checkpoint_path).ok();
         }
+        let projection_mode_path = persistence::projection_mode_path(&path);
+        if projection_mode_path.exists() {
+            std::fs::remove_file(&projection_mode_path).ok();
+        }
         let projection_root = persistence::projection_manifest_root(&path);
         if let Ok(entries) = std::fs::read_dir(&projection_root) {
             for entry in entries.flatten() {
@@ -249,7 +253,7 @@ pub(super) fn ensure_current_graph_for_query(
             }
 
             let high_watermark = max_sync_log_id()?;
-            apply_sync_until(Some(high_watermark), config::sync_batch_size())?;
+            apply_sync_to_high_watermark(high_watermark)?;
             let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
             ENGINE.with(|e| {
                 let mut eng = e.borrow_mut();

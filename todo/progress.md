@@ -605,3 +605,79 @@ Microphase 14 added durable projection status and diagnostics:
   execution; no benchmark comparison is required because `sync_health()` now
   uses metadata-only projection status; revisit if full
   `graph.projection_status()` polling becomes a measured hot path.
+
+Microphase 15 is in progress with correctness blockers fixed and regression
+signoff resolved by same-environment benchmark follow-up:
+
+- Routed `graph.apply_sync()` for persisted `mutable_overlay` graphs through
+  durable projection ingestion instead of committed backend-local
+  `Engine.edge_buffer` overlays. A fresh backend now loads the persisted graph
+  artifact before applying sync, uses the persisted projection-mode sidecar
+  rather than the session default GUC as build-mode truth, publishes committed
+  edge mutations into L0 durable segments, reloads the latest manifest, and
+  avoids downgrading segment-backed reloads to `csr_readonly`.
+- Routed topology read-time `graph.query_freshness = 'apply_pending_sync'`
+  catch-up through the same durable-aware high-watermark helper for persisted
+  `mutable_overlay` graphs while keeping the transaction-local dirty skip for
+  rollback safety.
+- Bounded durable ingestion by the captured `_sync_log` high-water mark so
+  `graph.apply_sync()` does not publish rows committed after the call started.
+- Added a pgrx contract test named
+  `cross_backend_committed_write_visible_without_full_rebuild` and a true
+  cross-backend heavy script at
+  `graph/tests/heavy/cross_backend_durable_projection.sh`.
+- Kept transaction-local `projection::tx_delta` behavior separate from
+  committed durable projection segments; the tx-delta lifecycle heavy gate
+  still passes.
+- Updated user and contributor docs for the new committed-edge durable segment
+  behavior and the remaining legacy/backend-local edge-buffer semantics.
+- Tests run so far:
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 cross_backend_committed_write_visible_without_full_rebuild`:
+    passed after fixing segment-backed reload mode preservation and persisted
+    projection-mode loading.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 topology_auto_sync_uses_durable_segments_for_mutable_overlay`:
+    passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 csr_readonly_apply_sync_ignores_later_mutable_default_guc`:
+    passed.
+  - `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_cross_backend_durable ./tests/heavy/cross_backend_durable_projection.sh`:
+    passed outside the sandbox after `cargo pgrx install` required PostgreSQL
+    extension-directory write access.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 traverse_auto_sync_opt_in_applies_pending_edge_insert`:
+    passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_create_node`:
+    passed with 6 tests.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 gql_delete_edge`:
+    passed with 6 tests.
+  - `PG_VERSION_FEATURE=pg17 DBNAME=pggraph_tx_delta ./tests/heavy/tx_delta_lifecycle.sh`:
+    passed.
+  - `cd graph && cargo test --features pg17 csr_readonly`: passed with 2
+    csr-readonly guard tests.
+  - `cd graph && cargo test --features pg17`: passed with 623 tests and 1
+    ignored scale test.
+  - `cd graph && cargo bench --features pg17 --bench bfs_bench -- --baseline pre_durable_projection`:
+    red. Multiple raw BFS, construction, overlay, and filter cases regressed
+    against the saved baseline.
+  - `cd graph && cargo bench --features pg17 --bench bfs_bench -- bfs_overlay_paths --baseline pre_durable_projection`:
+    red on `no_overlay_d3`, `sparse_overlay_d3`, and `dense_overlay_d3`.
+  - Same-environment temporary-HEAD overlay comparison using
+    `CARGO_TARGET_DIR=/private/tmp/pggraph-micro15-bench-target`: current
+    `bfs_overlay_paths/no_overlay_d3` was within noise threshold at +1.19%,
+    `sparse_overlay_d3` was within noise threshold at +0.82%, and
+    `dense_overlay_d3` improved by -18.71% against the fresh HEAD baseline.
+  - Same-environment temporary-HEAD representative raw BFS comparison:
+    `bfs_traverse/d1_supernode/500k` showed no change at +0.81% (p = 0.58).
+  - `scripts/check_docs_drift.sh`: passed.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `git diff --check`: passed.
+- Independent review found three blockers: durable ingest ignored the captured
+  high-water mark, query-time auto catch-up still used `Engine.edge_buffer`, and
+  fresh-backend durable routing used the session default projection-mode GUC
+  instead of persisted build-mode state. All three are fixed in the current
+  working tree and covered by the tests above.
+- Regression report: the old `pre_durable_projection` Criterion comparison was
+  red, but a same-environment temporary-HEAD comparison showed no Microphase 15
+  regression on the directly relevant overlay group or a representative raw
+  BFS red case. Treat the old baseline as stale/environment-sensitive evidence
+  and refresh the long-lived baseline in Microphase 16 production verification.

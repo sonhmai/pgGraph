@@ -175,14 +175,13 @@ keeps its behavior.
 
 The layered projection runtime merges base CSR neighbors, durable edge
 insert/delete/weight segments, durable node visibility and tenant membership
-deltas, manifest-referenced base chunk replacements, committed engine
-edge-buffer overlays, and transaction-local edge deltas in a fixed order. Base
-CSR is read first, base chunks replace their covered source-node ranges,
-durable tombstones suppress older base or segment edges, later durable inserts
-can reactivate an edge, duplicate edges are suppressed, committed
-`engine.edge_buffer` changes remain visible while a manifest-backed snapshot is
-active, and transaction-local deltas are applied last for read-your-own-writes
-semantics.
+deltas, manifest-referenced base chunk replacements, any remaining
+backend-local compatibility edge overlays, and transaction-local edge deltas in
+a fixed order. Base CSR is read first, base chunks replace their covered
+source-node ranges, durable tombstones suppress older base or segment edges,
+later durable inserts can reactivate an edge, duplicate edges are suppressed,
+legacy `engine.edge_buffer` changes remain visible when present, and
+transaction-local deltas are applied last for read-your-own-writes semantics.
 When a loaded projection manifest references durable segments, traversal,
 unweighted shortest path, weighted shortest path, connected components, and GQL
 relationship expansion select this layered runtime. `csr_readonly` mode and
@@ -217,9 +216,10 @@ for the latest `projection-generation-*.json` manifest. In the base-only phase,
 the engine installs only manifests that reference the loaded `.pggraph` file,
 match the current artifact format version and CRC32 checksum, and have no
 segment or chunk references. The active read path remains CSR for those
-manifests. Segment-backed manifests are installed with mutable-overlay read
-mode so public read APIs consume durable L0/L1/L2 segment deltas after reload.
-The engine keeps base manifest generation and sync watermark metadata
+manifests unless the persisted build-mode sidecar says the graph was built as
+`mutable_overlay`. Segment-backed manifests are installed with mutable-overlay
+read mode so public read APIs consume durable L0/L1/L2 segment deltas after
+reload. The engine keeps base manifest generation and sync watermark metadata
 backend-locally, and `graph.active_generation_count()` exposes the active
 generation heartbeat count so operators can see whether concurrent backends are
 retaining projection generations.
@@ -246,19 +246,24 @@ to the indexed `resolution_delta`; deleted nodes are tombstoned through
 
 ## Edge Changes
 
-The base `EdgeStore` remains immutable. Committed sync edge mutations are
-appended to `engine.edge_buffer` as `EdgeMutation` values. Transaction-local
-edge deltas live in `TxGraphDelta`. Overlay-aware graph algorithms reduce both
-sources into insert and delete overlays for the selected direction, with
-transaction-local deltas applied last for read-your-own-writes semantics.
-Traversal, unweighted shortest path, and connected components consume the
-shared neighbor-source abstraction. Read-only GQL relationship expansion uses
-the same overlay-aware neighbor path. Weighted shortest path rejects a dirty
-edge overlay until vacuum or maintenance merges committed weights into the base
-CSR.
+The base `EdgeStore` remains immutable. For persisted `mutable_overlay` graphs,
+`graph.apply_sync()` publishes committed sync edge mutations into durable L0
+projection segments, reloads the latest manifest, and records the applied
+watermark. A fresh backend can load the persisted graph artifact, ingest the
+committed sync rows, and observe the new durable edge segment without a full
+rebuild. `csr_readonly` graphs and non-persisted graphs keep the clean CSR path
+unless an explicit legacy overlay path is needed.
 
-When the buffer reaches `graph.edge_buffer_size`, the engine enters read-only
-mode with `read_only_reason = 'edge_buffer_full'` and returns
+Transaction-local edge deltas live in `TxGraphDelta`. Overlay-aware graph
+algorithms reduce durable segments, any remaining backend-local compatibility
+overlays, and transaction-local deltas into insert and delete overlays for the
+selected direction, with transaction-local deltas applied last for
+read-your-own-writes semantics. Traversal, unweighted shortest path, weighted
+shortest path, connected components, and read-only GQL relationship expansion
+consume the shared neighbor-source abstraction.
+
+When the legacy edge buffer reaches `graph.edge_buffer_size`, the engine enters
+read-only mode with `read_only_reason = 'edge_buffer_full'` and returns
 `EdgeBufferFull`. Later sync mutations against an already read-only engine
 return `ReadOnly` with the stored reason.
 

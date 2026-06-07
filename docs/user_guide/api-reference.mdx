@@ -532,7 +532,11 @@ RETURNS TABLE (
 )
 ```
 
-Admin-only. Applies pending sync rows to the backend-local engine.
+Admin-only. Applies pending sync rows. For persisted `mutable_overlay` graphs,
+committed edge changes are published into durable projection segments and the
+engine reloads the latest manifest so other backends can read them without a
+full rebuild. Backend-local node/filter/tenant replay and legacy overlay paths
+remain for sync surfaces that are not yet represented by durable segments.
 
 ### `graph.run_scheduled_maintenance()`
 

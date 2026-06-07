@@ -794,6 +794,257 @@ fn traverse_auto_sync_opt_in_applies_pending_edge_insert() {
 }
 
 #[pg_test]
+fn cross_backend_committed_write_visible_without_full_rebuild() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable overlay failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_durable_apply_pgtest CASCADE")
+        .expect("drop durable apply table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_durable_apply_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_durable_apply_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create durable apply table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_durable_apply_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root'), ('child', NULL, 'Child')",
+    )
+    .expect("insert durable apply rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_durable_apply_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add durable apply table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_durable_apply_pgtest'::regclass,
+                'parent_id',
+                'graph_test_durable_apply_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add durable apply edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build durable apply graph failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run(
+        "UPDATE public.graph_test_durable_apply_pgtest
+            SET parent_id = 'root'
+          WHERE id = 'child'",
+    )
+    .expect("update durable apply edge failed");
+
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("durable apply sync failed");
+
+    let (edge_buffer_used, pending_durable_rows, segment_count) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT h.edge_buffer_used,
+                        p.pending_durable_rows,
+                        p.segment_count
+                   FROM graph.sync_health() h
+                   CROSS JOIN graph.projection_status() p",
+                None,
+                &[],
+            )
+            .expect("durable apply status query failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i32>(1)?.unwrap_or(-1),
+            row.get::<i64>(2)?.unwrap_or(-1),
+            row.get::<i32>(3)?.unwrap_or(0),
+        ))
+    })
+    .expect("durable apply status read failed");
+
+    let reaches_root = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_durable_apply_pgtest'::regclass,
+                'child',
+                1,
+                hydrate := false
+             )
+             WHERE node_id = 'root'",
+    )
+    .expect("durable apply traversal failed")
+    .unwrap_or(0);
+
+    assert_eq!(edge_buffer_used, 0);
+    assert_eq!(pending_durable_rows, 0);
+    assert!(segment_count > 0);
+    assert_eq!(reaches_root, 1);
+    Spi::run("SET graph.persist_on_build = off").expect("reset persistence failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("disable mutable overlay failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+}
+
+#[pg_test]
+fn topology_auto_sync_uses_durable_segments_for_mutable_overlay() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable overlay failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync mode failed");
+    Spi::run("SET graph.query_freshness = 'apply_pending_sync'")
+        .expect("set query freshness failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_durable_auto_sync_pgtest CASCADE")
+        .expect("drop durable auto sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_durable_auto_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_durable_auto_sync_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create durable auto sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_durable_auto_sync_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root'), ('child', NULL, 'Child')",
+    )
+    .expect("insert durable auto sync rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_durable_auto_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add durable auto sync table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_durable_auto_sync_pgtest'::regclass,
+                'parent_id',
+                'graph_test_durable_auto_sync_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add durable auto sync edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'mutable_overlay')")
+        .expect("build durable auto sync graph failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run(
+        "UPDATE public.graph_test_durable_auto_sync_pgtest
+            SET parent_id = 'root'
+          WHERE id = 'child'",
+    )
+    .expect("update durable auto sync edge failed");
+
+    let reaches_root = Spi::get_one::<i64>(
+        "SELECT count(*)
+             FROM graph.traverse(
+                'graph_test_durable_auto_sync_pgtest'::regclass,
+                'child',
+                1,
+                hydrate := false
+             )
+             WHERE node_id = 'root'",
+    )
+    .expect("durable auto sync traversal failed")
+    .unwrap_or(0);
+    let (edge_buffer_used, segment_count) = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT h.edge_buffer_used, p.segment_count
+                   FROM graph.sync_health() h
+                   CROSS JOIN graph.projection_status() p",
+                None,
+                &[],
+            )
+            .expect("durable auto sync status failed");
+        let row = result.first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<i32>(1)?.unwrap_or(-1),
+            row.get::<i32>(2)?.unwrap_or(0),
+        ))
+    })
+    .expect("durable auto sync status read failed");
+
+    assert_eq!(reaches_root, 1);
+    assert_eq!(edge_buffer_used, 0);
+    assert!(segment_count > 0);
+    Spi::run("RESET graph.query_freshness").expect("reset query freshness failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+    Spi::run("SET graph.persist_on_build = off").expect("reset persistence failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("disable mutable overlay failed");
+}
+
+#[pg_test]
+fn csr_readonly_apply_sync_ignores_later_mutable_default_guc() {
+    reset_and_create_fixtures();
+    Spi::run("SET graph.mutable_enabled = on").expect("enable mutable overlay failed");
+    Spi::run("SET graph.persist_on_build = on").expect("enable persistence failed");
+    Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync mode failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_csr_mode_sync_pgtest CASCADE")
+        .expect("drop csr mode sync table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_csr_mode_sync_pgtest (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NULL REFERENCES public.graph_test_csr_mode_sync_pgtest(id),
+                name TEXT NOT NULL
+            )",
+    )
+    .expect("create csr mode sync table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_csr_mode_sync_pgtest (id, parent_id, name)
+             VALUES ('root', NULL, 'Root'), ('child', NULL, 'Child')",
+    )
+    .expect("insert csr mode sync rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_csr_mode_sync_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'parent_id']
+            )",
+    )
+    .expect("add csr mode sync table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_csr_mode_sync_pgtest'::regclass,
+                'parent_id',
+                'graph_test_csr_mode_sync_pgtest'::regclass,
+                'id',
+                'parent',
+                bidirectional := false
+            )",
+    )
+    .expect("add csr mode sync edge failed");
+    Spi::run("SELECT * FROM graph.build(mode := 'csr_readonly')")
+        .expect("build csr mode graph failed");
+    Spi::run("SELECT graph.enable_sync()").expect("enable sync failed");
+    Spi::run("SET graph.default_projection_mode = 'mutable_overlay'")
+        .expect("change default projection mode failed");
+    Spi::run(
+        "UPDATE public.graph_test_csr_mode_sync_pgtest
+            SET parent_id = 'root'
+          WHERE id = 'child'",
+    )
+    .expect("update csr mode sync edge failed");
+
+    Spi::run("SELECT * FROM graph.apply_sync()").expect("apply csr mode sync failed");
+    let edge_buffer_used =
+        Spi::get_one::<i32>("SELECT edge_buffer_used FROM graph.sync_health()")
+            .expect("csr mode sync health failed")
+            .unwrap_or(-1);
+
+    assert_eq!(edge_buffer_used, 1);
+    Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
+    Spi::run("RESET graph.sync_mode").expect("reset sync mode failed");
+    Spi::run("SET graph.persist_on_build = off").expect("reset persistence failed");
+    Spi::run("SET graph.mutable_enabled = off").expect("disable mutable overlay failed");
+}
+
+#[pg_test]
 fn topology_reads_auto_sync_by_default() {
     reset_and_create_fixtures();
     Spi::run("SET graph.sync_mode = 'trigger'").expect("set sync_mode failed");
@@ -1933,7 +2184,7 @@ fn projection_repair_rewrites_corrupt_base_chunk_generation() {
         target: 1,
         type_id: 1,
     });
-    chunk.write_to_path(&chunk_path).expect("chunk writes");
+    write_pgtest_segment(&chunk_path, &chunk);
     let chunk_checksum = format!(
         "crc32:{:08x}",
         crc32fast::hash(&std::fs::read(&chunk_path).expect("chunk reads"))
@@ -2131,9 +2382,15 @@ fn write_projection_status_segment(path: &std::path::Path, level: u8) {
             target: 0,
             type_id: 1,
         });
-    segment
-        .write_to_path(path)
-        .expect("projection status segment writes");
+    write_pgtest_segment(path, &segment);
+}
+
+fn write_pgtest_segment(
+    path: &std::path::Path,
+    segment: &crate::projection::segment::DeltaSegment,
+) {
+    let bytes = segment.to_bytes().expect("projection test segment encodes");
+    std::fs::write(path, bytes).expect("projection test segment writes");
 }
 
 fn projection_status_segment_ref(

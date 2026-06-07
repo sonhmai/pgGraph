@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
+use crate::config;
 use crate::edge_store::{EdgeStore, MmapEdgeArrayParts, MmapEdgeArrays};
 use crate::engine::{Engine, MmapResolutionState};
 use crate::filter_index::FilterIndex;
@@ -603,6 +604,7 @@ fn write_graph_file_internal(
     fs::rename(&tmp_path, path)
         .map_err(|e| GraphError::Internal(format!("Rename failed: {}", e)))?;
     write_sync_checkpoint(path, engine.applied_sync_id)?;
+    write_projection_mode(path, engine.projection_mode)?;
 
     Ok(())
 }
@@ -647,6 +649,51 @@ pub fn read_sync_checkpoint(path: &Path) -> GraphResult<Option<i64>> {
         .map(Some)
         .map_err(|e| GraphError::CorruptFile {
             reason: format!("invalid sync checkpoint '{}': {}", trimmed, e),
+        })
+}
+
+pub fn projection_mode_path(path: &Path) -> PathBuf {
+    append_path_suffix(path, ".projection_mode")
+}
+
+pub fn write_projection_mode(
+    path: &Path,
+    projection_mode: config::ProjectionMode,
+) -> GraphResult<()> {
+    let mode_path = projection_mode_path(path);
+    let tmp_path = append_path_suffix(&mode_path, ".tmp");
+    let mut file = fs::File::create(&tmp_path).map_err(|e| {
+        GraphError::Internal(format!("Cannot create {}: {}", tmp_path.display(), e))
+    })?;
+    writeln!(file, "{}", projection_mode.as_str())
+        .map_err(|e| GraphError::Internal(format!("Write failed: {}", e)))?;
+    file.sync_all()
+        .map_err(|e| GraphError::Internal(format!("Sync failed: {}", e)))?;
+    fs::rename(&tmp_path, mode_path)
+        .map_err(|e| GraphError::Internal(format!("Rename failed: {}", e)))?;
+    Ok(())
+}
+
+pub fn read_projection_mode(path: &Path) -> GraphResult<Option<config::ProjectionMode>> {
+    let mode_path = projection_mode_path(path);
+    if !mode_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&mode_path).map_err(|e| {
+        GraphError::Internal(format!(
+            "Cannot read projection mode {}: {}",
+            mode_path.display(),
+            e
+        ))
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    config::parse_projection_mode(trimmed)
+        .map(Some)
+        .ok_or_else(|| GraphError::CorruptFile {
+            reason: format!("invalid projection mode '{}'", trimmed),
         })
 }
 
@@ -826,6 +873,9 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     );
     if let Some(applied_sync_id) = read_sync_checkpoint(path)? {
         engine.record_applied_sync_id(applied_sync_id);
+    }
+    if let Some(projection_mode) = read_projection_mode(path)? {
+        engine.set_projection_mode(projection_mode);
     }
     let manifest_root = projection_manifest_root(path);
     if let Some(manifest) = load_projection_manifest(path, computed_crc, &manifest_root)? {
@@ -1135,6 +1185,32 @@ mod tests {
         assert_eq!(reloaded.node_store.primary_key(b), "B-2");
         assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
+    }
+
+    #[test]
+    fn persisted_load_preserves_projection_mode_sidecar() {
+        let mut engine = Engine::new();
+        engine.built = true;
+        engine.set_projection_mode(crate::config::ProjectionMode::MutableOverlay);
+
+        let path = std::env::temp_dir().join(format!(
+            "graph-projection-mode-test-{}.pggraph",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(sync_checkpoint_path(&path));
+        let _ = std::fs::remove_file(projection_mode_path(&path));
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(sync_checkpoint_path(&path));
+        let _ = std::fs::remove_file(projection_mode_path(&path));
+
+        assert_eq!(
+            loaded.projection_mode,
+            crate::config::ProjectionMode::MutableOverlay
+        );
     }
 
     #[test]

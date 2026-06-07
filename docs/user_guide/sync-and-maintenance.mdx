@@ -1,9 +1,10 @@
 # Sync And Maintenance
 
 The base graph is immutable CSR once built. Sync captures source table changes
-into durable log tables and applies what can be represented as backend-local
-overlays. Vacuum and maintenance rebuild the base graph to fold changes back
-into the core stores.
+into durable log tables. In `mutable_overlay` mode, committed edge changes are
+published as durable projection segments so other backends can observe them
+after `graph.apply_sync()` without a full rebuild. Vacuum and maintenance still
+rebuild the base graph to fold accumulated changes back into the core stores.
 
 ## Modes
 
@@ -65,7 +66,8 @@ Current apply behavior includes:
 | Inserted node row | Materializes mmap node store if needed, appends node, updates resolution delta, filter values, and tenant membership |
 | Updated node row | Handles primary-key changes, property/filter refresh, tenant refresh, and edge mutations where possible |
 | Deleted node row | Tombstones node in owned store |
-| Edge mutations | Stored in edge overlay buffer until rebuild/vacuum |
+| Edge mutations in `mutable_overlay` | Published into durable projection segments and loaded through the layered read path |
+| Edge mutations outside durable projection coverage | Stored in the legacy edge overlay buffer until rebuild/vacuum |
 | Truncate | Marks rebuild/vacuum need |
 
 `graph.apply_sync()` drains the durable sync rows that were pending when the
@@ -74,10 +76,10 @@ backlogs are processed in smaller batches without changing the public admin
 contract.
 
 <Callout type="warning">
-The base CSR store is immutable. Edge changes use overlay buffers for query
-visibility in the backend that applies sync, but `graph.vacuum()` or
-`graph.maintenance()` is the normal path for merging them into a clean base
-graph.
+The base CSR store is immutable. Durable projection segments make committed
+mutable-overlay edge changes visible across backends after sync is applied, but
+`graph.vacuum()` or `graph.maintenance()` is still the normal path for merging
+accumulated projection state into a clean base graph.
 </Callout>
 
 ## Query Freshness
@@ -174,9 +176,11 @@ maintenance using its built-in health checks.
 
 ## Edge Buffer Limits
 
-`graph.edge_buffer_size` limits pending edge mutations. When the buffer is full,
-the engine enters read-only mode, reports `PG008` at the capacity breach, and
-exposes `read_only_reason = 'edge_buffer_full'`.
+`graph.edge_buffer_size` limits legacy/backend-local pending edge mutations.
+For persisted `mutable_overlay` graphs, committed edge changes normally use
+durable projection segments instead of this buffer. When the legacy buffer is
+full, the engine enters read-only mode, reports `PG008` at the capacity breach,
+and exposes `read_only_reason = 'edge_buffer_full'`.
 
 ```sql
 ALTER SYSTEM SET graph.edge_buffer_size = 500000;

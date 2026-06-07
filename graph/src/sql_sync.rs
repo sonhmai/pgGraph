@@ -1,9 +1,9 @@
 //! SQL sync-log replay, trigger management, and tenant-scope helpers.
 
-use crate::catalog::{read_catalog, table_oid_from_name};
+use crate::catalog::{catalog_fingerprint, read_catalog, table_oid_from_name};
 use crate::filter_index::{EncodedFilterValue, FilterColumnType};
 use crate::persistence::{
-    graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path,
+    graph_artifact_checksum_for_path, graph_artifact_version, graph_file_path, load_graph_file,
     projection_manifest_root, read_sync_checkpoint,
 };
 use crate::projection::ingest::{ProjectionIngestResult, ProjectionIngester, ProjectionSyncRow};
@@ -396,15 +396,18 @@ fn required_sync_string(value: Option<String>, column: &str) -> safety::GraphRes
 }
 
 pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
-    ENGINE.with(|e| {
-        let eng = e.borrow();
-        if eng.built {
-            Ok(())
-        } else {
-            Err(safety::GraphError::NotBuilt)
-        }
-    })?;
+    ensure_engine_loaded_for_apply_sync()?;
     let target_sync_id = max_sync_log_id()?;
+    apply_sync_to_high_watermark(target_sync_id)
+}
+
+pub(crate) fn apply_sync_to_high_watermark(
+    target_sync_id: i64,
+) -> safety::GraphResult<SyncApplyStats> {
+    ensure_engine_loaded_for_apply_sync()?;
+    if should_apply_sync_via_durable_projection() {
+        return apply_sync_via_durable_projection(target_sync_id);
+    }
     let mut stats = apply_sync_until(Some(target_sync_id), config::sync_batch_size())?;
 
     apply_legacy_sync_buffer(&mut stats)?;
@@ -418,9 +421,101 @@ pub(crate) fn apply_sync_internal() -> safety::GraphResult<SyncApplyStats> {
     Ok(stats)
 }
 
+fn ensure_engine_loaded_for_apply_sync() -> safety::GraphResult<()> {
+    if ENGINE.with(|e| e.borrow().built) {
+        return Ok(());
+    }
+
+    let graph_path = graph_file_path()?;
+    if !graph_path.exists() {
+        return Err(safety::GraphError::NotBuilt);
+    }
+
+    let mut loaded = load_graph_file(&graph_path)?;
+    if let Ok((tables, edges, filters)) = read_catalog() {
+        loaded.set_catalog_fingerprint(catalog_fingerprint(&tables, &edges, &filters));
+    }
+    ENGINE.with(|engine| {
+        *engine.borrow_mut() = loaded;
+    });
+    Ok(())
+}
+
+fn should_apply_sync_via_durable_projection() -> bool {
+    let graph_path = match graph_file_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    graph_path.exists()
+        && ENGINE.with(|e| e.borrow().projection_mode == config::ProjectionMode::MutableOverlay)
+}
+
+fn apply_sync_via_durable_projection(target_sync_id: i64) -> safety::GraphResult<SyncApplyStats> {
+    let graph_path = graph_file_path()?;
+    let root = projection_manifest_root(&graph_path);
+    let previous = ProjectionManifestStore::new(root).load_latest_current()?;
+    let previous_watermark = previous.as_ref().map_or(
+        read_sync_checkpoint(&graph_path)?.unwrap_or(0),
+        |manifest| manifest.sync_watermark,
+    );
+    let batch_size = config::sync_batch_size().max(1);
+    let entries =
+        read_sync_log_entries_after(previous_watermark, batch_size, Some(target_sync_id))?;
+    let mut stats = sync_apply_stats_from_entries(&entries);
+
+    let projection =
+        ingest_projection_until_internal(Some(batch_size as i64), None, Some(target_sync_id))?;
+    if projection.sync_watermark > previous_watermark {
+        reload_engine_after_projection_ingest(&graph_path, projection.sync_watermark)?;
+    }
+
+    apply_legacy_sync_buffer(&mut stats)?;
+
+    let pending = ENGINE.with(|e| pending_sync_rows(e.borrow().applied_sync_id))?;
+    ENGINE.with(|e| {
+        let mut eng = e.borrow_mut();
+        eng.record_pending_sync_rows(pending);
+    });
+
+    Ok(stats)
+}
+
+fn sync_apply_stats_from_entries(entries: &[SyncLogEntry]) -> SyncApplyStats {
+    let mut stats = SyncApplyStats::default();
+    for entry in entries {
+        match entry.op {
+            SyncOp::Insert => stats.inserts += 1,
+            SyncOp::Update => stats.updates += 1,
+            SyncOp::Delete => stats.deletes += 1,
+            SyncOp::Truncate => stats.truncates += 1,
+        }
+    }
+    stats
+}
+
+fn reload_engine_after_projection_ingest(
+    graph_path: &std::path::Path,
+    sync_watermark: i64,
+) -> safety::GraphResult<()> {
+    let mut loaded = load_graph_file(graph_path)?;
+    loaded.record_applied_sync_id(sync_watermark);
+    ENGINE.with(|engine| {
+        *engine.borrow_mut() = loaded;
+    });
+    Ok(())
+}
+
 pub(crate) fn ingest_projection_internal(
     max_rows: Option<i64>,
     max_bytes: Option<i64>,
+) -> safety::GraphResult<ProjectionIngestStats> {
+    ingest_projection_until_internal(max_rows, max_bytes, None)
+}
+
+fn ingest_projection_until_internal(
+    max_rows: Option<i64>,
+    max_bytes: Option<i64>,
+    target_sync_id: Option<i64>,
 ) -> safety::GraphResult<ProjectionIngestStats> {
     let graph_path = graph_file_path()?;
     if !graph_path.exists() {
@@ -437,7 +532,7 @@ pub(crate) fn ingest_projection_internal(
         .unwrap_or_else(|| config::sync_batch_size().max(1));
     let byte_limit = optional_nonnegative_usize(max_bytes, "max_bytes")?
         .unwrap_or_else(config::max_overlay_memory_bytes);
-    let entries = read_sync_log_entries_after(previous_watermark, row_limit, None)?;
+    let entries = read_sync_log_entries_after(previous_watermark, row_limit, target_sync_id)?;
     if entries.is_empty() {
         return Ok(ProjectionIngestStats {
             sync_watermark: previous_watermark,
