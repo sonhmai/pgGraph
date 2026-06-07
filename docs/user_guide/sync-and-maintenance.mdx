@@ -291,6 +291,19 @@ FROM graph.projection_gc();
 retained valid manifest or active backend generation. `deleted_files` and
 `deleted_bytes` report files actually removed during that call.
 
+Run `graph.projection_repair()` when load or maintenance diagnostics indicate
+corrupt durable projection metadata:
+
+```sql
+SELECT *
+FROM graph.projection_repair();
+```
+
+The result reports `healthy`, `targeted_chunk_repair`, `full_rebuild`, or
+`no_projection`. Full rebuilds use PostgreSQL source tables, persist a fresh
+`.pggraph` artifact, and publish a new base-only projection generation before
+the backend reloads it.
+
 ## Operational Patterns
 
 Small manual graph:

@@ -399,6 +399,132 @@ fn projection_gc() -> TableIterator<
     })
 }
 
+/// Repair or rebuild corrupt durable projection artifacts.
+#[pg_extern(schema = "graph")]
+fn projection_repair() -> TableIterator<
+    'static,
+    (
+        name!(action, String),
+        name!(generation_id, Option<i64>),
+        name!(rebuilt, bool),
+        name!(chunks_rewritten, i32),
+        name!(reason, Option<String>),
+    ),
+> {
+    with_panic_boundary("projection_repair()", || {
+        require_graph_admin_result().unwrap_or_else(|err| err.report());
+        let artifact = crate::persistence::graph_file_path().unwrap_or_else(|err| err.report());
+        let root = crate::persistence::projection_manifest_root(&artifact);
+        let plan = crate::projection::recovery::plan_projection_recovery_for_artifact(
+            &root,
+            Some(&artifact),
+        )
+        .unwrap_or_else(|err| err.report());
+
+        let mut action = plan.action;
+        let mut generation_id = plan.generation_id;
+        let mut rebuilt = false;
+        let mut chunks_rewritten = 0;
+        let reason = plan.reason.clone();
+
+        match plan.action {
+            crate::projection::recovery::ProjectionRecoveryAction::NoProjection
+            | crate::projection::recovery::ProjectionRecoveryAction::Healthy => {}
+            crate::projection::recovery::ProjectionRecoveryAction::TargetedChunkRepair => {
+                let result = ENGINE
+                    .with(|engine| {
+                        let eng = engine.borrow();
+                        crate::projection::recovery::repair_active_base_chunks(
+                            &root,
+                            &crate::projection::chunk::EdgeStoreChunkSource::new(&eng.edge_store),
+                        )
+                    })
+                    .unwrap_or_else(|err| err.report());
+                if let Some(result) = result {
+                    generation_id = Some(result.manifest.generation_id);
+                    chunks_rewritten = saturating_i32(result.chunks_rewritten);
+                    reload_persisted_engine_with_projection(&artifact)
+                        .unwrap_or_else(|err| err.report());
+                }
+            }
+            crate::projection::recovery::ProjectionRecoveryAction::FullRebuild => {
+                let next_generation =
+                    crate::projection::recovery::next_rebuild_generation_id(&root)
+                        .unwrap_or_else(|err| err.report());
+                let manifest =
+                    run_full_projection_rebuild_repair(&root, &artifact, next_generation)
+                        .unwrap_or_else(|err| err.report());
+                action = crate::projection::recovery::ProjectionRecoveryAction::FullRebuild;
+                generation_id = Some(manifest.generation_id);
+                rebuilt = true;
+            }
+        }
+
+        TableIterator::new(vec![(
+            projection_recovery_action_text(action).to_string(),
+            generation_id.map(saturating_i64),
+            rebuilt,
+            chunks_rewritten,
+            reason,
+        )])
+    })
+}
+
+fn run_full_projection_rebuild_repair(
+    root: &std::path::Path,
+    artifact: &std::path::Path,
+    next_generation: u64,
+) -> safety::GraphResult<crate::projection::manifest::ProjectionManifest> {
+    let quarantined = crate::projection::recovery::quarantine_latest_manifest(root)?;
+    let result = (|| {
+        execute_maintenance_rebuild(true)?;
+        let manifest = crate::projection::recovery::publish_rebuilt_base_manifest(
+            artifact,
+            next_generation,
+            max_sync_log_id()?,
+        )?;
+        reload_persisted_engine_with_projection(artifact)?;
+        Ok(manifest)
+    })();
+
+    match result {
+        Ok(manifest) => Ok(manifest),
+        Err(err) => {
+            if let Some(quarantine_path) = quarantined {
+                if let Err(restore_err) =
+                    crate::projection::recovery::restore_quarantined_manifest(&quarantine_path)
+                {
+                    return Err(safety::GraphError::Internal(format!(
+                        "projection repair failed ({err}); additionally failed to restore quarantined manifest: {restore_err}"
+                    )));
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+fn projection_recovery_action_text(
+    action: crate::projection::recovery::ProjectionRecoveryAction,
+) -> &'static str {
+    match action {
+        crate::projection::recovery::ProjectionRecoveryAction::NoProjection => "no_projection",
+        crate::projection::recovery::ProjectionRecoveryAction::Healthy => "healthy",
+        crate::projection::recovery::ProjectionRecoveryAction::TargetedChunkRepair => {
+            "targeted_chunk_repair"
+        }
+        crate::projection::recovery::ProjectionRecoveryAction::FullRebuild => "full_rebuild",
+    }
+}
+
+fn reload_persisted_engine_with_projection(path: &std::path::Path) -> safety::GraphResult<()> {
+    let loaded = crate::persistence::load_graph_file(path)?;
+    ENGINE.with(|engine| {
+        *engine.borrow_mut() = loaded;
+    });
+    Ok(())
+}
+
 fn saturating_i32(value: usize) -> i32 {
     value.min(i32::MAX as usize) as i32
 }

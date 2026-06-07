@@ -508,3 +508,43 @@ Microphase 12 added generation-aware projection GC:
   cleanup and a new admin SQL function. No traversal benchmark comparison is
   required for the checkpoint because read-path code is unchanged; preserve the
   expected-red future status/diagnostics contract before commit.
+
+Microphase 13 added recovery and repair orchestration:
+
+- Added `graph/src/projection/recovery.rs` to validate the active manifest plus
+  referenced segments/chunks and classify recovery as `healthy`,
+  `targeted_chunk_repair`, `full_rebuild`, or `no_projection`.
+- Missing referenced segment files remain rejected through manifest publication
+  validation, while unreferenced temp segment files are ignored by the active
+  manifest loader.
+- Corrupt active segments and corrupt manifests plan full rebuild. Full rebuild
+  repair quarantines the latest final manifest before calling the persisted
+  maintenance rebuild path, publishes a higher base-only projection generation,
+  reloads it, and records the active generation heartbeat.
+- Corrupt base chunks use the existing chunk rewrite repair path from a base
+  graph source and publish a replacement generation.
+- Added `graph.projection_repair()` as the admin-facing repair entry point.
+- Tests run so far:
+  - `cd graph && cargo test --features pg17 projection::recovery`: passed with
+    8 recovery/repair tests, including stale base metadata and missing chunk
+    targeted repair coverage.
+  - `cd graph && cargo check --features pg17`: passed.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 projection_repair`:
+    passed with SQL signature and targeted chunk repair coverage.
+  - `cd graph && cargo pgrx test --features "pg17 development" pg17 full_rebuild_restores_valid_projection_generation`:
+    passed with SQL full-rebuild repair behavior and recovery unit coverage.
+  - `PG_VERSION_FEATURE=pg17 graph/tests/heavy/projection_recovery_gate.sh`:
+    passed outside the sandbox after the sandboxed pgrx run could not bind an
+    ephemeral local test port; the script covers recovery manifest/segment/chunk
+    cases, GC crash-shape/idempotence unit cases, SQL repair signature and
+    targeted chunk repair coverage, and SQL full-rebuild restoration.
+  - `cd graph && cargo fmt --check`: passed.
+  - `cd graph && cargo test --features pg17 --doc`: passed with 0 doctests.
+  - `python3 scripts/check_doc_references.py`: passed.
+  - `git diff --check`: passed.
+  - `cd graph && cargo test --features pg17`: expected red; 621 passed, 1
+    failed future status/diagnostics contract, 1 ignored scale test.
+- Regression report: Microphase 13 changes admin repair and projection artifact
+  metadata paths. No traversal benchmark comparison is required because normal
+  read execution is unchanged; preserve the expected-red future
+  status/diagnostics contract before commit.

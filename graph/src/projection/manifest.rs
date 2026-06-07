@@ -244,6 +244,27 @@ impl ProjectionManifestStore {
         Ok(Some(manifest))
     }
 
+    /// Load the latest active manifest while allowing missing base chunks.
+    ///
+    /// Recovery uses this path because chunk metadata can be sufficient to
+    /// rebuild missing or corrupt chunk files from the source base graph.
+    pub(crate) fn load_latest_current_for_recovery(
+        &self,
+    ) -> GraphResult<Option<ProjectionManifest>> {
+        let Some((generation_id, path)) = self.latest_manifest_path()? else {
+            return Ok(None);
+        };
+        let manifest = self.load_manifest_file(&path)?;
+        if manifest.generation_id != generation_id {
+            return Err(manifest_corrupt(format!(
+                "manifest filename generation {generation_id} does not match JSON generation {}",
+                manifest.generation_id
+            )));
+        }
+        self.validate_active_references_for_recovery(&manifest)?;
+        Ok(Some(manifest))
+    }
+
     fn load_manifest_file(&self, path: &Path) -> GraphResult<ProjectionManifest> {
         let raw =
             fs::read_to_string(path).map_err(|err| manifest_io("read manifest", path, err))?;
@@ -290,6 +311,17 @@ impl ProjectionManifestStore {
         }
         for chunk in &manifest.base_chunks {
             require_existing_reference(&self.root, &chunk.path, "base chunk")?;
+        }
+        Ok(())
+    }
+
+    fn validate_active_references_for_recovery(
+        &self,
+        manifest: &ProjectionManifest,
+    ) -> GraphResult<()> {
+        require_existing_reference(&self.root, &manifest.base_artifact_path, "base artifact")?;
+        for segment in &manifest.segments {
+            require_existing_reference(&self.root, &segment.path, "segment")?;
         }
         Ok(())
     }

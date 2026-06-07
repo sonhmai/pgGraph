@@ -1528,6 +1528,28 @@ fn projection_gc_exposes_operator_contract_field_names() {
 }
 
 #[pg_test]
+fn projection_repair_exposes_operator_contract_field_names() {
+    reset_and_create_fixtures();
+    let signature_matches = Spi::get_one::<bool>(
+            "WITH expected(result_type) AS (
+                VALUES (
+                    'TABLE(action text, generation_id bigint, rebuilt boolean, chunks_rewritten integer, reason text)'
+                )
+             )
+             SELECT pg_get_function_result(p.oid) = expected.result_type
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             CROSS JOIN expected
+             WHERE n.nspname = 'graph'
+               AND p.proname = 'projection_repair'",
+        )
+        .expect("projection_repair signature inspection failed")
+        .unwrap_or(false);
+
+    assert!(signature_matches);
+}
+
+#[pg_test]
 fn projection_gc_sql_deletes_obsolete_files_after_retention() {
     Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
         .expect("test fixture lock failed");
@@ -1635,6 +1657,185 @@ fn projection_gc_sql_deletes_obsolete_files_after_retention() {
     }
     Spi::run("RESET graph.projection_retention_generations")
         .expect("reset projection retention failed");
+}
+
+#[pg_test]
+fn full_rebuild_restores_valid_projection_generation() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("set projection mode failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_repair_pgtest CASCADE")
+        .expect("drop repair table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_repair_pgtest (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .expect("create repair table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_repair_pgtest (id, name)
+         VALUES ('a', 'Alice'), ('b', 'Bob')",
+    )
+    .expect("insert repair rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_projection_repair_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+        )",
+    )
+    .expect("add repair table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build repair graph failed");
+
+    let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
+    let root = crate::persistence::projection_manifest_root(&graph_path);
+    let corrupt_generation = 9_300_001_u64;
+    let repaired_generation = corrupt_generation + 1;
+    let corrupt_manifest = crate::projection::manifest::ProjectionManifestStore::new(&root)
+        .manifest_path(corrupt_generation);
+    let repaired_manifest = crate::projection::manifest::ProjectionManifestStore::new(&root)
+        .manifest_path(repaired_generation);
+    let _ = std::fs::remove_file(&corrupt_manifest);
+    let _ = std::fs::remove_file(&repaired_manifest);
+    std::fs::write(&corrupt_manifest, b"{not json").expect("corrupt manifest writes");
+
+    let repaired = Spi::get_one::<bool>(
+        "SELECT action = 'full_rebuild'
+                AND generation_id = 9300002
+                AND rebuilt
+                AND chunks_rewritten = 0
+                AND reason IS NOT NULL
+         FROM graph.projection_repair()",
+    )
+    .expect("projection repair SQL call failed")
+    .unwrap_or(false);
+    let active_generation = Spi::get_one::<i64>(
+        "SELECT max(generation_id)
+         FROM graph._projection_generations
+         WHERE backend_pid = pg_backend_pid()",
+    )
+    .expect("active generation read failed")
+    .unwrap_or(0);
+
+    assert!(repaired);
+    assert!(!corrupt_manifest.exists());
+    assert!(repaired_manifest.exists());
+    assert_eq!(active_generation, repaired_generation as i64);
+
+    let _ = std::fs::remove_file(&repaired_manifest);
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
+}
+
+#[pg_test]
+fn projection_repair_rewrites_corrupt_base_chunk_generation() {
+    Spi::run("SELECT pg_advisory_xact_lock(1918928211, 1735552872)")
+        .expect("test fixture lock failed");
+    reset_and_create_fixtures();
+    Spi::run("SET graph.persist_on_build = on").expect("enable persist_on_build failed");
+    Spi::run("SET graph.default_projection_mode = 'csr_readonly'")
+        .expect("set projection mode failed");
+    Spi::run("DROP TABLE IF EXISTS public.graph_test_projection_chunk_repair_pgtest CASCADE")
+        .expect("drop repair table failed");
+    Spi::run(
+        "CREATE TABLE public.graph_test_projection_chunk_repair_pgtest (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .expect("create repair table failed");
+    Spi::run(
+        "INSERT INTO public.graph_test_projection_chunk_repair_pgtest (id, name)
+         VALUES ('a', 'Alice'), ('b', 'Bob')",
+    )
+    .expect("insert repair rows failed");
+    Spi::run(
+        "SELECT graph.add_table(
+            'graph_test_projection_chunk_repair_pgtest'::regclass,
+            id_column := 'id',
+            columns := ARRAY['name']
+        )",
+    )
+    .expect("add repair table failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build repair graph failed");
+
+    let graph_path = crate::persistence::graph_file_path().expect("graph path failed");
+    let root = crate::persistence::projection_manifest_root(&graph_path);
+    let chunk_generation = 9_301_001_u64;
+    let repaired_generation = chunk_generation + 1;
+    let store = crate::projection::manifest::ProjectionManifestStore::new(&root);
+    let chunk_manifest = store.manifest_path(chunk_generation);
+    let repaired_manifest = store.manifest_path(repaired_generation);
+    let chunk_path = root.join("projection-repair-sql-corrupt.pggraph-chunk");
+    for path in [&chunk_manifest, &repaired_manifest, &chunk_path] {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let mut chunk = crate::projection::segment::DeltaSegment::new(
+        crate::projection::segment::SegmentKind::Edge,
+        0,
+        crate::types::TraversalDirection::Out,
+        0,
+        2,
+        1,
+    )
+    .expect("chunk segment creates");
+    chunk.edge_inserts.push(crate::projection::segment::SegmentEdge {
+        source: 0,
+        target: 1,
+        type_id: 1,
+    });
+    chunk.write_to_path(&chunk_path).expect("chunk writes");
+    let chunk_checksum = format!(
+        "crc32:{:08x}",
+        crc32fast::hash(&std::fs::read(&chunk_path).expect("chunk reads"))
+    );
+    let mut manifest = crate::projection::manifest::ProjectionManifest::base_only(
+        chunk_generation,
+        "main.pggraph",
+        crate::persistence::graph_artifact_checksum_for_path(&graph_path)
+            .expect("graph checksum reads"),
+        crate::persistence::graph_artifact_version(),
+        1,
+        1,
+    );
+    manifest
+        .base_chunks
+        .push(crate::projection::manifest::ManifestChunkRef {
+            path: relative_projection_test_path(&root, &chunk_path),
+            checksum: chunk_checksum,
+            source_start: 0,
+            source_end: 2,
+            dirty_source_count: 2,
+            dirty_edge_count: 1,
+        });
+    store.publish(&manifest).expect("chunk manifest publishes");
+    std::fs::write(&chunk_path, b"corrupt chunk").expect("chunk corruption writes");
+
+    let repaired = Spi::get_one::<bool>(
+        "SELECT action = 'targeted_chunk_repair'
+                AND generation_id = 9301002
+                AND NOT rebuilt
+                AND chunks_rewritten = 1
+                AND reason IS NOT NULL
+         FROM graph.projection_repair()",
+    )
+    .expect("projection repair SQL call failed")
+    .unwrap_or(false);
+
+    assert!(repaired);
+    assert!(repaired_manifest.exists());
+    assert!(chunk_path.exists());
+
+    let _ = std::fs::remove_file(&chunk_manifest);
+    let _ = std::fs::remove_file(&repaired_manifest);
+    let _ = std::fs::remove_file(&chunk_path);
+    Spi::run("SET graph.persist_on_build = off").expect("reset persist_on_build failed");
+    Spi::run("RESET graph.default_projection_mode").expect("reset projection mode failed");
 }
 
 fn relative_projection_test_path(root: &std::path::Path, path: &std::path::Path) -> String {

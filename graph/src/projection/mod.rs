@@ -28,6 +28,11 @@ pub(crate) mod layered;
 pub(crate) mod manifest;
 pub(crate) mod neighbors;
 pub(crate) mod normalize;
+#[allow(
+    dead_code,
+    reason = "Microphase 13 adds recovery helpers before status diagnostics consume all fields"
+)]
+pub(crate) mod recovery;
 pub(crate) mod segment;
 #[cfg(test)]
 mod test_contracts;

@@ -196,6 +196,13 @@ does not remove older chunk files, so older generations remain readable until
 generation-aware cleanup makes them obsolete. If a chunk checksum fails,
 targeted repair rewrites the corrupted range into a new generation.
 
+`projection::recovery` validates the latest active manifest, referenced
+segments, and base chunks before deciding whether a projection is healthy,
+repairable by chunk rewrite, or requires a full rebuild. Full rebuild repair
+moves the latest final manifest aside before calling the persisted maintenance
+rebuild path, then publishes a higher base-only generation and reloads it so
+future backends do not select the corrupt manifest again.
+
 Compaction reduces durable segment fanout by publishing a new generation with
 higher-level segment files that preserve the prior layered output. L0 segments
 compact to L1, L1 segments compact to L2, and delete/tombstone precedence is
