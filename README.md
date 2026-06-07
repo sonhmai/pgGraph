@@ -125,6 +125,31 @@ If you have `psql` installed locally you can also connect directly:
 psql -h localhost -U postgres -d graph
 ```
 
+## Homebrew Installation
+
+On macOS, pgGraph is available from the
+[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
+PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
+installs pgGraph 0.1.6, and builds against Homebrew `postgresql@17`.
+
+```bash
+brew tap Evokoa/tap
+brew install pggraph
+brew test pggraph
+```
+
+Create and verify the extension in a local database:
+
+```bash
+brew services start postgresql@17
+psql -d postgres -c "CREATE EXTENSION graph;"
+psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
+```
+
+If you want the fastest zero-build quickstart, use the Docker image above. Use
+Homebrew when you want pgGraph installed as a local PostgreSQL extension on
+macOS.
+
 To build from source or run the full interactive demo instead, use the included
 quickstart script. It starts a disposable Docker-backed PostgreSQL database,
 installs pgGraph, creates two normal PostgreSQL tables, discovers the foreign
