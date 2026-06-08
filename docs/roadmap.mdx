@@ -21,7 +21,7 @@ The current engine already supports the core SQL workflow:
 | Querying | Bounded traversal, shortest paths, weighted shortest paths, path reconstruction, source search, workflow helpers, connected components, and a GQL-compatible subset through `graph.gql()`. |
 | Maintenance | Explicit build, persist, load, sync apply, vacuum, stats, and background job entry points. |
 | Sync | Trigger-buffered change capture with explicit foreground or background apply. |
-| Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
+| Persistence | Atomic `.pggraph` artifacts under PostgreSQL data storage. Immutable forward graph arrays, schema-direction flags, and resolution are read-only mmap-backed on load; reverse CSR and bincode metadata are backend-local heap structures. |
 | Safety | ACL preflight, SQLSTATE mapping, circuit breakers, OOM checks, and panic-to-PostgreSQL-error boundaries. |
 
 ```text

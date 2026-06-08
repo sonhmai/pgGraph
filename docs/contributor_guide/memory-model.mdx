@@ -33,8 +33,10 @@ authoritative table storage, WAL, MVCC, durability, and crash recovery.
 <Callout type="info">
 The forward base graph is not copied wholesale into each connection's private
 heap after mmap load. Node arrays, forward CSR arrays, primary-key bytes, and
-resolution bytes are mmap-backed. The reverse CSR and bincode sections are
-currently per-backend heap structures.
+resolution bytes are mmap-backed. Forward CSR includes the schema-direction
+flag bytes used to identify generated reverse copies of bidirectional edge
+rows. The reverse CSR and bincode sections are currently per-backend heap
+structures.
 </Callout>
 
 ## NodeStore
@@ -141,6 +143,7 @@ Mmap mode performs binary search directly over the persisted bytes.
 ```text
 nodes * (active bit + table_oid + average primary key)
 + forward CSR arrays
++ schema-direction flags
 + reverse CSR arrays
 + resolution index
 + FilterIndex heap
@@ -152,9 +155,9 @@ from PostgreSQL row estimates before allocating the engine.
 
 When the engine is loaded from a `.pggraph` file, this estimate is a logical size
 estimate, not a per-backend private RSS formula. Mmap-backed forward arrays and
-resolution bytes are shared physically by the OS page cache across backends;
-reverse CSR, filter index, registry, and overlay structures remain per-backend
-heap.
+schema-direction flags are shared physically by the OS page cache across
+backends; reverse CSR, filter index, registry, and overlay structures remain
+per-backend heap.
 
 ## Mmap Materialization For Sync
 

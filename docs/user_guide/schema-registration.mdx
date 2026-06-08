@@ -88,6 +88,12 @@ orders.id  --placed_by-->  customers.id
 source PK                   target PK from orders.customer_id
 ```
 
+When `bidirectional := true`, pgGraph stores an additional traversable reverse
+adjacency row. GQL relationship values still report the registered edge record
+in the schema direction shown above: `_start` is the registered source endpoint
+and `_end` is the registered target endpoint, even when a pattern traverses the
+generated reverse adjacency.
+
 ## Register Edge-Table Relationships
 
 Edge-table style registration is used when one table contains relationship rows.

@@ -2,31 +2,71 @@
 
 Release notes are ordered newest first.
 
-## v0.1.6: Release Readiness Hardening
+## v0.1.7: Stable Bidirectional Relationship Results
 
-`v0.1.6` is a release-readiness hardening update for the GQL mutable projection
-stack. It clears the final `pg17` release gate after the dependency refresh,
-clippy cleanup, transaction-delta rollback fixes, and persisted metadata
-serialization migration.
+`v0.1.7` fixes how GQL returns relationship values for bidirectional edges.
+Edges can still be traversed in either direction, but result rows now present
+relationship endpoints in the direction registered in the graph schema. This
+keeps edge records stable for applications that inspect `_start`, `_end`, path
+values, or `relationships(path)`.
 
 ### Highlights
 
-- Moved persisted `.pggraph` metadata sections from `bincode 1.3.3` to
+- Preserved registered source and target endpoints in GQL relationship values
+  even when a bidirectional edge is matched through its reverse traversal path.
+- Applied the same stable endpoint orientation to path values and
+  `relationships(path)`.
+- Updated the persisted `.pggraph` artifact format to store the edge-direction
+  metadata needed for stable relationship projection.
+- Kept PostgreSQL source tables authoritative; persisted graph files remain
+  rebuildable derived artifacts.
+
+### Upgrade Note
+
+<Callout type="warning">
+`.pggraph` artifacts written before `v0.1.7` must be regenerated with
+`SELECT graph.build();` after upgrading. These files are derived artifacts, not
+the source of truth; PostgreSQL source tables remain authoritative.
+</Callout>
+
+### Validation
+
+The PostgreSQL 17 release gate passed, including unit tests, pgrx SQL tests,
+package validation, install smoke, metadata audit, SQLSTATE/ACL checks,
+backup/restore, concurrency stress, playground query validation, pgbench sync
+stress, Docker smoke, and disposable crash recovery checks.
+
+## v0.1.6: GQL Path Patterns And Release Reliability
+
+`v0.1.6` expands pgGraph's GQL query surface with richer path-pattern support,
+safer mutable-write checks, and a stricter persisted artifact format. It also
+adds release validation and packaging improvements for the `pg17` build path.
+
+### Highlights
+
+- Added GQL support for multi-pattern joins, including optional pattern groups,
+  ordered and deduplicated join rows, and aggregate projections over joined
+  paths.
+- Added projection support for join aliases, relationship variables, path
+  variables, and path functions such as `nodes(path)`, `relationships(path)`,
+  and `length(path)`.
+- Expanded wildcard path support with named wildcard path elements, fixed
+  path-variable chains, bounded wildcard expansion, multi-segment wildcard
+  variable-length paths, and relationship-type alternation.
+- Improved wildcard path filtering so node-property predicates and wildcard
+  relationship deletes work through the GQL planner.
+- Rechecked mutable GQL write predicates against the affected source rows and
+  rejected transaction-local traversal entry points that cannot be evaluated
+  safely.
+- Validated edge-table endpoints during registration so invalid relationship
+  mappings fail earlier.
+- Migrated persisted `.pggraph` metadata sections from `bincode 1.3.3` to
   `bincode 2.0.1` with serde support.
-- Kept the `.pggraph` artifact format at version 2 and made metadata decoding
-  reject trailing bytes instead of accepting partially consumed payloads.
-- Skipped the published `bincode 3.0.0` crate in dependency freshness checks
-  because that release contains a top-level compile error.
-- Fixed dirty transaction overlays so pending trigger sync rows are not applied
-  into backend-local base projection state while transaction-local deltas are
-  still uncommitted.
-- Tightened the build-lock regression fixture so the concurrent slow-build path
-  uses manual sync mode and does not trip trigger-sync behavior unrelated to
-  the advisory-lock check.
-- Cleared clippy blockers in GQL wildcard expansion, join binding, path-variable
-  binding, and SQL admin single-row handling without broad lint suppressions.
-- Documented the deferred `nixpkgs` and `rust-overlay` lock refresh as a
-  Nix-environment follow-up rather than a release blocker.
+- Made metadata decoding reject trailing bytes instead of accepting partially
+  consumed payloads.
+- Refreshed release dependency pins and added release validation scripts and
+  workflow coverage for packaging, source builds, install checks, metadata
+  audits, and heavy test gates.
 
 ### Upgrade Note
 
@@ -36,14 +76,11 @@ serialization migration.
 the source of truth; PostgreSQL source tables remain authoritative.
 </Callout>
 
-This release intentionally chooses regeneration over compatibility shims for
-old bincode metadata payloads. Future artifact tooling should move variable
-metadata sections toward a pgGraph-owned binary encoding so artifact
-compatibility is no longer tied to serializer crate behavior.
+Regenerating the derived artifact is the intended upgrade path for this release.
 
 ### Validation
 
-The full post-bincode `pg17` release gate passed:
+The `pg17` release gate passed:
 
 ```bash
 PG_VERSION_FEATURE=pg17 ./tests/heavy/run_release_gate.sh

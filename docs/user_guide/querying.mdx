@@ -131,8 +131,12 @@ Relationship values are coordinate identity objects in this release:
 ```
 
 `_type` is the registered edge label. `_start` and `_end` are endpoint graph
-coordinates. Relationship source-row hydration, relationship properties, and a
-separate relationship row identity are not part of the current JSONB contract.
+coordinates in the registered schema direction. For bidirectional
+registrations, an inbound or reverse traversal may walk a generated reverse
+adjacency row, but the returned relationship object still uses the original
+registered source endpoint as `_start` and target endpoint as `_end`.
+Relationship source-row hydration, relationship properties, and a separate
+relationship row identity are not part of the current JSONB contract.
 
 Path values are JSON objects with a `_path` member:
 
@@ -540,12 +544,15 @@ FROM graph.traverse(
 
 | Direction | Behavior |
 |---|---|
-| `any` | Uses the forward CSR store; bidirectional registrations create both edge directions |
+| `any` | Uses the forward CSR store; bidirectional registrations create both traversable edge directions |
 | `out` | Uses the forward CSR store |
 | `in` | Uses the reverse CSR store |
 
 For unidirectional edges, `direction := 'out'` follows the registered source to
-target direction and `direction := 'in'` follows the reverse store.
+target direction and `direction := 'in'` follows the reverse store. For
+bidirectional edges, traversal can use either stored adjacency, but relationship
+values returned by GQL remain oriented to the registered schema source and
+target.
 
 ### Strategy
 

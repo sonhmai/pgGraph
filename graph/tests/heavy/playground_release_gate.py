@@ -41,7 +41,7 @@ EXPECTED_RESULTS_CSR: dict[str, list[dict[str, object]]] = {
     "GQL Aggregate By Label": [{"hash": "672202fe114050577e9ea56668f354bc", "row_count": 1}],
     "GQL Collect Neighbor Labels": [{"hash": "60c9a3b2e3efa2d06f11bbfbff41e9b1", "row_count": 1}],
     "GQL Variable-Length Paths": [{"hash": "27db82ea68fe6f630e0705bf080e742d", "row_count": 4}],
-    "GQL Path Functions": [{"hash": "493d0a2278c85391d60c6e1645911745", "row_count": 3}],
+    "GQL Path Functions": [{"hash": "c565149448609e644287b30bf0345f6e", "row_count": 3}],
     "GQL Hydration Off": [{"hash": "e4b9e13b69f2e410f2729fa40b208524", "row_count": 1}],
     "GQL Explain": [{"hash": "0c52392c32dab707c82a82edb79d1a1c", "row_count": 1}],
     "Component Stats": [

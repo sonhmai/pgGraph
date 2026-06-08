@@ -108,12 +108,14 @@ from `load_graph_file()`.
 | Every target node index is less than `node_count` | `validate_persisted_contents()` |
 | `type_ids` length equals `edge_count` | Section size validation |
 | `weights` is empty or exactly `edge_count * 4` bytes | Section size validation |
+| `schema_reversed` is exactly `edge_count` bytes of `0` or `1` values | Section size and content validation |
 | Bincode payload length prefixes stay inside their sections | `validate_length_prefixed_section()` |
 | Edge registry index 0 is the reserved empty label | Loader registry validation |
 | Background worker notify PID is read only while a backend is registering a worker | `launch_build_worker()` and `launch_maintenance_worker()` call PostgreSQL's `MyProcPid` inside an active backend |
 
 The reverse CSR is not mmap-backed. It is rebuilt as an owned `EdgeStore` from
-the forward graph after the forward CSR has been validated.
+the forward graph after the forward CSR and schema-direction flags have been
+validated.
 
 ## Loader Hardening
 

@@ -153,14 +153,14 @@ available for PostgreSQL 14 through 18 and support **linux/amd64** and
 or WSL2).
 
 ```bash
-docker pull ghcr.io/evokoa/pggraph:0.1.6
+docker pull ghcr.io/evokoa/pggraph:0.1.7
 ```
 
 | Tag | Description |
 |---|---|
-| `0.1.6` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
+| `0.1.7` | Pinned reproducible tag (PostgreSQL 17) — always resolves to the same image digest |
 | `latest` | Moving tag that points to the most recent stable PostgreSQL 17 image |
-| `pg14-0.1.6` through `pg18-0.1.6` | Versioned image for a specific PostgreSQL major |
+| `pg14-0.1.7` through `pg18-0.1.7` | Versioned image for a specific PostgreSQL major |
 | `pg14` through `pg18` | Latest stable image for a specific PostgreSQL major |
 
 Start the container:
@@ -170,7 +170,7 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=graph \
   -p 5432:5432 \
-  ghcr.io/evokoa/pggraph:0.1.6
+  ghcr.io/evokoa/pggraph:0.1.7
 ```
 
 Verify that `pg_cron` and `graph` are installed and loaded:

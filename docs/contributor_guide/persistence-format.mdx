@@ -9,11 +9,11 @@ as length-prefixed bincode payloads.
 ```text
 Header, 128 bytes
   magic              4 bytes   "PGGH"
-  version            u32       current version = 2
+  version            u32       current version = 3
   flags              u32       currently 0
   node_count         u32
   edge_count         u32
-  section_offsets    11 * u64
+  section_offsets    12 * u64
   crc32              u32       CRC over bytes after header
 
 Section 0   active bits                 ceil(node_count / 8) bytes
@@ -22,11 +22,12 @@ Section 2   edge_offsets                (node_count + 1) * 4
 Section 3   targets                     edge_count * 4
 Section 4   type_ids                    edge_count
 Section 5   weights                     empty or edge_count * 4
-Section 6   resolution index            4 + entry_count * 16
-Section 7   primary key offsets         (node_count + 1) * 8
-Section 8   primary key bytes           UTF-8
-Section 9   filter index                u32 length + bincode 2 standard payload
-Section 10  edge type registry          u32 length + bincode 2 standard payload
+Section 6   schema_reversed             edge_count
+Section 7   resolution index            4 + entry_count * 16
+Section 8   primary key offsets         (node_count + 1) * 8
+Section 9   primary key bytes           UTF-8
+Section 10  filter index                u32 length + bincode 2 standard payload
+Section 11  edge type registry          u32 length + bincode 2 standard payload
 ```
 
 ## Write Path
@@ -79,9 +80,12 @@ return Engine
 
 <Callout type="info">
 The persisted forward graph arrays and resolution section are mmap-backed after
-load. The reverse CSR is not mmap-backed today; it is derived into backend-local
-heap. The bincode 2 standard sections, including `FilterIndex` and
-`edge_type_registry`, are also deserialized into backend-local heap.
+load. Forward edge arrays include the `schema_reversed` byte section that marks
+generated reverse copies of bidirectional registered edge rows. The reverse CSR
+is not mmap-backed today; it is derived into backend-local heap and preserves
+the same schema-direction flags. The bincode 2 standard sections, including
+`FilterIndex` and `edge_type_registry`, are also deserialized into
+backend-local heap.
 </Callout>
 
 ## Validation Boundaries
@@ -98,6 +102,7 @@ Loader validation rejects:
 | Required alignment missing | Unsafe typed pointer would be invalid |
 | Required section too small | Out-of-bounds typed reads |
 | Weights section wrong size | Parallel arrays would diverge |
+| `schema_reversed` value outside `0..=1` | Edge provenance flag invalid |
 | Resolution section malformed | Lookup index invalid |
 | Length-prefixed payload exceeds section | Bincode would read outside section |
 | Bincode payload leaves trailing bytes | Metadata section has ambiguous payload content |
@@ -119,16 +124,18 @@ Engine
   node_store has pointers into _mmap
   forward edge_store has pointers into _mmap
   resolution mode references _mmap section
-  reverse_edge_store owns heap CSR arrays
+  reverse_edge_store owns heap CSR arrays with copied schema flags
   filter_index owns heap data deserialized from bincode
   edge_type_registry owns heap strings deserialized from bincode
 ```
 
 ## Compatibility Rules
 
+Version 3 added the fixed-width `schema_reversed` edge section so bidirectional
+reverse adjacency rows can be returned in their registered schema direction.
 Version 2 deliberately moved the variable metadata sections from bincode 1 to
-bincode 2 standard encoding. Version 1 artifacts are derived state and are not
-read by this loader; users should run `SELECT graph.build()` to regenerate the
+bincode 2 standard encoding. Older artifacts are derived state and are not read
+by this loader; users should run `SELECT graph.build()` to regenerate the
 current artifact after upgrading.
 
 Any future change to fixed section ordering, binary representation, header
