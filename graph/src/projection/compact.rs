@@ -682,6 +682,77 @@ mod tests {
     }
 
     #[test]
+    fn compaction_preserves_weighted_schema_reversed_parallel_edges() {
+        let dir = ProjectionArtifactDir::new(
+            "compaction_preserves_weighted_schema_reversed_parallel_edges",
+        );
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let base = weighted_edge_store_from_tuples(4, &[(2, 3, 1, 5)]);
+        let mut weighted =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 1)
+                .expect("edge segment");
+        weighted.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+        });
+        weighted.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: true,
+        });
+        weighted.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            weight: 11,
+        });
+        weighted.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: true,
+            weight: 13,
+        });
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        let path = dir.segment_path(1, 0);
+        weighted.write_to_path(&path).expect("segment writes");
+        manifest
+            .segments
+            .push(segment_ref(dir.path(), &path, &weighted).expect("segment ref"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+
+        let result =
+            compact_generation(dir.path(), &manifest, &base, CompactionBudgets::generous())
+                .expect("compaction publishes");
+        let provider = ManifestSegmentProvider::new(dir.path(), &result.manifest);
+        let actual = LayeredNeighbors::from_provider(&base, &provider).expect("compacted loads");
+
+        assert_eq!(
+            actual.weighted_neighbors(0),
+            vec![
+                crate::projection::neighbors::WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 11,
+                    schema_reversed: false,
+                },
+                crate::projection::neighbors::WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 13,
+                    schema_reversed: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn compaction_dirty_chunk_rewrite_reduces_segment_pressure() {
         let (dir, base, manifest) = fixture_manifest(
             "compaction_dirty_chunk_rewrite_reduces_segment_pressure",
@@ -795,6 +866,81 @@ mod tests {
             ]
         );
         assert!(actual.neighbors(2).collect::<Vec<_>>().is_empty());
+    }
+
+    #[test]
+    fn compaction_dirty_chunk_rewrite_preserves_schema_reversed_weights() {
+        let dir = ProjectionArtifactDir::new(
+            "compaction_dirty_chunk_rewrite_preserves_schema_reversed_weights",
+        );
+        std::fs::write(dir.path().join("base.pggraph"), b"base").expect("base writes");
+        let base = weighted_edge_store_from_tuples(4, &[(2, 3, 1, 5)]);
+        let mut edge_segment =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 1, 1)
+                .expect("edge segment");
+        edge_segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+        });
+        edge_segment.edge_inserts.push(SegmentEdge {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: true,
+        });
+        edge_segment.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: false,
+            weight: 11,
+        });
+        edge_segment.edge_weights.push(SegmentEdgeWeight {
+            source: 0,
+            target: 1,
+            type_id: 1,
+            schema_reversed: true,
+            weight: 13,
+        });
+        let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
+        let path = dir.segment_path(1, 0);
+        edge_segment.write_to_path(&path).expect("segment writes");
+        manifest
+            .segments
+            .push(segment_ref(dir.path(), &path, &edge_segment).expect("segment ref"));
+        ProjectionManifestStore::new(dir.path())
+            .publish(&manifest)
+            .expect("manifest publishes");
+        let budgets = CompactionBudgets {
+            dirty_chunk_segment_threshold: Some(1),
+            ..CompactionBudgets::generous()
+        };
+
+        let result = compact_generation(dir.path(), &manifest, &base, budgets)
+            .expect("chunk rewrite publishes");
+        let provider = ManifestSegmentProvider::new(dir.path(), &result.manifest);
+        let actual = LayeredNeighbors::from_provider(&base, &provider).expect("compacted loads");
+
+        assert_eq!(result.chunks_rewritten, 1);
+        assert_eq!(
+            actual.weighted_neighbors(0),
+            vec![
+                crate::projection::neighbors::WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 11,
+                    schema_reversed: false,
+                },
+                crate::projection::neighbors::WeightedNeighbor {
+                    target: 1,
+                    type_id: 1,
+                    weight: 13,
+                    schema_reversed: true,
+                },
+            ]
+        );
     }
 
     #[test]
