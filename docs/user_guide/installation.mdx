@@ -6,7 +6,11 @@ officially supports PostgreSQL 14 through 18 and defaults to `pg17`. A legacy
 still exposes it, but PostgreSQL 13 has reached upstream EOL and is not part of
 the release support matrix.
 
-## Requirements
+## Source Build Requirements
+
+These requirements apply to PGXN, manual source, and direct `cargo-pgrx`
+installs. Homebrew and Docker installs do not require installing Rust or pgrx
+separately.
 
 | Requirement | Version or note |
 |---|---|
@@ -20,6 +24,30 @@ the release support matrix.
 Install with the PostgreSQL major that matches the target server. A `pg17`
 build should not be installed into a PostgreSQL 16 server.
 </Callout>
+
+## Homebrew Install
+
+On macOS, pgGraph is available from the
+[Evokoa Homebrew tap](https://github.com/Evokoa/homebrew-tap) for local
+PostgreSQL extension installs. The current formula is `Evokoa/tap/pggraph`,
+installs pgGraph 0.1.6, and builds against Homebrew `postgresql@17`.
+
+```bash
+brew tap Evokoa/tap
+brew install pggraph
+brew test pggraph
+```
+
+Create and verify the extension in a local database:
+
+```bash
+brew services start postgresql@17
+psql -d postgres -c "CREATE EXTENSION graph;"
+psql -d postgres -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'graph';"
+```
+
+Use Homebrew when you want a local macOS PostgreSQL extension install. For the
+fastest zero-build quickstart, use the pre-built Docker image below.
 
 ## Install pgrx
 

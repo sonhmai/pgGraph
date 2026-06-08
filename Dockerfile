@@ -6,8 +6,8 @@ FROM ${RUST_IMAGE} AS builder
 ARG PG_MAJOR=17
 ARG PGRX_VERSION=0.18.1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
         curl \
         gnupg \
@@ -16,8 +16,8 @@ RUN apt-get update \
         | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         postgresql-${PG_MAJOR} \
         postgresql-server-dev-${PG_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
@@ -37,8 +37,8 @@ LABEL org.opencontainers.image.source="https://github.com/evokoa/pggraph" \
 
 ARG PG_MAJOR=17
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         postgresql-${PG_MAJOR}-cron \
     && rm -rf /var/lib/apt/lists/*
 
