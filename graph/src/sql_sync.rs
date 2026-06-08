@@ -1040,6 +1040,7 @@ fn append_projection_node_row(
         source: node_idx,
         target: node_idx,
         type_id: 0,
+        schema_reversed: false,
         weight: None,
         table_oid: Some(table_oid),
         pk_hash: Some(ResolutionIndexBuilder::hash_pk(pk)),
@@ -1106,34 +1107,59 @@ fn append_projection_edge_rows(
             &context.all_table_oids,
         );
         if let (Some(source), Some(target)) = (source, target) {
-            push_projection_edge_row(entry, source, target, type_id, weight, operation, out);
+            push_projection_edge_row(
+                ProjectionEdgeRow {
+                    entry,
+                    source,
+                    target,
+                    type_id,
+                    schema_reversed: false,
+                    weight,
+                    operation,
+                },
+                out,
+            );
             if edge.bidirectional {
-                push_projection_edge_row(entry, target, source, type_id, weight, operation, out);
+                push_projection_edge_row(
+                    ProjectionEdgeRow {
+                        entry,
+                        source: target,
+                        target: source,
+                        type_id,
+                        schema_reversed: true,
+                        weight,
+                        operation,
+                    },
+                    out,
+                );
             }
         }
     }
     Ok(())
 }
 
-fn push_projection_edge_row(
-    entry: &SyncLogEntry,
+struct ProjectionEdgeRow<'a> {
+    entry: &'a SyncLogEntry,
     source: u32,
     target: u32,
     type_id: u8,
+    schema_reversed: bool,
     weight: Option<u32>,
     operation: MutationOperation,
-    out: &mut Vec<ProjectionSyncRow>,
-) {
+}
+
+fn push_projection_edge_row(row: ProjectionEdgeRow<'_>, out: &mut Vec<ProjectionSyncRow>) {
     out.push(ProjectionSyncRow {
-        sync_id: entry.id as u64,
-        generation_id: entry.id as u64,
+        sync_id: row.entry.id as u64,
+        generation_id: row.entry.id as u64,
         committed: true,
-        operation,
+        operation: row.operation,
         direction: TraversalDirection::Out,
-        source,
-        target,
-        type_id,
-        weight,
+        source: row.source,
+        target: row.target,
+        type_id: row.type_id,
+        schema_reversed: row.schema_reversed,
+        weight: row.weight,
         table_oid: None,
         pk_hash: None,
         node_idx: None,
@@ -1263,6 +1289,7 @@ fn append_projection_filter_rows_for_pk(
             source: node_idx,
             target: node_idx,
             type_id: 0,
+            schema_reversed: false,
             weight: None,
             table_oid: None,
             pk_hash: None,

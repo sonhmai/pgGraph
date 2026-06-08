@@ -762,6 +762,7 @@ fn resolve_edge_batch(
                 target,
                 type_id: edge.type_id,
                 weight: edge.weight,
+                schema_reversed: false,
             });
             edge_batch.flush_if_full()?;
 
@@ -771,6 +772,7 @@ fn resolve_edge_batch(
                     target: source,
                     type_id: edge.type_id,
                     weight: edge.weight,
+                    schema_reversed: true,
                 });
                 edge_batch.flush_if_full()?;
             }
@@ -785,6 +787,7 @@ struct EdgeSpoolBatch {
     targets: Vec<i64>,
     type_ids: Vec<i64>,
     weights: Vec<i64>,
+    schema_reversed: Vec<bool>,
     capacity: usize,
 }
 
@@ -796,6 +799,7 @@ impl EdgeSpoolBatch {
             targets: Vec::with_capacity(capacity),
             type_ids: Vec::with_capacity(capacity),
             weights: Vec::with_capacity(capacity),
+            schema_reversed: Vec::with_capacity(capacity),
             capacity,
         }
     }
@@ -805,6 +809,7 @@ impl EdgeSpoolBatch {
         self.targets.push(i64::from(edge.target));
         self.type_ids.push(i64::from(edge.type_id));
         self.weights.push(i64::from(edge.weight.unwrap_or(0)));
+        self.schema_reversed.push(edge.schema_reversed);
     }
 
     fn flush_if_full(&mut self) -> GraphResult<()> {
@@ -823,21 +828,24 @@ impl EdgeSpoolBatch {
         let targets = std::mem::take(&mut self.targets);
         let type_ids = std::mem::take(&mut self.type_ids);
         let weights = std::mem::take(&mut self.weights);
+        let schema_reversed = std::mem::take(&mut self.schema_reversed);
         self.sources = Vec::with_capacity(self.capacity);
         self.targets = Vec::with_capacity(self.capacity);
         self.type_ids = Vec::with_capacity(self.capacity);
         self.weights = Vec::with_capacity(self.capacity);
+        self.schema_reversed = Vec::with_capacity(self.capacity);
 
         Spi::run_with_args(
-            "INSERT INTO pg_temp.graph_build_edges (source, target, type_id, weight)
-             SELECT source, target, type_id, NULLIF(weight, 0)
-             FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int8[])
-               AS edge(source, target, type_id, weight)",
+            "INSERT INTO pg_temp.graph_build_edges (source, target, type_id, weight, schema_reversed)
+             SELECT source, target, type_id, NULLIF(weight, 0), schema_reversed
+             FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int8[], $5::bool[])
+               AS edge(source, target, type_id, weight, schema_reversed)",
             &[
                 sources.into(),
                 targets.into(),
                 type_ids.into(),
                 weights.into(),
+                schema_reversed.into(),
             ],
         )
         .map_err(|err| GraphError::Internal(format!("edge spool batch insert failed: {}", err)))
@@ -851,7 +859,8 @@ fn create_edge_spool() -> GraphResult<()> {
             source bigint NOT NULL,
             target bigint NOT NULL,
             type_id bigint NOT NULL,
-            weight bigint
+            weight bigint,
+            schema_reversed boolean NOT NULL
          ) ON COMMIT DROP",
     )
     .map_err(|err| GraphError::Internal(format!("edge spool setup failed: {}", err)))
@@ -863,9 +872,9 @@ fn load_edge_store_from_spool(
 ) -> GraphResult<crate::edge_store::EdgeStore> {
     Spi::connect(|client| {
         let mut cursor = client.open_cursor(
-            "SELECT source, target, type_id, weight
+            "SELECT source, target, type_id, weight, schema_reversed
              FROM pg_temp.graph_build_edges
-             ORDER BY source, target, type_id",
+             ORDER BY source, target, type_id, schema_reversed",
             &[],
         );
         let batch_size = crate::config::BUILD_BATCH_SIZE.get().max(1) as i64;
@@ -899,6 +908,14 @@ fn load_edge_store_from_spool(
                 let weight = row.get::<i64>(4).map_err(|err| {
                     GraphError::Internal(format!("edge weight read failed: {}", err))
                 })?;
+                let schema_reversed = row
+                    .get::<bool>(5)
+                    .map_err(|err| {
+                        GraphError::Internal(format!("edge schema direction read failed: {}", err))
+                    })?
+                    .ok_or_else(|| {
+                        GraphError::Internal("edge schema direction was NULL".to_string())
+                    })?;
 
                 builder.try_push(RawEdge {
                     source: u32::try_from(source).map_err(|_| {
@@ -917,6 +934,7 @@ fn load_edge_store_from_spool(
                             })
                         })
                         .transpose()?,
+                    schema_reversed,
                 })?;
             }
         }

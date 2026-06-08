@@ -447,11 +447,13 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 1,
+            schema_reversed: false,
         });
         edge_segment.edge_deletes.push(SegmentEdge {
             source: 1,
             target: 0,
             type_id: 1,
+            schema_reversed: false,
         });
         edge_segment
             .write_to_path(&edge_path)

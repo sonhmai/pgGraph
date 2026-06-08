@@ -15,7 +15,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const MAGIC: &[u8; 8] = b"PGGSEG01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_SIZE: usize = 160;
 const CHECKSUM_OFFSET: usize = 124;
 const RESERVED_OFFSET: usize = 128;
@@ -72,6 +72,8 @@ pub(crate) struct SegmentEdge {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
 }
 
 /// Weighted edge row.
@@ -83,6 +85,8 @@ pub(crate) struct SegmentEdgeWeight {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
     /// Edge weight.
     pub(crate) weight: u32,
 }
@@ -228,6 +232,7 @@ impl DeltaSegment {
                 source: row.source,
                 target: row.target,
                 type_id: row.type_id,
+                schema_reversed: row.schema_reversed,
             };
             if row.tombstone {
                 segment.edge_deletes.push(edge);
@@ -238,6 +243,7 @@ impl DeltaSegment {
                         source: row.source,
                         target: row.target,
                         type_id: row.type_id,
+                        schema_reversed: row.schema_reversed,
                         weight,
                     });
                 }
@@ -381,17 +387,20 @@ pub(crate) fn fuzz_seed_bytes(name: &str) -> Option<Vec<u8>> {
                 source: 0,
                 target: 1,
                 type_id: 1,
+                schema_reversed: false,
             });
             segment.edge_deletes.push(SegmentEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
+                schema_reversed: false,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: 0,
                 target: 1,
                 type_id: 1,
                 weight: 5,
+                schema_reversed: false,
             });
             segment.to_bytes().ok()
         }
@@ -485,6 +494,7 @@ fn validate_segment(segment: &DeltaSegment) -> GraphResult<()> {
                 source: weight.source,
                 target: weight.target,
                 type_id: weight.type_id,
+                schema_reversed: weight.schema_reversed,
             },
         )?;
     }
@@ -596,7 +606,7 @@ fn validate_section_ranges(
     counts: &[u32; SECTION_COUNT],
     offsets: &[u64; SECTION_COUNT],
 ) -> GraphResult<[std::ops::Range<usize>; SECTION_COUNT]> {
-    let widths = [9_usize, 9, 13, 5, 17, 13, 13];
+    let widths = [10_usize, 10, 14, 5, 17, 13, 13];
     let mut ranges: [std::ops::Range<usize>; SECTION_COUNT] =
         std::array::from_fn(|_| 0_usize..0_usize);
     let mut previous_end = HEADER_SIZE;
@@ -636,6 +646,7 @@ fn encode_edges(out: &mut Vec<u8>, rows: &[SegmentEdge]) {
         push_u32(out, row.source);
         push_u32(out, row.target);
         out.push(row.type_id);
+        out.push(u8::from(row.schema_reversed));
     }
 }
 
@@ -644,6 +655,7 @@ fn encode_edge_weights(out: &mut Vec<u8>, rows: &[SegmentEdgeWeight]) {
         push_u32(out, row.source);
         push_u32(out, row.target);
         out.push(row.type_id);
+        out.push(u8::from(row.schema_reversed));
         push_u32(out, row.weight);
     }
 }
@@ -684,11 +696,18 @@ fn encode_tenants(out: &mut Vec<u8>, rows: &[SegmentTenant]) {
 fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
     let mut rows = Vec::with_capacity(count as usize);
     for idx in 0..count as usize {
-        let offset = idx * 9;
+        let offset = idx * 10;
+        let schema_reversed = read_u8(bytes, offset + 9)?;
+        if schema_reversed > 1 {
+            return Err(segment_corrupt(format!(
+                "schema_reversed flag must be 0 or 1, found {schema_reversed}"
+            )));
+        }
         rows.push(SegmentEdge {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
             type_id: read_u8(bytes, offset + 8)?,
+            schema_reversed: schema_reversed != 0,
         });
     }
     Ok(rows)
@@ -697,12 +716,19 @@ fn decode_edges(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdge>> {
 fn decode_edge_weights(bytes: &[u8], count: u32) -> GraphResult<Vec<SegmentEdgeWeight>> {
     let mut rows = Vec::with_capacity(count as usize);
     for idx in 0..count as usize {
-        let offset = idx * 13;
+        let offset = idx * 14;
+        let schema_reversed = read_u8(bytes, offset + 9)?;
+        if schema_reversed > 1 {
+            return Err(segment_corrupt(format!(
+                "schema_reversed flag must be 0 or 1, found {schema_reversed}"
+            )));
+        }
         rows.push(SegmentEdgeWeight {
             source: read_u32(bytes, offset)?,
             target: read_u32(bytes, offset + 4)?,
             type_id: read_u8(bytes, offset + 8)?,
-            weight: read_u32(bytes, offset + 9)?,
+            schema_reversed: schema_reversed != 0,
+            weight: read_u32(bytes, offset + 10)?,
         });
     }
     Ok(rows)
@@ -870,17 +896,20 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 2,
+            schema_reversed: false,
         });
         segment.edge_deletes.push(SegmentEdge {
             source: 2,
             target: 3,
             type_id: 4,
+            schema_reversed: false,
         });
         segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 1,
             type_id: 2,
             weight: 7,
+            schema_reversed: false,
         });
 
         let decoded = DeltaSegment::from_bytes(&segment.to_bytes().expect("segment encodes"))
@@ -891,6 +920,42 @@ mod tests {
         assert_eq!(decoded.edge_inserts, segment.edge_inserts);
         assert_eq!(decoded.edge_deletes, segment.edge_deletes);
         assert_eq!(decoded.edge_weights, segment.edge_weights);
+    }
+
+    #[test]
+    fn delta_segment_roundtrips_schema_reversed_edge_rows() {
+        let mut segment =
+            DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 8, 42)
+                .expect("segment constructs");
+        segment.edge_inserts.push(SegmentEdge {
+            source: 1,
+            target: 0,
+            type_id: 2,
+            schema_reversed: true,
+        });
+        segment.edge_deletes.push(SegmentEdge {
+            source: 3,
+            target: 2,
+            type_id: 4,
+            schema_reversed: true,
+        });
+        segment.edge_weights.push(SegmentEdgeWeight {
+            source: 1,
+            target: 0,
+            type_id: 2,
+            schema_reversed: true,
+            weight: 17,
+        });
+
+        let decoded = DeltaSegment::from_bytes(&segment.to_bytes().expect("segment encodes"))
+            .expect("segment decodes");
+
+        assert_eq!(decoded.edge_inserts, segment.edge_inserts);
+        assert_eq!(decoded.edge_deletes, segment.edge_deletes);
+        assert_eq!(decoded.edge_weights, segment.edge_weights);
+        assert!(decoded.edge_inserts[0].schema_reversed);
+        assert!(decoded.edge_deletes[0].schema_reversed);
+        assert!(decoded.edge_weights[0].schema_reversed);
     }
 
     #[test]
@@ -940,6 +1005,7 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 2,
+            schema_reversed: false,
         });
         let bytes = segment.to_bytes().expect("segment encodes");
 
@@ -982,6 +1048,7 @@ mod tests {
             source: 0,
             target: 99,
             type_id: 2,
+            schema_reversed: false,
         });
 
         let decoded = DeltaSegment::from_bytes(&segment.to_bytes().expect("segment encodes"))
@@ -1031,6 +1098,7 @@ mod tests {
             source: 2,
             target: 0,
             type_id: 2,
+            schema_reversed: false,
         });
 
         let err = segment
@@ -1076,6 +1144,7 @@ mod tests {
             type_id: 1,
             weight,
             operation,
+            schema_reversed: false,
         }
     }
 }

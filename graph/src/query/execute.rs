@@ -402,6 +402,7 @@ fn expand_join_pattern_hops(
             to_idx: target.node_idx,
             orientation: target.orientation,
             type_id: target.type_id,
+            schema_reversed: target.schema_reversed,
         });
         expand_join_pattern_hops(
             engine,
@@ -549,10 +550,7 @@ fn expand_wildcard_segment(
             .path_relationships
             .iter()
             .map(|relationship| {
-                let (rel_start_idx, rel_end_idx) = match relationship.orientation {
-                    EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
-                    EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
-                };
+                let (rel_start_idx, rel_end_idx) = canonical_step_endpoints(relationship);
                 (rel_start_idx, rel_end_idx, relationship.type_id)
             })
             .collect::<Vec<_>>();
@@ -857,6 +855,7 @@ fn expand_targets(
                                 target.node_idx,
                                 target.orientation,
                                 target.type_id,
+                                target.schema_reversed,
                             ))
                         } else {
                             seen_result_nodes.insert(target.node_idx)
@@ -866,6 +865,7 @@ fn expand_targets(
                         node_idx: target.node_idx,
                         orientation: target.orientation,
                         type_id: target.type_id,
+                        schema_reversed: target.schema_reversed,
                         path_nodes: next_state.path_nodes.clone(),
                         path_relationships: next_state.path_relationships.clone(),
                     });
@@ -904,6 +904,7 @@ impl PathState {
             to_idx: target.node_idx,
             orientation: target.orientation,
             type_id: target.type_id,
+            schema_reversed: target.schema_reversed,
         });
         Self {
             node_idx: target.node_idx,
@@ -999,7 +1000,8 @@ impl<'a> GqlNeighbors<'a> {
                 &mut neighbors,
             );
         }
-        neighbors.sort_by_key(|target| (target.node_idx, target.orientation));
+        neighbors
+            .sort_by_key(|target| (target.node_idx, target.orientation, target.schema_reversed));
         neighbors.dedup();
         neighbors
     }
@@ -1022,7 +1024,14 @@ impl<'a> GqlNeighbors<'a> {
                 &mut neighbors,
             );
         }
-        neighbors.sort_by_key(|target| (target.node_idx, target.orientation, target.type_id));
+        neighbors.sort_by_key(|target| {
+            (
+                target.node_idx,
+                target.orientation,
+                target.type_id,
+                target.schema_reversed,
+            )
+        });
         neighbors.dedup();
         neighbors
     }
@@ -1088,6 +1097,7 @@ struct GqlTarget {
     node_idx: u32,
     orientation: EdgeOrientation,
     type_id: u8,
+    schema_reversed: bool,
     path_nodes: Vec<u32>,
     path_relationships: Vec<GqlRelationshipStep>,
 }
@@ -1097,6 +1107,7 @@ struct GqlStepTarget {
     node_idx: u32,
     orientation: EdgeOrientation,
     type_id: u8,
+    schema_reversed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1105,6 +1116,7 @@ struct GqlRelationshipStep {
     to_idx: u32,
     orientation: EdgeOrientation,
     type_id: u8,
+    schema_reversed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1125,6 +1137,7 @@ fn append_matching_neighbors(
             node_idx: neighbor.target,
             orientation,
             type_id: neighbor.type_id,
+            schema_reversed: neighbor.schema_reversed,
         })
     }));
 }
@@ -1139,6 +1152,7 @@ fn append_all_neighbors(
         node_idx: neighbor.target,
         orientation,
         type_id: neighbor.type_id,
+        schema_reversed: neighbor.schema_reversed,
     }));
 }
 
@@ -1187,10 +1201,12 @@ fn tenant_allows_node(engine: &Engine, node_idx: u32, tenant: Option<&str>) -> b
 
 fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResult<GqlRow> {
     let target_idx = target.node_idx;
-    let (rel_start_idx, rel_end_idx) = match target.orientation {
-        EdgeOrientation::Forward => (source_idx, target_idx),
-        EdgeOrientation::Reverse => (target_idx, source_idx),
-    };
+    let (rel_start_idx, rel_end_idx) = canonical_relationship_endpoints(
+        source_idx,
+        target_idx,
+        target.orientation,
+        target.schema_reversed,
+    );
     Ok(GqlRow {
         source: coordinate(engine, source_idx),
         target: Some(coordinate(engine, target_idx)),
@@ -1205,10 +1221,7 @@ fn project_row(engine: &Engine, source_idx: u32, target: GqlTarget) -> GraphResu
             .path_relationships
             .into_iter()
             .map(|relationship| {
-                let (start_idx, end_idx) = match relationship.orientation {
-                    EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
-                    EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
-                };
+                let (start_idx, end_idx) = canonical_step_endpoints(&relationship);
                 Ok(GqlPathRelationship {
                     rel_type: edge_type_label(engine, relationship.type_id)?,
                     start: coordinate(engine, start_idx),
@@ -1303,10 +1316,7 @@ fn gql_path_relationship(
     engine: &Engine,
     relationship: &GqlRelationshipStep,
 ) -> GraphResult<GqlPathRelationship> {
-    let (start_idx, end_idx) = match relationship.orientation {
-        EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
-        EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
-    };
+    let (start_idx, end_idx) = canonical_step_endpoints(relationship);
     Ok(GqlPathRelationship {
         rel_type: edge_type_label(engine, relationship.type_id)?,
         start: coordinate(engine, start_idx),
@@ -1330,10 +1340,7 @@ fn project_wildcard_path_state(engine: &Engine, state: PathState) -> GraphResult
         .path_relationships
         .iter()
         .map(|relationship| {
-            let (start_idx, end_idx) = match relationship.orientation {
-                EdgeOrientation::Forward => (relationship.from_idx, relationship.to_idx),
-                EdgeOrientation::Reverse => (relationship.to_idx, relationship.from_idx),
-            };
+            let (start_idx, end_idx) = canonical_step_endpoints(relationship);
             Ok(GqlPathRelationship {
                 rel_type: edge_type_label(engine, relationship.type_id)?,
                 start: coordinate(engine, start_idx),
@@ -1371,6 +1378,32 @@ fn project_optional_row(engine: &Engine, source_idx: u32) -> GqlRow {
         join_path_nodes: None,
         join_relationships: None,
         join_path_relationships: None,
+    }
+}
+
+fn canonical_step_endpoints(relationship: &GqlRelationshipStep) -> (u32, u32) {
+    canonical_relationship_endpoints(
+        relationship.from_idx,
+        relationship.to_idx,
+        relationship.orientation,
+        relationship.schema_reversed,
+    )
+}
+
+fn canonical_relationship_endpoints(
+    from_idx: u32,
+    to_idx: u32,
+    orientation: EdgeOrientation,
+    schema_reversed: bool,
+) -> (u32, u32) {
+    let (start_idx, end_idx) = match orientation {
+        EdgeOrientation::Forward => (from_idx, to_idx),
+        EdgeOrientation::Reverse => (to_idx, from_idx),
+    };
+    if schema_reversed {
+        (end_idx, start_idx)
+    } else {
+        (start_idx, end_idx)
     }
 }
 

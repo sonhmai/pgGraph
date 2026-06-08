@@ -2593,6 +2593,7 @@ fn test_record_tx_edge(
                     target: target_idx,
                     type_id,
                     weight: None,
+                    schema_reversed: false,
                 },
             ),
             "delete" => {

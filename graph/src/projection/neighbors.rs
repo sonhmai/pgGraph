@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use crate::edge_store::EdgeStore;
 
 /// Pending edge inserts keyed by source node.
-pub(crate) type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
+pub(crate) type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
 /// Pending edge deletes keyed by source node.
 pub(crate) type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 /// Insert and delete overlay maps for one edge orientation.
@@ -39,13 +39,17 @@ impl<'a> CsrNeighbors<'a> {
 
 impl NeighborSource for CsrNeighbors<'_> {
     fn neighbors(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids) = self.edge_store.neighbors(node_idx);
-        NeighborIter::Csr(CsrNeighborIter::forward(targets, type_ids))
+        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
+        NeighborIter::Csr(CsrNeighborIter::forward(targets, type_ids, schema_reversed))
     }
 
     fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids) = self.edge_store.neighbors(node_idx);
-        NeighborIter::Csr(CsrNeighborIter::reversed(targets, type_ids))
+        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
+        NeighborIter::Csr(CsrNeighborIter::reversed(
+            targets,
+            type_ids,
+            schema_reversed,
+        ))
     }
 }
 
@@ -73,20 +77,22 @@ impl<'a> OverlayNeighbors<'a> {
 
 impl NeighborSource for OverlayNeighbors<'_> {
     fn neighbors(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids) = self.edge_store.neighbors(node_idx);
+        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
         NeighborIter::Overlay(OverlayNeighborIter::forward(
             targets,
             type_ids,
+            schema_reversed,
             self.inserts.get(&node_idx).map(Vec::as_slice),
             self.deletes.get(&node_idx),
         ))
     }
 
     fn neighbors_reversed(&self, node_idx: u32) -> NeighborIter<'_> {
-        let (targets, type_ids) = self.edge_store.neighbors(node_idx);
+        let (targets, type_ids, schema_reversed) = self.edge_store.neighbors_with_schema(node_idx);
         NeighborIter::Overlay(OverlayNeighborIter::reversed(
             targets,
             type_ids,
+            schema_reversed,
             self.inserts.get(&node_idx).map(Vec::as_slice),
             self.deletes.get(&node_idx),
         ))
@@ -100,6 +106,8 @@ pub(crate) struct Neighbor {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this edge row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
 }
 
 /// Weighted neighbor stream item.
@@ -111,6 +119,8 @@ pub(crate) struct WeightedNeighbor {
     pub(crate) type_id: u8,
     /// Edge weight.
     pub(crate) weight: u32,
+    /// Whether this edge row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
 }
 
 /// Source of weighted graph neighbors for shortest-path algorithms.
@@ -128,16 +138,21 @@ impl WeightedNeighborSource for EdgeStore {
     }
 
     fn weighted_neighbors(&self, node_idx: u32) -> Vec<WeightedNeighbor> {
-        let (targets, type_ids, weights) = self.neighbors_weighted(node_idx);
+        let (targets, type_ids, schema_reversed, weights) =
+            self.neighbors_weighted_with_schema(node_idx);
         targets
             .iter()
             .zip(type_ids.iter())
+            .zip(schema_reversed.iter())
             .zip(weights.iter())
-            .map(|((&target, &type_id), &weight)| WeightedNeighbor {
-                target,
-                type_id,
-                weight,
-            })
+            .map(
+                |(((&target, &type_id), &schema_reversed), &weight)| WeightedNeighbor {
+                    target,
+                    type_id,
+                    weight,
+                    schema_reversed: schema_reversed != 0,
+                },
+            )
             .collect()
     }
 }
@@ -168,24 +183,27 @@ impl Iterator for NeighborIter<'_> {
 pub(crate) struct CsrNeighborIter<'a> {
     targets: &'a [u32],
     type_ids: &'a [u8],
+    schema_reversed: &'a [u8],
     pos: usize,
     reversed: bool,
 }
 
 impl<'a> CsrNeighborIter<'a> {
-    fn forward(targets: &'a [u32], type_ids: &'a [u8]) -> Self {
+    fn forward(targets: &'a [u32], type_ids: &'a [u8], schema_reversed: &'a [u8]) -> Self {
         Self {
             targets,
             type_ids,
+            schema_reversed,
             pos: 0,
             reversed: false,
         }
     }
 
-    fn reversed(targets: &'a [u32], type_ids: &'a [u8]) -> Self {
+    fn reversed(targets: &'a [u32], type_ids: &'a [u8], schema_reversed: &'a [u8]) -> Self {
         Self {
             targets,
             type_ids,
+            schema_reversed,
             pos: targets.len(),
             reversed: true,
         }
@@ -210,6 +228,7 @@ impl Iterator for CsrNeighborIter<'_> {
         Some(Neighbor {
             target: self.targets[pos],
             type_id: self.type_ids[pos],
+            schema_reversed: self.schema_reversed[pos] != 0,
         })
     }
 }
@@ -223,7 +242,7 @@ pub(crate) struct OverlayNeighborIter<'a> {
     targets: &'a [u32],
     type_ids: &'a [u8],
     deleted: Option<&'a HashSet<(u32, u8)>>,
-    inserted: Option<&'a [(u32, u8)]>,
+    inserted: Option<&'a [(u32, u8, bool)]>,
     base: CsrNeighborIter<'a>,
     insert_pos: usize,
     phase: OverlayPhase,
@@ -234,7 +253,8 @@ impl<'a> OverlayNeighborIter<'a> {
     fn forward(
         targets: &'a [u32],
         type_ids: &'a [u8],
-        inserted: Option<&'a [(u32, u8)]>,
+        schema_reversed: &'a [u8],
+        inserted: Option<&'a [(u32, u8, bool)]>,
         deleted: Option<&'a HashSet<(u32, u8)>>,
     ) -> Self {
         Self {
@@ -242,7 +262,7 @@ impl<'a> OverlayNeighborIter<'a> {
             type_ids,
             deleted,
             inserted,
-            base: CsrNeighborIter::forward(targets, type_ids),
+            base: CsrNeighborIter::forward(targets, type_ids, schema_reversed),
             insert_pos: 0,
             phase: OverlayPhase::Base,
             reversed: false,
@@ -252,7 +272,8 @@ impl<'a> OverlayNeighborIter<'a> {
     fn reversed(
         targets: &'a [u32],
         type_ids: &'a [u8],
-        inserted: Option<&'a [(u32, u8)]>,
+        schema_reversed: &'a [u8],
+        inserted: Option<&'a [(u32, u8, bool)]>,
         deleted: Option<&'a HashSet<(u32, u8)>>,
     ) -> Self {
         Self {
@@ -260,7 +281,7 @@ impl<'a> OverlayNeighborIter<'a> {
             type_ids,
             deleted,
             inserted,
-            base: CsrNeighborIter::reversed(targets, type_ids),
+            base: CsrNeighborIter::reversed(targets, type_ids, schema_reversed),
             insert_pos: inserted.map_or(0, <[_]>::len),
             phase: OverlayPhase::Inserts,
             reversed: true,
@@ -275,8 +296,13 @@ impl<'a> OverlayNeighborIter<'a> {
     }
 
     fn inserted_duplicate(&self, pos: usize, target: u32, type_id: u8) -> bool {
-        self.inserted
-            .is_some_and(|inserted| inserted[..pos].contains(&(target, type_id)))
+        self.inserted.is_some_and(|inserted| {
+            inserted[..pos]
+                .iter()
+                .any(|&(inserted_target, inserted_type, _)| {
+                    inserted_target == target && inserted_type == type_id
+                })
+        })
     }
 
     fn next_base(&mut self) -> Option<Neighbor> {
@@ -306,12 +332,16 @@ impl<'a> OverlayNeighborIter<'a> {
                 self.insert_pos += 1;
                 pos
             };
-            let (target, type_id) = inserted[pos];
+            let (target, type_id, schema_reversed) = inserted[pos];
             if self.base_contains(target, type_id) || self.inserted_duplicate(pos, target, type_id)
             {
                 continue;
             }
-            return Some(Neighbor { target, type_id });
+            return Some(Neighbor {
+                target,
+                type_id,
+                schema_reversed,
+            });
         }
     }
 }
@@ -347,12 +377,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
@@ -365,11 +397,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 1,
-                    type_id: 1
+                    type_id: 1,
+                    schema_reversed: false,
                 },
                 Neighbor {
                     target: 2,
-                    type_id: 2
+                    type_id: 2,
+                    schema_reversed: false,
                 }
             ]
         );
@@ -385,18 +419,20 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     weight: None,
+                    schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
                     type_id: 1,
                     weight: None,
+                    schema_reversed: false,
                 },
             ],
             false,
         );
         let mut inserts = OverlayInserts::new();
-        inserts.insert(0, vec![(3, 1), (2, 1), (3, 1)]);
+        inserts.insert(0, vec![(3, 1, false), (2, 1, false), (3, 1, false)]);
         let mut deletes = OverlayDeletes::new();
         deletes.insert(0, HashSet::from([(1, 1)]));
         let neighbors = OverlayNeighbors::new(&store, &inserts, &deletes);
@@ -408,11 +444,13 @@ mod tests {
             vec![
                 Neighbor {
                     target: 2,
-                    type_id: 1
+                    type_id: 1,
+                    schema_reversed: false,
                 },
                 Neighbor {
                     target: 3,
-                    type_id: 1
+                    type_id: 1,
+                    schema_reversed: false,
                 }
             ]
         );
@@ -433,6 +471,7 @@ mod tests {
                     target,
                     type_id,
                     weight: None,
+                schema_reversed: false,
                 })
                 .collect::<Vec<_>>();
             let store = EdgeStore::from_edges(node_count, edges, false);

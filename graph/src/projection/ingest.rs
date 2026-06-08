@@ -24,7 +24,7 @@ use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
 const DEFAULT_SOURCE_RANGE_END: u32 = u32::MAX;
-const INGEST_ROW_BYTES: usize = 40;
+const INGEST_ROW_BYTES: usize = 41;
 static ACTIVE_INGEST_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// One committed row ready to publish into durable projection segments.
@@ -38,6 +38,7 @@ pub(crate) struct ProjectionSyncRow {
     pub(crate) source: u32,
     pub(crate) target: u32,
     pub(crate) type_id: u8,
+    pub(crate) schema_reversed: bool,
     pub(crate) weight: Option<u32>,
     pub(crate) table_oid: Option<u32>,
     pub(crate) pk_hash: Option<u64>,
@@ -56,6 +57,7 @@ impl ProjectionSyncRow {
             source: self.source,
             target: self.target,
             type_id: self.type_id,
+            schema_reversed: self.schema_reversed,
             weight: self.weight,
             operation: self.operation,
         }
@@ -732,6 +734,7 @@ mod tests {
                 filter_column_id: Some(3),
                 filter_value: Some(88),
                 tenant_hash: Some(8001),
+                schema_reversed: false,
             },
             ProjectionSyncRow {
                 sync_id: 3,
@@ -749,6 +752,7 @@ mod tests {
                 filter_column_id: Some(3),
                 filter_value: Some(88),
                 tenant_hash: Some(8001),
+                schema_reversed: false,
             },
             ProjectionSyncRow {
                 sync_id: 4,
@@ -766,6 +770,7 @@ mod tests {
                 filter_column_id: Some(3),
                 filter_value: Some(99),
                 tenant_hash: Some(8002),
+                schema_reversed: false,
             },
             ProjectionSyncRow {
                 sync_id: 5,
@@ -783,6 +788,7 @@ mod tests {
                 filter_column_id: Some(4),
                 filter_value: Some(100),
                 tenant_hash: Some(8003),
+                schema_reversed: false,
             },
         ];
 
@@ -970,6 +976,7 @@ mod tests {
             filter_column_id: None,
             filter_value: None,
             tenant_hash: None,
+            schema_reversed: false,
         }
     }
 

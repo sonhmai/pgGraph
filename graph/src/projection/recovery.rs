@@ -561,6 +561,7 @@ mod tests {
                 source,
                 target,
                 type_id,
+                schema_reversed: false,
             });
         }
         segment

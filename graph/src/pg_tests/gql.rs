@@ -3711,6 +3711,100 @@ fn gql_delete_edge_handles_bidirectional_reverse_match() {
 }
 
 #[pg_test]
+fn gql_bidirectional_reverse_match_returns_registered_edge_direction() {
+    reset_and_create_fixtures();
+    Spi::run(
+        "SELECT graph.add_table(
+                'graph_test_users_pgtest'::regclass,
+                id_column := 'id',
+                columns := ARRAY['name', 'age']
+            )",
+    )
+    .expect("add users table failed");
+    Spi::run(
+        "SELECT graph.add_edge(
+                'graph_test_friendships_pgtest'::regclass,
+                'user_id',
+                'graph_test_users_pgtest'::regclass,
+                'friend_id',
+                'friend',
+                bidirectional := true
+            )",
+    )
+    .expect("add friendship edge failed");
+    Spi::run("SELECT * FROM graph.build()").expect("build graph failed");
+
+    let (
+        rel_start,
+        rel_end,
+        path_node_0,
+        path_node_1,
+        path_rel_start,
+        path_rel_end,
+        relationships_start,
+        relationships_end,
+    ) = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT COALESCE(row #>> '{r,_start,_id,id}', row #>> '{r,_start,id}'),
+                        COALESCE(row #>> '{r,_end,_id,id}', row #>> '{r,_end,id}'),
+                        COALESCE(row #>> '{p,_path,nodes,0,_id,id}', row #>> '{p,_path,nodes,0,id}'),
+                        COALESCE(row #>> '{p,_path,nodes,1,_id,id}', row #>> '{p,_path,nodes,1,id}'),
+                        COALESCE(row #>> '{p,_path,relationships,0,_start,_id,id}', row #>> '{p,_path,relationships,0,_start,id}'),
+                        COALESCE(row #>> '{p,_path,relationships,0,_end,_id,id}', row #>> '{p,_path,relationships,0,_end,id}'),
+                        COALESCE(row #>> '{rs,0,_start,_id,id}', row #>> '{rs,0,_start,id}'),
+                        COALESCE(row #>> '{rs,0,_end,_id,id}', row #>> '{rs,0,_end,id}')
+                 FROM graph.gql(
+                    'MATCH p=()<-[r:friend]-()
+                     RETURN r, p, relationships(p) AS rs',
+                    hydrate := false
+                 )
+                 LIMIT 1",
+                None,
+                &[],
+            )
+            .expect("reverse bidirectional GQL query failed")
+            .first();
+        Ok::<_, pgrx::spi::Error>((
+            row.get::<String>(1)
+                .expect("rel start read failed")
+                .expect("rel start was NULL"),
+            row.get::<String>(2)
+                .expect("rel end read failed")
+                .expect("rel end was NULL"),
+            row.get::<String>(3)
+                .expect("path node 0 read failed")
+                .expect("path node 0 was NULL"),
+            row.get::<String>(4)
+                .expect("path node 1 read failed")
+                .expect("path node 1 was NULL"),
+            row.get::<String>(5)
+                .expect("path rel start read failed")
+                .expect("path rel start was NULL"),
+            row.get::<String>(6)
+                .expect("path rel end read failed")
+                .expect("path rel end was NULL"),
+            row.get::<String>(7)
+                .expect("relationships start read failed")
+                .expect("relationships start was NULL"),
+            row.get::<String>(8)
+                .expect("relationships end read failed")
+                .expect("relationships end was NULL"),
+        ))
+    })
+    .expect("reverse bidirectional GQL SPI failed");
+
+    assert_eq!(rel_start, "u1");
+    assert_eq!(rel_end, "u2");
+    assert_eq!(path_node_0, "u1");
+    assert_eq!(path_node_1, "u2");
+    assert_eq!(path_rel_start, "u1");
+    assert_eq!(path_rel_end, "u2");
+    assert_eq!(relationships_start, "u1");
+    assert_eq!(relationships_end, "u2");
+}
+
+#[pg_test]
 fn gql_delete_edge_rejects_ambiguous_bidirectional_self_edge_rows() {
     reset_and_create_fixtures();
     Spi::run(

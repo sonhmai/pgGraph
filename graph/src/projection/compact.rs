@@ -290,30 +290,33 @@ fn build_compacted_segment(
         for source in range.start..range.end {
             let base_edges = edge_set(base, source);
             let final_edges = weighted_edge_map_from_layered(&layered, source);
-            for &(target, type_id) in base_edges.keys() {
-                if final_edges.contains_key(&(target, type_id)) {
+            for &(target, type_id, schema_reversed) in base_edges.keys() {
+                if final_edges.contains_key(&(target, type_id, schema_reversed)) {
                     continue;
                 }
                 compacted.edge_deletes.push(SegmentEdge {
                     source,
                     target,
                     type_id,
+                    schema_reversed,
                 });
             }
-            for (&(target, type_id), &weight) in final_edges.iter() {
-                if base_edges.get(&(target, type_id)) == Some(&weight) {
+            for (&(target, type_id, schema_reversed), &weight) in final_edges.iter() {
+                if base_edges.get(&(target, type_id, schema_reversed)) == Some(&weight) {
                     continue;
                 }
                 compacted.edge_inserts.push(SegmentEdge {
                     source,
                     target,
                     type_id,
+                    schema_reversed,
                 });
                 if let Some(weight) = weight {
                     compacted.edge_weights.push(SegmentEdgeWeight {
                         source,
                         target,
                         type_id,
+                        schema_reversed,
                         weight,
                     });
                 }
@@ -336,27 +339,39 @@ fn materialize_layered_store(
         let weights = layered
             .weighted_neighbors(source)
             .into_iter()
-            .map(|neighbor| ((neighbor.target, neighbor.type_id), neighbor.weight))
+            .map(|neighbor| {
+                (
+                    (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                    neighbor.weight,
+                )
+            })
             .collect::<BTreeMap<_, _>>();
-        edges.extend(layered.neighbors(source).map(|neighbor| RawEdge {
-            source,
-            target: neighbor.target,
-            type_id: neighbor.type_id,
-            weight: weights.get(&(neighbor.target, neighbor.type_id)).copied(),
+        edges.extend(layered.neighbors(source).map(|neighbor| {
+            RawEdge {
+                source,
+                target: neighbor.target,
+                type_id: neighbor.type_id,
+                weight: weights
+                    .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
+                    .copied(),
+                schema_reversed: neighbor.schema_reversed,
+            }
         }));
     }
     EdgeStore::try_from_edges(base.node_count(), edges, has_weights)
 }
 
-fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8), Option<u32>> {
-    let (targets, type_ids, weights) = store.neighbors_weighted(source);
+fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8, bool), Option<u32>> {
+    let (targets, type_ids, schema_reversed, weights) =
+        store.neighbors_weighted_with_schema(source);
     targets
         .iter()
         .zip(type_ids.iter())
+        .zip(schema_reversed.iter())
         .enumerate()
-        .map(|(idx, (&target, &type_id))| {
+        .map(|(idx, ((&target, &type_id), &schema_reversed))| {
             (
-                (target, type_id),
+                (target, type_id, schema_reversed != 0),
                 store
                     .has_weights()
                     .then(|| weights.get(idx).copied())
@@ -369,18 +384,25 @@ fn edge_set(store: &EdgeStore, source: u32) -> BTreeMap<(u32, u8), Option<u32>> 
 fn weighted_edge_map_from_layered(
     layered: &LayeredNeighbors<'_>,
     source: u32,
-) -> BTreeMap<(u32, u8), Option<u32>> {
+) -> BTreeMap<(u32, u8, bool), Option<u32>> {
     let weights = layered
         .weighted_neighbors(source)
         .into_iter()
-        .map(|neighbor| ((neighbor.target, neighbor.type_id), neighbor.weight))
+        .map(|neighbor| {
+            (
+                (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                neighbor.weight,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     layered
         .neighbors(source)
         .map(|neighbor| {
             (
-                (neighbor.target, neighbor.type_id),
-                weights.get(&(neighbor.target, neighbor.type_id)).copied(),
+                (neighbor.target, neighbor.type_id, neighbor.schema_reversed),
+                weights
+                    .get(&(neighbor.target, neighbor.type_id, neighbor.schema_reversed))
+                    .copied(),
             )
         })
         .collect()
@@ -615,12 +637,14 @@ mod tests {
             target: 1,
             type_id: 1,
             weight: 11,
+            schema_reversed: false,
         });
         weighted.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 2,
             type_id: 1,
             weight: 13,
+            schema_reversed: false,
         });
         let mut manifest = ProjectionManifest::base_only(1, "base.pggraph", "crc32:base", 1, 10, 1);
         let path = dir.segment_path(1, 0);
@@ -645,11 +669,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     weight: 11,
+                    schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 2,
                     type_id: 1,
                     weight: 13,
+                    schema_reversed: false,
                 },
             ]
         );
@@ -712,12 +738,14 @@ mod tests {
             target: 1,
             type_id: 1,
             weight: 11,
+            schema_reversed: false,
         });
         edge_segment.edge_weights.push(SegmentEdgeWeight {
             source: 0,
             target: 3,
             type_id: 1,
             weight: 13,
+            schema_reversed: false,
         });
         let mut node_segment =
             DeltaSegment::new(SegmentKind::Node, 0, TraversalDirection::Any, 0, 4, 2)
@@ -756,11 +784,13 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     weight: 11,
+                    schema_reversed: false,
                 },
                 crate::projection::neighbors::WeightedNeighbor {
                     target: 3,
                     type_id: 1,
                     weight: 13,
+                    schema_reversed: false,
                 },
             ]
         );
@@ -839,6 +869,7 @@ mod tests {
                     source,
                     target,
                     type_id,
+                    schema_reversed: false,
                 }),
         );
         segment.edge_deletes.extend(
@@ -848,6 +879,7 @@ mod tests {
                     source,
                     target,
                     type_id,
+                    schema_reversed: false,
                 }),
         );
         segment

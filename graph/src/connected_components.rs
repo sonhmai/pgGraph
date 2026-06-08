@@ -303,24 +303,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(3, edges, false);
@@ -347,24 +351,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(4, edges, false);
@@ -405,24 +413,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(3, edges, false);
@@ -456,12 +468,14 @@ mod tests {
                 target: i,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             });
             edges.push(RawEdge {
                 source: i,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             });
         }
         let es = EdgeStore::from_edges(5, edges, false);
@@ -479,6 +493,7 @@ mod tests {
             target: 0,
             type_id: 1,
             weight: None,
+            schema_reversed: false,
         }];
         let es = EdgeStore::from_edges(1, edges, false);
         let result = compute_components(&ns, &es);
@@ -498,12 +513,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(3, edges, false);
@@ -546,12 +563,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(4, edges, false);
@@ -574,12 +593,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(3, edges, false);

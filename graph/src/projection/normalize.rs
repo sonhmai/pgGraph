@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::safety::{GraphError, GraphResult};
 use crate::types::TraversalDirection;
 
-const NORMALIZED_ROW_BYTES: usize = 40;
+const NORMALIZED_ROW_BYTES: usize = 41;
 
 /// Committed mutation operation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -55,6 +55,8 @@ pub(crate) struct CommittedMutation {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this edge row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
     /// Optional edge weight.
     pub(crate) weight: Option<u32>,
     /// Operation kind.
@@ -76,6 +78,8 @@ pub(crate) struct NormalizedMutation {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this edge row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
     /// Optional edge weight.
     pub(crate) weight: Option<u32>,
     /// Operation represented by this normalized row.
@@ -187,6 +191,7 @@ fn normalize_group(group: &[CommittedMutation]) -> Option<NormalizedMutation> {
         source: selected.source,
         target: selected.target,
         type_id: selected.type_id,
+        schema_reversed: selected.schema_reversed,
         weight: selected.weight,
         operation: selected.operation,
         tombstone: selected.operation.is_delete(),
@@ -215,6 +220,7 @@ fn compare_normalized_mutations(left: &NormalizedMutation, right: &NormalizedMut
         left.source,
         direction_sort_key(left.direction),
         left.type_id,
+        left.schema_reversed,
         left.target,
         left.operation,
         left.tombstone,
@@ -225,6 +231,7 @@ fn compare_normalized_mutations(left: &NormalizedMutation, right: &NormalizedMut
             right.source,
             direction_sort_key(right.direction),
             right.type_id,
+            right.schema_reversed,
             right.target,
             right.operation,
             right.tombstone,
@@ -247,6 +254,7 @@ struct MutationKey {
     source: u32,
     target: u32,
     type_id: u8,
+    schema_reversed: bool,
 }
 
 impl PartialOrd for MutationKey {
@@ -264,6 +272,7 @@ impl Ord for MutationKey {
             self.source,
             self.target,
             self.type_id,
+            self.schema_reversed,
         )
             .cmp(&(
                 other.generation_id,
@@ -272,6 +281,7 @@ impl Ord for MutationKey {
                 other.source,
                 other.target,
                 other.type_id,
+                other.schema_reversed,
             ))
     }
 }
@@ -285,6 +295,7 @@ impl From<&CommittedMutation> for MutationKey {
             source: row.source,
             target: row.target,
             type_id: row.type_id,
+            schema_reversed: row.schema_reversed,
         }
     }
 }
@@ -498,6 +509,7 @@ mod tests {
             type_id: 1,
             weight,
             operation,
+            schema_reversed: false,
         }
     }
 

@@ -17,7 +17,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
+type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
 type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 type AggregationEdgeOverlay = (OverlayInserts, OverlayDeletes);
 pub(crate) type IndexedPath = Rc<[u32]>;
@@ -235,7 +235,7 @@ pub(crate) fn enumerate_all_paths_dfs(
     edge_limit: usize,
     edge_type_filter: Option<&HashSet<u8>>,
     node_table_filter: Option<&HashSet<u32>>,
-    overlay_inserts: &HashMap<u32, Vec<(u32, u8)>>,
+    overlay_inserts: &OverlayInserts,
     overlay_deletes: &OverlayDeletes,
 ) {
     if depth >= request.min_depth
@@ -357,7 +357,7 @@ pub(crate) fn aggregation_edge_overlay(
         insert_map
             .entry(source)
             .or_default()
-            .push((target, type_id));
+            .push((target, type_id, false));
     }
     let mut delete_map: OverlayDeletes = HashMap::new();
     for (source, target, type_id) in deletes {
@@ -388,7 +388,7 @@ pub(crate) fn aggregation_neighbors(
     eng: &Engine,
     current: u32,
     direction: types::TraversalDirection,
-    overlay_inserts: &HashMap<u32, Vec<(u32, u8)>>,
+    overlay_inserts: &OverlayInserts,
     overlay_deletes: &OverlayDeletes,
 ) -> Vec<(u32, u8)> {
     let mut neighbors = Vec::new();
@@ -418,7 +418,7 @@ pub(crate) fn aggregation_neighbors(
         );
     }
     if let Some(inserted) = overlay_inserts.get(&current) {
-        for &(target, type_id) in inserted {
+        for &(target, type_id, _schema_reversed) in inserted {
             if seen.insert((target, type_id)) {
                 neighbors.push((target, type_id));
             }

@@ -53,6 +53,7 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         source: 0,
         target: 1,
         type_id: 2,
+        schema_reversed: false,
         weight: Some(7),
         tombstone: false,
     };
@@ -66,17 +67,20 @@ fn delta_segment_roundtrips_edge_topology_weight_and_delete_sections() {
         source: weighted.source,
         target: weighted.target,
         type_id: weighted.type_id,
+        schema_reversed: false,
     });
     segment.edge_weights.push(SegmentEdgeWeight {
         source: weighted.source,
         target: weighted.target,
         type_id: weighted.type_id,
         weight: weighted.weight.expect("fixture has weight"),
+        schema_reversed: false,
     });
     segment.edge_deletes.push(SegmentEdge {
         source: delete.source,
         target: delete.target,
         type_id: delete.type_id,
+        schema_reversed: false,
     });
 
     segment
@@ -161,6 +165,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
         filter_column_id: None,
         filter_value: None,
         tenant_hash: None,
+        schema_reversed: false,
     };
 
     let result = ingester
@@ -178,6 +183,7 @@ fn projection_ingest_committed_edge_insert_publishes_l0_manifest() {
             source: 0,
             target: 1,
             type_id: 2,
+            schema_reversed: false,
         }]
     );
 }
@@ -191,6 +197,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
         source: 0,
         target: 3,
         type_id: 1,
+        schema_reversed: false,
     });
     let mut delete = DeltaSegment::new(SegmentKind::Edge, 0, TraversalDirection::Out, 0, 4, 2)
         .expect("delete segment");
@@ -198,6 +205,7 @@ fn layered_neighbors_equal_full_rebuild_for_insert_delete_sequence() {
         source: 0,
         target: 1,
         type_id: 1,
+        schema_reversed: false,
     });
     let full_rebuild = edge_store_from_tuples(4, &[(0, 2, 1), (0, 3, 1)]);
     let expected = CsrNeighbors::new(&full_rebuild);
@@ -219,11 +227,13 @@ fn status_reports_manifest_watermark_segments_chunks_gc_and_repair() {
         source: 0,
         target: 1,
         type_id: 1,
+        schema_reversed: false,
     });
     segment.edge_deletes.push(SegmentEdge {
         source: 1,
         target: 0,
         type_id: 1,
+        schema_reversed: false,
     });
     segment
         .write_to_path(&segment_path)

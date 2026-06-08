@@ -159,6 +159,7 @@ pub fn build_benchmark_fixture(
             target,
             type_id: 1,
             weight: None,
+            schema_reversed: false,
         });
         // Bidirectional
         raw_edges.push(graph::bench_support::RawEdge {
@@ -166,6 +167,7 @@ pub fn build_benchmark_fixture(
             target: source,
             type_id: 1,
             weight: None,
+            schema_reversed: true,
         });
 
         // Grow the edge list → nodes with more edges get picked more often

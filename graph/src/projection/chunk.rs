@@ -81,13 +81,20 @@ impl BaseChunkSource for EdgeStoreChunkSource<'_> {
         }
         let mut edges = Vec::new();
         for source in range.start..range.end {
-            let (targets, type_ids, weights) = self.store.neighbors_weighted(source);
-            for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
+            let (targets, type_ids, schema_reversed, weights) =
+                self.store.neighbors_weighted_with_schema(source);
+            for (idx, ((&target, &type_id), &schema_reversed)) in targets
+                .iter()
+                .zip(type_ids.iter())
+                .zip(schema_reversed.iter())
+                .enumerate()
+            {
                 edges.push(RawEdge {
                     source,
                     target,
                     type_id,
                     weight: weights.get(idx).copied(),
+                    schema_reversed: schema_reversed != 0,
                 });
             }
         }
@@ -355,12 +362,14 @@ fn build_base_chunk_segment(
             source: edge.source,
             target: edge.target,
             type_id: edge.type_id,
+            schema_reversed: edge.schema_reversed,
         });
         if let Some(weight) = edge.weight {
             segment.edge_weights.push(SegmentEdgeWeight {
                 source: edge.source,
                 target: edge.target,
                 type_id: edge.type_id,
+                schema_reversed: edge.schema_reversed,
                 weight,
             });
         }
@@ -594,6 +603,7 @@ mod tests {
             source: 0,
             target: 1,
             type_id: 1,
+            schema_reversed: false,
         });
         segment.write_to_path(&path).expect("segment writes");
         let mut manifest = ProjectionManifest::base_only(2, "base.pggraph", "crc32:base", 1, 10, 1);

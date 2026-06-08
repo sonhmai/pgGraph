@@ -780,48 +780,56 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 4,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 4,
                 target: 0,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(5, edges, false);
@@ -931,7 +939,7 @@ mod tests {
         let (ns, es) = build_test_graph();
         let fi = FilterIndex::new();
         let mut overlay_insert_edges = std::collections::HashMap::new();
-        overlay_insert_edges.insert(0, vec![(3, 1), (1, 1)]);
+        overlay_insert_edges.insert(0, vec![(3, 1, false), (1, 1, false)]);
         let mut overlay_deleted_edges = std::collections::HashMap::new();
         overlay_deleted_edges.insert(0, HashSet::from([(1, 1)]));
 
@@ -980,19 +988,21 @@ mod tests {
                     target: 1,
                     type_id: 1,
                     weight: None,
+                    schema_reversed: false,
                 },
                 RawEdge {
                     source: 0,
                     target: 2,
                     type_id: 1,
                     weight: None,
+                    schema_reversed: false,
                 },
             ],
             false,
         );
         let fi = FilterIndex::new();
         let mut overlay_insert_edges = std::collections::HashMap::new();
-        overlay_insert_edges.insert(0, vec![(3, 1), (2, 1), (3, 1)]);
+        overlay_insert_edges.insert(0, vec![(3, 1, false), (2, 1, false), (3, 1, false)]);
 
         let config = BfsConfig {
             seed_node: 0,
@@ -1078,24 +1088,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(3, edges, false);
@@ -1209,6 +1223,7 @@ mod tests {
             target: 0,
             type_id: 1,
             weight: None,
+            schema_reversed: false,
         }];
         let es = EdgeStore::from_edges(1, edges, false);
         let fi = FilterIndex::new();
@@ -1356,24 +1371,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let es = EdgeStore::from_edges(4, edges, false);

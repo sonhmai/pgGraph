@@ -1375,6 +1375,7 @@ fn executor_enforces_hard_row_cap_before_projection() {
                 target: idx * 2 + 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             })
             .collect(),
         false,
@@ -1646,6 +1647,7 @@ fn multi_pattern_join_ordering_errors_when_raw_row_cap_is_exceeded() {
                 target: idx * 2 + 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             })
             .collect(),
         false,
@@ -2035,12 +2037,14 @@ fn multi_pattern_join_with_distinct_deduplicates_before_aggregate() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -2534,12 +2538,14 @@ fn multi_pattern_join_supports_bounded_variable_length_patterns() {
                 target: 1,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -2609,12 +2615,14 @@ fn multi_pattern_join_treats_variable_length_relationship_var_as_path() {
                 target: 1,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -2789,18 +2797,21 @@ fn wildcard_path_executor_filters_relationship_type_alternation() {
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: owns,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -2919,6 +2930,7 @@ fn wildcard_path_predicates_error_when_raw_row_cap_is_exceeded() {
                 target: idx * 2 + 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             })
             .collect(),
         false,
@@ -3066,12 +3078,14 @@ fn wildcard_path_executor_projects_fixed_multi_segment_paths() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3133,12 +3147,14 @@ fn wildcard_path_executor_projects_bounded_variable_length_paths() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3192,18 +3208,21 @@ fn wildcard_path_executor_projects_multi_segment_variable_length_paths() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3251,12 +3270,14 @@ fn wildcard_path_variable_length_named_segment_projects_path_and_endpoint() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3346,12 +3367,14 @@ fn wildcard_path_variable_length_target_label_filters_only_emitted_endpoint() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3399,12 +3422,14 @@ fn wildcard_path_executor_bounds_variable_length_walks() {
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3455,24 +3480,28 @@ fn wildcard_path_variable_length_reports_row_cap_exhaustion() {
                 target: 0,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3517,12 +3546,14 @@ fn wildcard_path_variable_length_filters_tenant_and_overlay_hops() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3722,6 +3753,7 @@ fn gql_relationship_expansion_uses_layered_manifest_snapshot() {
             source: 0,
             target: 3,
             type_id: 1,
+            schema_reversed: false,
         });
     });
 
@@ -3783,6 +3815,54 @@ fn value_projection_returns_inbound_relationship_orientation() {
 }
 
 #[test]
+fn value_projection_returns_schema_direction_for_bidirectional_reverse_row() {
+    let logical = bind_query("MATCH (u:users)-[r:friend]->(v:users) RETURN u, r, v");
+    let physical = lower(logical);
+    let mut engine = engine_fixture();
+    let friend = engine.register_edge_type("friend").unwrap();
+    engine.edge_store = EdgeStore::from_edges(
+        engine.node_store.node_count(),
+        vec![
+            RawEdge {
+                source: 0,
+                target: 1,
+                type_id: friend,
+                weight: None,
+                schema_reversed: false,
+            },
+            RawEdge {
+                source: 1,
+                target: 0,
+                type_id: friend,
+                weight: None,
+                schema_reversed: true,
+            },
+        ],
+        false,
+    );
+    engine.reverse_edge_store = engine.edge_store.reversed();
+
+    let rows = execute(&engine, &physical, None).unwrap();
+    let projected = project_rows(
+        rows,
+        &physical,
+        &HydratedRows::new(),
+        &QueryParams::new(),
+        false,
+    )
+    .unwrap();
+
+    let reverse_row = projected
+        .iter()
+        .find(|row| row["u"]["_id"]["id"] == "u2" && row["v"]["_id"]["id"] == "u1")
+        .expect("expected traversal over synthetic reverse row");
+    assert_eq!(reverse_row["r"]["_start"]["table"], "users");
+    assert_eq!(reverse_row["r"]["_start"]["id"], "u1");
+    assert_eq!(reverse_row["r"]["_end"]["table"], "users");
+    assert_eq!(reverse_row["r"]["_end"]["id"], "u2");
+}
+
+#[test]
 fn value_projection_preserves_undirected_opposite_relationships() {
     let logical = bind_query("MATCH (u:users)-[r:works_at]-(c:companies) RETURN r");
     let physical = lower(logical);
@@ -3796,12 +3876,14 @@ fn value_projection_preserves_undirected_opposite_relationships() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 0,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -3994,12 +4076,14 @@ fn path_projection_returns_stable_path_value_and_functions() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4058,18 +4142,21 @@ fn path_projection_preserves_distinct_paths_to_same_target() {
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4127,18 +4214,21 @@ fn variable_length_cardinality_does_not_depend_on_returning_path_values() {
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4202,12 +4292,14 @@ fn explicit_single_hop_variable_length_preserves_path_distinct_matches() {
                 target: 1,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: friend,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4391,18 +4483,21 @@ fn distinct_return_deduplicates_before_order_and_limit() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4439,18 +4534,21 @@ fn with_distinct_deduplicates_input_to_later_aggregate() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4486,18 +4584,21 @@ fn aggregate_distinct_deduplicates_inputs_per_group() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4894,18 +4995,21 @@ fn executor_filters_wrong_target_table_and_edge_type() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: owns,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -4965,12 +5069,14 @@ fn executor_applies_tenant_scope_to_var_len_and_undirected_frontiers() {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,
@@ -5307,12 +5413,14 @@ fn engine_fixture() -> Engine {
                 target: 2,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 3,
                 type_id: works_at,
                 weight: None,
+                schema_reversed: false,
             },
         ],
         false,

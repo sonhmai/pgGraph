@@ -164,7 +164,7 @@ pub mod bench_support {
     pub use crate::types::{EdgeTypeFilter, FilterCondition, FilterOp};
     use crate::types::{TraversalDirection, WeightedPathStep};
 
-    type OverlayInserts = HashMap<u32, Vec<(u32, u8)>>;
+    type OverlayInserts = HashMap<u32, Vec<(u32, u8, bool)>>;
     type OverlayDeletes = HashMap<u32, HashSet<(u32, u8)>>;
 
     /// Durable projection shape exercised by release-readiness benchmarks.
@@ -283,12 +283,14 @@ pub mod bench_support {
                         source,
                         target,
                         type_id: 1,
+                        schema_reversed: false,
                     });
                     if source + 1 < node_count {
                         segment.edge_deletes.push(SegmentEdge {
                             source,
                             target: source + 1,
                             type_id: 1,
+                            schema_reversed: false,
                         });
                     }
                 }
@@ -320,6 +322,7 @@ pub mod bench_support {
                 source,
                 target: source.wrapping_add(3) % node_count,
                 type_id: 1,
+                schema_reversed: false,
             });
         }
         vec![segment]
@@ -347,11 +350,13 @@ pub mod bench_support {
                 source,
                 target,
                 type_id: 1,
+                schema_reversed: false,
             });
             segment.edge_weights.push(SegmentEdgeWeight {
                 source,
                 target,
                 type_id: 1,
+                schema_reversed: false,
                 weight: 1,
             });
         }
@@ -366,6 +371,7 @@ pub mod bench_support {
                 source: 0,
                 target,
                 type_id: 1,
+                schema_reversed: false,
             });
         }
         vec![segment]
@@ -375,7 +381,10 @@ pub mod bench_support {
         let mut inserts = HashMap::new();
         let mut deletes = HashMap::new();
         for source in (0..node_count).step_by(509) {
-            inserts.insert(source, vec![(source.wrapping_add(23) % node_count, 1)]);
+            inserts.insert(
+                source,
+                vec![(source.wrapping_add(23) % node_count, 1, false)],
+            );
             deletes.insert(
                 source,
                 HashSet::from([(source.wrapping_add(1) % node_count, 1)]),
@@ -448,6 +457,7 @@ pub mod bench_support {
                     target: source + 1,
                     type_id: 1,
                     weight: None,
+                    schema_reversed: false,
                 });
             }
             let edge_store = EdgeStoreBuilder::try_from_edges(nodes.node_count(), edges, false)
@@ -528,6 +538,7 @@ pub mod bench_support {
                     filter_column_id: None,
                     filter_value: None,
                     tenant_hash: None,
+                    schema_reversed: false,
                 })
                 .collect::<Vec<_>>();
             let started = Instant::now();
@@ -618,6 +629,7 @@ pub mod bench_support {
                         target: source + 1,
                         type_id: 1,
                         weight: Some(1),
+                        schema_reversed: false,
                     })
                     .collect(),
                 true,

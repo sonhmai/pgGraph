@@ -13,7 +13,7 @@
 //!   flags: u32           — 4 bytes
 //!   node_count: u32      — 4 bytes
 //!   edge_count: u32      — 4 bytes
-//!   section_offsets[11]  — 11 × u64 = 88 bytes
+//!   section_offsets[12]  — 12 × u64 = 96 bytes
 //!   crc32: u32           — 4 bytes
 //!
 //! [Section 0: NodeStore.is_active]            — ceil(node_count / 8) bytes
@@ -22,11 +22,12 @@
 //! [Section 3: EdgeStore.targets]              — edge_count × 4 bytes
 //! [Section 4: EdgeStore.type_ids]             — edge_count × 1 byte
 //! [Section 5: EdgeStore.weights]              — edge_count × 4 bytes (optional)
-//! [Section 6: ResolutionIndex]                — 4 + entry_count × 16 bytes
-//! [Section 7: NodeStore.primary_key_offsets]  — (node_count + 1) × 8 bytes
-//! [Section 8: NodeStore.primary_key_bytes]    — variable length UTF-8
-//! [Section 9: FilterIndex (Bincode)]          — variable length
-//! [Section 10: edge_type_registry (Bincode)]  — variable length
+//! [Section 6: EdgeStore.schema_reversed]      — edge_count × 1 byte
+//! [Section 7: ResolutionIndex]                — 4 + entry_count × 16 bytes
+//! [Section 8: NodeStore.primary_key_offsets]  — (node_count + 1) × 8 bytes
+//! [Section 9: NodeStore.primary_key_bytes]    — variable length UTF-8
+//! [Section 10: FilterIndex (Bincode)]         — variable length
+//! [Section 11: edge_type_registry (Bincode)]  — variable length
 //! ```
 //!
 //! ## Memory Model
@@ -61,11 +62,11 @@ use crate::safety::{GraphError, GraphResult};
 /// Magic bytes for .pggraph files.
 const MAGIC: &[u8; 4] = b"PGGH";
 /// Current file format version.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Header size in bytes.
 const HEADER_SIZE: usize = 128;
 /// Number of sections.
-const NUM_SECTIONS: usize = 11;
+const NUM_SECTIONS: usize = 12;
 const CRC_OFFSET: usize = 20 + NUM_SECTIONS * 8;
 const INTERRUPT_CHECK_INTERVAL: u32 = 4096;
 
@@ -362,8 +363,8 @@ fn validate_persisted_contents(
         }
     }
 
-    let pk_offsets_start = ranges[7].0;
-    let pk_bytes_len = ranges[8].1 - ranges[8].0;
+    let pk_offsets_start = ranges[8].0;
+    let pk_bytes_len = ranges[9].1 - ranges[9].0;
     let mut previous_pk = read_u64_at(mmap, pk_offsets_start);
     if previous_pk != 0 {
         return Err(GraphError::CorruptFile {
@@ -390,7 +391,7 @@ fn validate_persisted_contents(
         }
         let start = previous_pk as usize;
         let end = current as usize;
-        std::str::from_utf8(&mmap[ranges[8].0 + start..ranges[8].0 + end]).map_err(|err| {
+        std::str::from_utf8(&mmap[ranges[9].0 + start..ranges[9].0 + end]).map_err(|err| {
             GraphError::CorruptFile {
                 reason: format!(
                     "primary key at node index {} is not valid UTF-8: {}",
@@ -452,20 +453,22 @@ fn validate_section_layout(
     let edge_targets_bytes = checked_section_size(edge_count, 4, "targets")?;
     let edge_type_bytes = checked_section_size(edge_count, 1, "type_ids")?;
     let edge_weight_bytes = checked_section_size(edge_count, 4, "weights")?;
+    let edge_schema_reversed_bytes = checked_section_size(edge_count, 1, "schema_reversed")?;
     let pk_offsets_bytes = checked_section_size(node_plus_one, 8, "primary_key_offsets")?;
 
     validate_section_alignment(&ranges, 1, 4, "table_oids")?;
     validate_section_alignment(&ranges, 2, 4, "edge_offsets")?;
     validate_section_alignment(&ranges, 3, 4, "targets")?;
     validate_section_alignment(&ranges, 5, 4, "weights")?;
-    validate_section_alignment(&ranges, 7, 8, "primary_key_offsets")?;
+    validate_section_alignment(&ranges, 8, 8, "primary_key_offsets")?;
 
     validate_section_min_len(&ranges, 0, active_byte_count, "is_active")?;
     validate_section_min_len(&ranges, 1, node_u32_bytes, "table_oids")?;
     validate_section_min_len(&ranges, 2, edge_offsets_bytes, "edge_offsets")?;
     validate_section_min_len(&ranges, 3, edge_targets_bytes, "targets")?;
     validate_section_min_len(&ranges, 4, edge_type_bytes, "type_ids")?;
-    validate_section_min_len(&ranges, 7, pk_offsets_bytes, "primary_key_offsets")?;
+    validate_section_min_len(&ranges, 6, edge_schema_reversed_bytes, "schema_reversed")?;
+    validate_section_min_len(&ranges, 8, pk_offsets_bytes, "primary_key_offsets")?;
 
     let weights_len = ranges[5].1 - ranges[5].0;
     if weights_len != 0 && weights_len != edge_weight_bytes {
@@ -477,16 +480,24 @@ fn validate_section_layout(
         });
     }
 
-    let resolution = &mmap[ranges[6].0..ranges[6].1];
+    for &flag in &mmap[ranges[6].0..ranges[6].0 + edge_schema_reversed_bytes] {
+        if flag > 1 {
+            return Err(GraphError::CorruptFile {
+                reason: format!("schema_reversed flag must be 0 or 1, found {flag}"),
+            });
+        }
+    }
+
+    let resolution = &mmap[ranges[7].0..ranges[7].1];
     let resolution_index =
         ResolutionIndex::from_bytes(resolution).ok_or_else(|| GraphError::CorruptFile {
             reason: "invalid resolution index section".to_string(),
         })?;
     let resolution_min_len = 4 + resolution_index.len() as usize * RESOLUTION_ENTRY_SIZE;
-    validate_section_min_len(&ranges, 6, resolution_min_len, "resolution_index")?;
+    validate_section_min_len(&ranges, 7, resolution_min_len, "resolution_index")?;
 
-    validate_length_prefixed_section(mmap, &ranges, 9, "filter index")?;
-    validate_length_prefixed_section(mmap, &ranges, 10, "edge type registry")?;
+    validate_length_prefixed_section(mmap, &ranges, 10, "filter index")?;
+    validate_length_prefixed_section(mmap, &ranges, 11, "edge type registry")?;
 
     validate_persisted_contents(mmap, &ranges, node_count, edge_count)?;
 
@@ -551,10 +562,13 @@ fn write_graph_file_internal(
     writer.write_u32_values(engine.edge_store.weights_slice())?;
 
     writer.begin_section(6, None)?;
+    writer.write_body(engine.edge_store.schema_reversed_slice())?;
+
+    writer.begin_section(7, None)?;
     let ri_bytes = engine.resolution_to_bytes();
     writer.write_body(&ri_bytes)?;
 
-    writer.begin_section(7, Some(8))?;
+    writer.begin_section(8, Some(8))?;
     let mut pk_offset = 0u64;
     writer.write_u64_value(pk_offset)?;
     for node_idx in 0..engine.node_store.node_count() {
@@ -571,7 +585,7 @@ fn write_graph_file_internal(
         writer.write_u64_value(pk_offset)?;
     }
 
-    writer.begin_section(8, None)?;
+    writer.begin_section(9, None)?;
     for node_idx in 0..engine.node_store.node_count() {
         if check_interrupts && node_idx.is_multiple_of(INTERRUPT_CHECK_INTERVAL) {
             check_for_interrupts();
@@ -580,13 +594,13 @@ fn write_graph_file_internal(
         writer.write_body(pk.as_bytes())?;
     }
 
-    writer.begin_section(9, None)?;
+    writer.begin_section(10, None)?;
     let bincode_config = bincode::config::standard();
     let filter_bytes = bincode::serde::encode_to_vec(&engine.filter_index, bincode_config)
         .map_err(|e| GraphError::Internal(format!("FilterIndex serialization failed: {}", e)))?;
     writer.write_length_prefixed_payload(&filter_bytes, "filter index")?;
 
-    writer.begin_section(10, None)?;
+    writer.begin_section(11, None)?;
     let edge_type_bytes = bincode::serde::encode_to_vec(&engine.edge_type_registry, bincode_config)
         .map_err(|e| {
             GraphError::Internal(format!("edge_type_registry serialization failed: {}", e))
@@ -772,10 +786,10 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     // The .pggraph file layout guarantees correct alignment for u32/u64 arrays.
     let active_ptr = mmap[section_ranges[0].0..].as_ptr();
     let oid_ptr = mmap[section_ranges[1].0..].as_ptr() as *const u32;
-    let pk_offsets_ptr = mmap[section_ranges[7].0..].as_ptr() as *const u64;
-    let pk_bytes_ptr = mmap[section_ranges[8].0..].as_ptr();
+    let pk_offsets_ptr = mmap[section_ranges[8].0..].as_ptr() as *const u64;
+    let pk_bytes_ptr = mmap[section_ranges[9].0..].as_ptr();
     let active_byte_count = (node_count as usize).div_ceil(8);
-    let pk_bytes_len = section_ranges[8].1 - section_ranges[8].0;
+    let pk_bytes_len = section_ranges[9].1 - section_ranges[9].0;
 
     // SAFETY: validate_section_layout has already checked section bounds and
     // cross-section invariants. MmapNodeArrays validates alignment and active
@@ -805,6 +819,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     let targets_ptr = mmap[section_ranges[3].0..].as_ptr() as *const u32;
     let type_ids_ptr = mmap[section_ranges[4].0..].as_ptr();
     let weights_ptr = mmap[section_ranges[5].0..].as_ptr() as *const u32;
+    let schema_reversed_ptr = mmap[section_ranges[6].0..].as_ptr();
     let has_weights = section_ranges[5].1 > section_ranges[5].0;
 
     // SAFETY: validate_section_layout has checked CSR bounds and monotonicity.
@@ -817,6 +832,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
             targets_ptr,
             type_ids_ptr,
             weights_ptr,
+            schema_reversed_ptr,
             node_count,
             edge_count,
             has_weights,
@@ -830,15 +846,15 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
     let edge_store = unsafe { EdgeStore::from_mmap(edge_arrays) };
 
     // ── ResolutionIndex: mmap'd, zero-copy (handled by Engine) ──
-    let ri_start = section_ranges[6].0;
-    let ri_end = section_ranges[6].1;
+    let ri_start = section_ranges[7].0;
+    let ri_end = section_ranges[7].1;
     let ri_len = ri_end - ri_start;
 
     // FilterIndex and edge_type_registry are variable-size bincode sections.
     // They are deserialized into backend-local heap rather than kept as
     // mmap-backed stores.
     let bincode_config = bincode::config::standard();
-    let filter_data = length_prefixed_payload(&mmap, &section_ranges, 9, "filter index")?;
+    let filter_data = length_prefixed_payload(&mmap, &section_ranges, 10, "filter index")?;
     let filter_index: FilterIndex = decode_bincode_section(
         filter_data,
         bincode_config,
@@ -846,7 +862,7 @@ pub fn load_graph_file(path: &Path) -> GraphResult<Engine> {
         "FilterIndex deserialization failed",
     )?;
 
-    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 10, "edge type registry")?;
+    let registry_data = length_prefixed_payload(&mmap, &section_ranges, 11, "edge type registry")?;
     let edge_type_registry: Vec<String> = decode_bincode_section(
         registry_data,
         bincode_config,
@@ -1157,6 +1173,7 @@ mod tests {
                 target: b,
                 type_id: edge_type,
                 weight: Some(7),
+                schema_reversed: false,
             }],
             true,
         );
@@ -1185,6 +1202,61 @@ mod tests {
         assert_eq!(reloaded.node_store.primary_key(b), "B-2");
         assert_eq!(reloaded.edge_type_registry, vec!["", "officer_of"]);
         assert_eq!(reloaded.edge_store.neighbors_weighted(a).2, &[7]);
+    }
+
+    #[test]
+    fn persisted_mmap_load_preserves_schema_reversed_edges() {
+        let mut engine = Engine::new();
+        let a = engine.node_store.add_node(10, "A-1".to_string());
+        let b = engine.node_store.add_node(10, "B-2".to_string());
+        engine.resolution_insert(10, "A-1", a);
+        engine.resolution_insert(10, "B-2", b);
+        let edge_type = engine.register_edge_type("friend").unwrap();
+        engine.edge_store = EdgeStore::from_edges(
+            2,
+            vec![
+                RawEdge {
+                    source: a,
+                    target: b,
+                    type_id: edge_type,
+                    weight: Some(7),
+                    schema_reversed: false,
+                },
+                RawEdge {
+                    source: b,
+                    target: a,
+                    type_id: edge_type,
+                    weight: Some(11),
+                    schema_reversed: true,
+                },
+            ],
+            true,
+        );
+        engine.built = true;
+
+        let path = std::env::temp_dir().join(format!(
+            "graph-persistence-schema-reversed-test-{}.pggraph",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        write_graph_file(&engine, &path).unwrap();
+        let loaded = load_graph_file(&path).unwrap();
+        write_graph_file(&loaded, &path).unwrap();
+        let reloaded = load_graph_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let (_, _, loaded_schema, loaded_weights) =
+            loaded.edge_store.neighbors_weighted_with_schema(b);
+        assert_eq!(loaded_schema, &[1]);
+        assert_eq!(loaded_weights, &[11]);
+        assert_eq!(loaded.edge_store.schema_reversed_slice(), &[0, 1]);
+
+        let (_, _, reloaded_schema, reloaded_weights) =
+            reloaded.edge_store.neighbors_weighted_with_schema(b);
+        assert_eq!(reloaded_schema, &[1]);
+        assert_eq!(reloaded_weights, &[11]);
+        assert_eq!(reloaded.edge_store.schema_reversed_slice(), &[0, 1]);
     }
 
     #[test]
@@ -1338,6 +1410,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(7),
+                schema_reversed: false,
             }],
             true,
         );
@@ -1439,12 +1512,12 @@ mod tests {
         write_graph_file(&engine, &path).unwrap();
         let active_offset = read_section_offset(&path, 0);
         let table_oids_offset = read_section_offset(&path, 1);
-        let filter_offset = read_section_offset(&path, 9);
-        let registry_offset = read_section_offset(&path, 10);
+        let filter_offset = read_section_offset(&path, 10);
+        let registry_offset = read_section_offset(&path, 11);
         let file_len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        assert_eq!(NUM_SECTIONS, 11);
+        assert_eq!(NUM_SECTIONS, 12);
         assert_eq!(active_offset, HEADER_SIZE as u64);
         assert_eq!(table_oids_offset, HEADER_SIZE as u64);
         assert!(filter_offset >= HEADER_SIZE as u64);
@@ -1478,14 +1551,14 @@ mod tests {
         let path = temp_graph_path("launch-artifact-section-sizes");
         write_graph_file(&engine, &path).unwrap();
         let header_version = read_u32_from_file(&path, 4);
-        let filter_offset = read_section_offset(&path, 9);
-        let registry_offset = read_section_offset(&path, 10);
+        let filter_offset = read_section_offset(&path, 10);
+        let registry_offset = read_section_offset(&path, 11);
         let filter_payload_len = read_u32_from_file(&path, filter_offset) as u64;
         let file_len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
         assert_eq!(header_version, VERSION);
-        assert_eq!(NUM_SECTIONS, 11);
+        assert_eq!(NUM_SECTIONS, 12);
         assert!(filter_offset >= HEADER_SIZE as u64);
         assert!(registry_offset > filter_offset);
         assert_eq!(registry_offset - filter_offset, 4 + filter_payload_len);
@@ -1583,6 +1656,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }],
             false,
         );
@@ -1836,6 +1910,7 @@ mod tests {
                 target: b,
                 type_id: 1,
                 weight: Some(7),
+                schema_reversed: false,
             }],
             true,
         );
@@ -1919,8 +1994,8 @@ mod tests {
         let path = dir.join("test_short_filter.pggraph");
         write_graph_file(&engine, &path).unwrap();
 
-        let filter_offset = read_section_offset(&path, 9);
-        write_section_offset(&path, 10, filter_offset);
+        let filter_offset = read_section_offset(&path, 10);
+        write_section_offset(&path, 11, filter_offset);
 
         let result = load_graph_file(&path);
         assert!(matches!(result, Err(GraphError::CorruptFile { .. })));
@@ -1998,7 +2073,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-offsets");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_offsets = read_section_offset(&path, 7);
+        let pk_offsets = read_section_offset(&path, 8);
         write_u64_at(&path, pk_offsets + 16, 0);
         rewrite_crc(&path);
 
@@ -2014,7 +2089,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-offset-bounds");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_offsets = read_section_offset(&path, 7);
+        let pk_offsets = read_section_offset(&path, 8);
         write_u64_at(&path, pk_offsets + 16, 999);
         rewrite_crc(&path);
 
@@ -2030,7 +2105,7 @@ mod tests {
         let path = temp_graph_path("bad-pk-utf8");
         write_graph_file(&engine, &path).unwrap();
 
-        let pk_bytes = read_section_offset(&path, 8);
+        let pk_bytes = read_section_offset(&path, 9);
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         use std::io::{Seek, Write};
         file.seek(std::io::SeekFrom::Start(pk_bytes)).unwrap();

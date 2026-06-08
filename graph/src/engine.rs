@@ -845,7 +845,7 @@ impl Engine {
             }
         }
         for (source, targets) in tx_inserts {
-            for (target, type_id) in targets {
+            for (target, type_id, _schema_reversed) in targets {
                 let key = (source, target, type_id);
                 deletes.remove(&key);
                 inserts.insert(key);
@@ -857,7 +857,7 @@ impl Engine {
             insert_map
                 .entry(source)
                 .or_default()
-                .push((target, type_id));
+                .push((target, type_id, false));
         }
         let mut delete_map: OverlayDeletes = HashMap::new();
         for (source, target, type_id) in deletes {
@@ -1291,6 +1291,7 @@ mod tests {
                 target: i + 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             });
         }
         engine.edge_store = crate::edge_store::EdgeStore::from_edges(10, edges, false);
@@ -1317,6 +1318,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }],
             false,
         );
@@ -1492,48 +1494,56 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 4,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 4,
                 target: 0,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         eng.edge_store = crate::edge_store::EdgeStore::from_edges(5, edges, false);
@@ -1756,6 +1766,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }],
             false,
         );
@@ -1812,6 +1823,7 @@ mod tests {
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("record tx edge insert");
@@ -2006,6 +2018,7 @@ mod tests {
                 target: 3,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("record tx edge insert");
@@ -2061,6 +2074,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(1),
+                schema_reversed: false,
             }],
             true,
         );
@@ -2089,6 +2103,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(1),
+                schema_reversed: false,
             }],
             true,
         );
@@ -2099,6 +2114,7 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: Some(1),
+                schema_reversed: false,
             },
         )
         .expect("record tx edge insert");
@@ -2122,6 +2138,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
         });
 
@@ -2146,6 +2163,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
         });
         eng.set_projection_mode(crate::config::ProjectionMode::CsrReadonly);
@@ -2171,6 +2189,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
         });
 
@@ -2231,6 +2250,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
         });
 
@@ -2309,6 +2329,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(10),
+                schema_reversed: false,
             }],
             true,
         );
@@ -2320,6 +2341,7 @@ mod tests {
                     source: 0,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
             segment
                 .edge_weights
@@ -2328,6 +2350,7 @@ mod tests {
                     target: 3,
                     type_id: 1,
                     weight: 2,
+                    schema_reversed: false,
                 });
         });
 
@@ -2357,6 +2380,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }],
             false,
         );
@@ -2369,6 +2393,7 @@ mod tests {
                     source: 2,
                     target: 3,
                     type_id: 1,
+                    schema_reversed: false,
                 });
         });
 
@@ -2393,6 +2418,7 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }],
             false,
         );
@@ -2500,6 +2526,7 @@ mod tests {
                     target: i,
                     type_id: 1,
                     weight: Some(1),
+                    schema_reversed: false,
                 });
             }
         }

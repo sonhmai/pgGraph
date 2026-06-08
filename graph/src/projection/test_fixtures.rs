@@ -100,6 +100,8 @@ pub(crate) struct NormalizedMutation {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this edge row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
     /// Optional edge weight.
     pub(crate) weight: Option<u32>,
     /// Whether this mutation is a tombstone.
@@ -117,6 +119,7 @@ pub(crate) fn edge_store_from_tuples(node_count: u32, edges: &[(u32, u32, u8)]) 
                 target,
                 type_id,
                 weight: None,
+                schema_reversed: false,
             })
             .collect(),
         false,
@@ -137,6 +140,7 @@ pub(crate) fn weighted_edge_store_from_tuples(
                 target,
                 type_id,
                 weight: Some(weight),
+                schema_reversed: false,
             })
             .collect(),
         true,
@@ -197,10 +201,12 @@ mod tests {
                 Neighbor {
                     target: 1,
                     type_id: 2,
+                    schema_reversed: false,
                 },
                 Neighbor {
                     target: 2,
                     type_id: 3,
+                    schema_reversed: false,
                 },
             ]
         );

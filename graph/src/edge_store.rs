@@ -33,6 +33,7 @@ pub struct MmapEdgeArrays {
     offsets_ptr: *const u32,
     targets_ptr: *const u32,
     type_ids_ptr: *const u8,
+    schema_reversed_ptr: *const u8,
     weights_ptr: *const u32,
     node_count: u32,
     edge_count: u32,
@@ -52,6 +53,8 @@ pub struct MmapEdgeArrayParts {
     pub targets_ptr: *const u32,
     /// Pointer to `edge_count` initialized edge type identifiers.
     pub type_ids_ptr: *const u8,
+    /// Pointer to `edge_count` initialized schema-reversed flags.
+    pub schema_reversed_ptr: *const u8,
     /// Pointer to `edge_count` initialized weights when `has_weights` is true.
     pub weights_ptr: *const u32,
     /// Number of nodes represented by the CSR offset table.
@@ -73,6 +76,7 @@ impl MmapEdgeArrays {
         if parts.offsets_ptr.is_null()
             || parts.targets_ptr.is_null()
             || parts.type_ids_ptr.is_null()
+            || parts.schema_reversed_ptr.is_null()
         {
             return None;
         }
@@ -84,6 +88,7 @@ impl MmapEdgeArrays {
             .checked_mul(std::mem::size_of::<u32>())?;
         let target_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
         let type_id_bytes = parts.edge_count as usize;
+        let schema_reversed_bytes = parts.edge_count as usize;
         let weight_bytes = (parts.edge_count as usize).checked_mul(std::mem::size_of::<u32>())?;
         if !ptr_range_in_region(
             parts.offsets_ptr.cast::<u8>(),
@@ -98,6 +103,11 @@ impl MmapEdgeArrays {
         ) || !ptr_range_in_region(
             parts.type_ids_ptr,
             type_id_bytes,
+            parts.region_ptr,
+            parts.region_len,
+        ) || !ptr_range_in_region(
+            parts.schema_reversed_ptr,
+            schema_reversed_bytes,
             parts.region_ptr,
             parts.region_len,
         ) || (parts.has_weights
@@ -122,6 +132,7 @@ impl MmapEdgeArrays {
             offsets_ptr: parts.offsets_ptr,
             targets_ptr: parts.targets_ptr,
             type_ids_ptr: parts.type_ids_ptr,
+            schema_reversed_ptr: parts.schema_reversed_ptr,
             weights_ptr: parts.weights_ptr,
             node_count: parts.node_count,
             edge_count: parts.edge_count,
@@ -157,6 +168,7 @@ pub enum EdgeBacking {
         edge_offsets: Vec<u32>,
         targets: Vec<u32>,
         type_ids: Vec<u8>,
+        schema_reversed: Vec<u8>,
         weights: Vec<u32>,
     },
     /// Load-time: read-only pointers into Engine-owned mmap memory.
@@ -174,10 +186,13 @@ pub struct RawEdge {
     pub type_id: u8,
     /// Optional edge weight; unweighted stores ignore this value.
     pub weight: Option<u32>,
+    /// Whether this adjacency is the generated reverse copy of a registered
+    /// bidirectional edge row.
+    pub schema_reversed: bool,
 }
 
 /// Incremental CSR builder for raw edges already sorted by
-/// `(source, target, type_id)`.
+/// `(source, target, type_id, schema_reversed)`.
 ///
 /// This lets the graph builder stream sorted rows from PostgreSQL temp storage
 /// without retaining a full `Vec<RawEdge>` in Rust.
@@ -187,9 +202,10 @@ pub struct SortedEdgeStoreBuilder {
     edge_offsets: Vec<u32>,
     targets: Vec<u32>,
     type_ids: Vec<u8>,
+    schema_reversed: Vec<u8>,
     weights: Vec<u32>,
     current_node: u32,
-    previous: Option<(u32, u32, u8)>,
+    previous: Option<(u32, u32, u8, bool)>,
 }
 
 impl SortedEdgeStoreBuilder {
@@ -201,6 +217,7 @@ impl SortedEdgeStoreBuilder {
             edge_offsets: vec![0],
             targets: Vec::new(),
             type_ids: Vec::new(),
+            schema_reversed: Vec::new(),
             weights: Vec::new(),
             current_node: 0,
             previous: None,
@@ -218,7 +235,7 @@ impl SortedEdgeStoreBuilder {
     /// is greater than or equal to the builder's node count.
     pub fn try_push(&mut self, edge: RawEdge) -> GraphResult<()> {
         validate_raw_edge(self.node_count, &edge)?;
-        let key = (edge.source, edge.target, edge.type_id);
+        let key = (edge.source, edge.target, edge.type_id, edge.schema_reversed);
         if self.previous == Some(key) {
             return Ok(());
         }
@@ -228,6 +245,7 @@ impl SortedEdgeStoreBuilder {
         }
         self.targets.push(edge.target);
         self.type_ids.push(edge.type_id);
+        self.schema_reversed.push(u8::from(edge.schema_reversed));
         if self.has_weights {
             self.weights.push(edge.weight.unwrap_or(1));
         }
@@ -246,6 +264,7 @@ impl SortedEdgeStoreBuilder {
                 edge_offsets: self.edge_offsets,
                 targets: self.targets,
                 type_ids: self.type_ids,
+                schema_reversed: self.schema_reversed,
                 weights: self.weights,
             },
         }
@@ -265,6 +284,7 @@ impl EdgeStore {
                 edge_offsets: vec![0],
                 targets: Vec::new(),
                 type_ids: Vec::new(),
+                schema_reversed: Vec::new(),
                 weights: Vec::new(),
             },
         }
@@ -306,17 +326,23 @@ impl EdgeStore {
     }
 
     fn from_valid_edges(node_count: u32, mut edges: Vec<RawEdge>, has_weights: bool) -> Self {
-        // Sort by source, then target, then type_id
+        // Sort by source, then target, then type_id, then registered-direction
+        // flag so real opposite rows do not collapse with synthetic reverse
+        // copies of bidirectional rows.
         edges.sort_unstable_by(|a, b| {
             a.source
                 .cmp(&b.source)
                 .then(a.target.cmp(&b.target))
                 .then(a.type_id.cmp(&b.type_id))
+                .then(a.schema_reversed.cmp(&b.schema_reversed))
         });
 
         // Deduplicate
         edges.dedup_by(|a, b| {
-            a.source == b.source && a.target == b.target && a.type_id == b.type_id
+            a.source == b.source
+                && a.target == b.target
+                && a.type_id == b.type_id
+                && a.schema_reversed == b.schema_reversed
         });
 
         let edge_count = edges.len();
@@ -325,6 +351,7 @@ impl EdgeStore {
         let mut edge_offsets = Vec::with_capacity(node_count as usize + 1);
         let mut targets = Vec::with_capacity(edge_count);
         let mut type_ids = Vec::with_capacity(edge_count);
+        let mut schema_reversed = Vec::with_capacity(edge_count);
         let mut weights = if has_weights {
             Vec::with_capacity(edge_count)
         } else {
@@ -337,6 +364,7 @@ impl EdgeStore {
             while edge_idx < edges.len() && edges[edge_idx].source == node {
                 targets.push(edges[edge_idx].target);
                 type_ids.push(edges[edge_idx].type_id);
+                schema_reversed.push(u8::from(edges[edge_idx].schema_reversed));
                 if has_weights {
                     weights.push(edges[edge_idx].weight.unwrap_or(1));
                 }
@@ -350,13 +378,15 @@ impl EdgeStore {
                 edge_offsets,
                 targets,
                 type_ids,
+                schema_reversed,
                 weights,
             },
         }
     }
 
     /// Build a CSR EdgeStore from already sorted raw edges without retaining the
-    /// raw edge list. Input must be ordered by `(source, target, type_id)`.
+    /// raw edge list. Input must be ordered by
+    /// `(source, target, type_id, schema_reversed)`.
     #[cfg(test)]
     pub fn from_sorted_edges<I>(node_count: u32, edges: I, has_weights: bool) -> Self
     where
@@ -405,6 +435,7 @@ impl EdgeStore {
 
         let mut reversed_targets = vec![0u32; edge_count];
         let mut reversed_type_ids = vec![0u8; edge_count];
+        let mut reversed_schema_reversed = vec![0u8; edge_count];
         let mut reversed_weights = if has_weights {
             vec![0u32; edge_count]
         } else {
@@ -413,12 +444,14 @@ impl EdgeStore {
         let mut write_offsets = edge_offsets.clone();
 
         for source in 0..self.node_count() {
-            let (targets, type_ids, weights) = self.neighbors_weighted(source);
+            let (targets, type_ids, schema_reversed, weights) =
+                self.neighbors_weighted_with_schema(source);
             for (idx, (&target, &type_id)) in targets.iter().zip(type_ids.iter()).enumerate() {
                 let write_idx = write_offsets[target as usize] as usize;
                 write_offsets[target as usize] += 1;
                 reversed_targets[write_idx] = source;
                 reversed_type_ids[write_idx] = type_id;
+                reversed_schema_reversed[write_idx] = schema_reversed[idx];
                 if has_weights {
                     reversed_weights[write_idx] = weights.get(idx).copied().unwrap_or(1);
                 }
@@ -430,6 +463,7 @@ impl EdgeStore {
                 edge_offsets,
                 targets: reversed_targets,
                 type_ids: reversed_type_ids,
+                schema_reversed: reversed_schema_reversed,
                 weights: reversed_weights,
             },
         }
@@ -479,6 +513,49 @@ impl EdgeStore {
         }
     }
 
+    /// Get the neighbor slice with registered-direction metadata.
+    ///
+    /// The third slice contains `0` for an adjacency in the registered source
+    /// row direction and `1` for the generated reverse copy of a bidirectional
+    /// row.
+    #[inline(always)]
+    pub fn neighbors_with_schema(&self, node_idx: u32) -> (&[u32], &[u8], &[u8]) {
+        match &self.backing {
+            EdgeBacking::Owned {
+                edge_offsets,
+                targets,
+                type_ids,
+                schema_reversed,
+                ..
+            } => {
+                if node_idx as usize + 1 >= edge_offsets.len() {
+                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U8_SLICE);
+                }
+                let start = edge_offsets[node_idx as usize] as usize;
+                let end = edge_offsets[node_idx as usize + 1] as usize;
+                (
+                    &targets[start..end],
+                    &type_ids[start..end],
+                    &schema_reversed[start..end],
+                )
+            }
+            EdgeBacking::Mmap { arrays } => {
+                if node_idx >= arrays.node_count {
+                    return (&EMPTY_U32_SLICE, &EMPTY_U8_SLICE, &EMPTY_U8_SLICE);
+                }
+                let (targets, type_ids) = self.neighbors(node_idx);
+                let start = self.offsets_slice()[node_idx as usize] as usize;
+                let len = targets.len();
+                // SAFETY: neighbors() already validated start + len against
+                // edge_count, and mmap metadata validates schema_reversed_ptr.
+                let schema_reversed = unsafe {
+                    std::slice::from_raw_parts(arrays.schema_reversed_ptr.add(start), len)
+                };
+                (targets, type_ids, schema_reversed)
+            }
+        }
+    }
+
     /// Get the neighbor slice with weights for Dijkstra.
     #[inline]
     pub fn neighbors_weighted(&self, node_idx: u32) -> (&[u32], &[u8], &[u32]) {
@@ -491,6 +568,7 @@ impl EdgeStore {
                 edge_offsets,
                 targets,
                 type_ids,
+                schema_reversed: _,
                 weights,
             } => {
                 let start = edge_offsets[node_idx as usize] as usize;
@@ -519,6 +597,14 @@ impl EdgeStore {
                 (t, ti, weights)
             }
         }
+    }
+
+    /// Get the neighbor slice with weights and registered-direction metadata.
+    #[inline]
+    pub fn neighbors_weighted_with_schema(&self, node_idx: u32) -> (&[u32], &[u8], &[u8], &[u32]) {
+        let (targets, type_ids, schema_reversed) = self.neighbors_with_schema(node_idx);
+        let (_, _, weights) = self.neighbors_weighted(node_idx);
+        (targets, type_ids, schema_reversed, weights)
     }
 
     /// Number of edges.
@@ -560,11 +646,13 @@ impl EdgeStore {
                 edge_offsets,
                 targets,
                 type_ids,
+                schema_reversed,
                 weights,
             } => {
                 edge_offsets.capacity() * std::mem::size_of::<u32>()
                     + targets.capacity() * std::mem::size_of::<u32>()
                     + type_ids.capacity() * std::mem::size_of::<u8>()
+                    + schema_reversed.capacity() * std::mem::size_of::<u8>()
                     + weights.capacity() * std::mem::size_of::<u32>()
             }
             EdgeBacking::Mmap { .. } => 0,
@@ -584,6 +672,7 @@ impl EdgeStore {
                 (arrays.node_count as usize + 1)
                     .saturating_mul(std::mem::size_of::<u32>())
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u32>())
+                    .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
                     .saturating_add(arrays.edge_count as usize * std::mem::size_of::<u8>())
                     .saturating_add(weight_bytes)
             }
@@ -657,6 +746,24 @@ impl EdgeStore {
         }
     }
 
+    /// Get schema-reversed flags as a slice.
+    pub fn schema_reversed_slice(&self) -> &[u8] {
+        match &self.backing {
+            EdgeBacking::Owned {
+                schema_reversed, ..
+            } => schema_reversed,
+            EdgeBacking::Mmap { arrays } => {
+                // SAFETY: MmapEdgeArrays::new validates schema_reversed_ptr and edge_count.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        arrays.schema_reversed_ptr,
+                        arrays.edge_count as usize,
+                    )
+                }
+            }
+        }
+    }
+
     /// Get weights as a slice. Empty means unweighted.
     pub fn weights_slice(&self) -> &[u32] {
         match &self.backing {
@@ -723,12 +830,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
@@ -748,12 +857,14 @@ mod tests {
                 target: 1,
                 type_id: 7,
                 weight: Some(3),
+                schema_reversed: false,
             },
             RawEdge {
                 source: 2,
                 target: 1,
                 type_id: 9,
                 weight: Some(5),
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, true);
@@ -774,18 +885,21 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             }, // duplicate
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
@@ -801,12 +915,14 @@ mod tests {
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
@@ -822,12 +938,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(10),
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: 1,
                 weight: Some(20),
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, true);
@@ -845,12 +963,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: 1,
                 weight: Some(8),
+                schema_reversed: false,
             },
         ];
 
@@ -868,6 +988,7 @@ mod tests {
             target: 1,
             type_id: 1,
             weight: Some(99),
+            schema_reversed: false,
         }];
 
         let store = EdgeStore::from_edges(2, edges, false);
@@ -892,6 +1013,8 @@ mod tests {
             targets_ptr: unsafe { base.add(16).cast::<u32>() },
             // SAFETY: See above.
             type_ids_ptr: unsafe { base.add(24) },
+            // SAFETY: See above.
+            schema_reversed_ptr: unsafe { base.add(28) },
             // SAFETY: See above.
             weights_ptr: unsafe { base.add(32).cast::<u32>() },
             node_count: 1,
@@ -942,6 +1065,7 @@ mod tests {
                 offsets_ptr: near_usize_end,
                 targets_ptr: base.cast::<u32>(),
                 type_ids_ptr: base,
+                schema_reversed_ptr: base,
                 weights_ptr: base.cast::<u32>(),
                 node_count: 1,
                 edge_count: 0,
@@ -959,18 +1083,21 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 99,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 99,
                 target: 0,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
 
@@ -989,12 +1116,14 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
 
@@ -1014,6 +1143,7 @@ mod tests {
             target: 0,
             type_id: 1,
             weight: None,
+            schema_reversed: false,
         });
 
         assert!(
@@ -1043,18 +1173,21 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 1,
                 type_id: 2,
                 weight: None,
+                schema_reversed: false,
             },
             RawEdge {
                 source: 0,
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         ];
         let store = EdgeStore::from_edges(3, edges, false);
@@ -1075,6 +1208,7 @@ mod tests {
             target: 0,
             type_id: 1,
             weight: None,
+            schema_reversed: false,
         }];
         let store = EdgeStore::from_edges(1, edges, false);
         assert_eq!(store.edge_count(), 1);
@@ -1114,6 +1248,7 @@ mod tests {
                     target,
                     type_id,
                     weight,
+                schema_reversed: false,
                 })
                 .collect::<Vec<_>>();
             let has_invalid_edge = edges
@@ -1163,24 +1298,28 @@ mod tests {
                 target: 1,
                 type_id: 1,
                 weight: Some(2),
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: Some(3),
+                schema_reversed: false,
             },
             RawEdge {
                 source: 1,
                 target: 2,
                 type_id: 1,
                 weight: Some(99),
+                schema_reversed: false,
             },
             RawEdge {
                 source: 3,
                 target: 0,
                 type_id: 2,
                 weight: Some(4),
+                schema_reversed: false,
             },
         ];
         edges.sort_unstable_by(|a, b| {

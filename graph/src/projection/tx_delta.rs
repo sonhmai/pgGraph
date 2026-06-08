@@ -33,6 +33,8 @@ pub(crate) struct DeltaEdge {
     pub(crate) target: u32,
     /// Edge type identifier.
     pub(crate) type_id: u8,
+    /// Whether this row is a synthetic reverse of the schema edge.
+    pub(crate) schema_reversed: bool,
     /// Optional weight captured from a mapped edge row.
     pub(crate) weight: Option<u32>,
 }
@@ -397,10 +399,11 @@ pub(crate) fn edge_overlay(direction: TraversalDirection) -> EdgeOverlay {
         for (&source, edges) in &delta.added_edges {
             for edge in edges {
                 let (source, target) = orient_edge(direction, source, edge.target);
-                inserts
-                    .entry(source)
-                    .or_default()
-                    .push((target, edge.type_id));
+                inserts.entry(source).or_default().push((
+                    target,
+                    edge.type_id,
+                    edge.schema_reversed,
+                ));
             }
         }
 
@@ -431,6 +434,7 @@ pub(crate) fn weighted_edge_overlay(
                 inserts.entry(source).or_default().push(DeltaEdge {
                     target,
                     type_id: edge.type_id,
+                    schema_reversed: edge.schema_reversed,
                     weight: edge.weight,
                 });
             }
@@ -646,6 +650,7 @@ mod tests {
                     target: 7,
                     type_id: 1,
                     weight: Some(3),
+                    schema_reversed: false,
                 },
             );
             delta.deleted_edges.insert((1, 2, 1));
@@ -734,6 +739,7 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("record insert");
@@ -748,12 +754,15 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("record insert after delete");
         let (inserts, deletes) = edge_overlay(TraversalDirection::In);
         assert!(deletes.is_empty());
-        assert!(inserts.get(&2).is_some_and(|edges| edges.contains(&(1, 1))));
+        assert!(inserts
+            .get(&2)
+            .is_some_and(|edges| edges.contains(&(1, 1, false))));
 
         record_deleted_edge(1, 2, 1).expect("record delete after insert");
         let (inserts, deletes) = edge_overlay(TraversalDirection::Out);
@@ -773,6 +782,7 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("delete plus add should be net neutral at limit");
@@ -785,6 +795,7 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect("record insert at limit");
@@ -841,6 +852,7 @@ mod tests {
                 target: 2,
                 type_id: 1,
                 weight: None,
+                schema_reversed: false,
             },
         )
         .expect_err("subtransaction should be rejected");
