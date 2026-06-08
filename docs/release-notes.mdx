@@ -2,24 +2,144 @@
 
 Release notes are ordered newest first.
 
-## v0.1.7: Stable Bidirectional Relationship Results
+## v0.1.7: Durable Projection Operations
 
-`v0.1.7` fixes how GQL returns relationship values for bidirectional edges.
-Edges can still be traversed in either direction, but result rows now present
-relationship endpoints in the direction registered in the graph schema. This
-keeps edge records stable for applications that inspect `_start`, `_end`, path
-values, or `relationships(path)`.
+`v0.1.7` adds the durable projection operation layer for mutable graphs. pgGraph
+can now publish committed source-table changes into durable projection
+segments, read those segments alongside the base CSR graph, compact accumulated
+segment state, repair dirty base chunks, garbage-collect obsolete generations,
+and surface operator diagnostics through SQL functions.
+
+This release also stabilizes how GQL returns relationship values for
+bidirectional edges. Bidirectional edges can still be traversed from either
+endpoint, but relationship records now keep the source and target endpoint
+order registered in the graph schema. That makes edge records consistent for
+applications that render graph edges or inspect `_start`, `_end`, path values,
+or `relationships(path)`.
 
 ### Highlights
 
+- Added manifest-backed layered reads that merge the base CSR graph, durable
+  projection segments, replacement base chunks, committed overlay rows, and
+  transaction-local deltas into one traversal view.
+- Routed traversal, shortest path, weighted shortest path, connected
+  components, and GQL relationship expansion through the layered projection
+  runtime when a graph is built with durable projection state.
+- Published committed mutable-overlay changes as durable segments, so fresh
+  backends can observe committed graph writes without requiring a full
+  `graph.build()` rebuild.
+- Added durable segment compaction, including preservation of weighted
+  relationship state and rewrite support for dirty base chunks.
+- Added generation heartbeats and generation-aware garbage collection so
+  obsolete projection files are removed only after retained valid generations
+  and active backends no longer protect them.
+- Added projection recovery and repair support, including targeted base-chunk
+  repair and rollback-safe full rebuild restoration.
+- Added operator-facing diagnostics through `graph.projection_status()`,
+  `graph.projection_gc()`, `graph.projection_repair()`, and
+  `graph.active_generation_count()`, with additional durable-projection
+  recommendations exposed through `graph.sync_health()`.
 - Preserved registered source and target endpoints in GQL relationship values
   even when a bidirectional edge is matched through its reverse traversal path.
-- Applied the same stable endpoint orientation to path values and
-  `relationships(path)`.
-- Updated the persisted `.pggraph` artifact format to store the edge-direction
-  metadata needed for stable relationship projection.
-- Kept PostgreSQL source tables authoritative; persisted graph files remain
-  rebuildable derived artifacts.
+- Updated release automation and verification for native multi-platform Docker
+  builds, package prepare/publish separation, projection fuzz seed corpora,
+  crash recovery gates, Docker smoke checks, and release benchmark contracts.
+
+### Durable Projection Behavior
+
+Durable projections let pgGraph keep PostgreSQL source tables authoritative
+while avoiding a full graph rebuild for every committed mutable change. When
+durable projection mode is active, committed sync rows can be ingested into
+projection segment files. Readers then combine those segment files with the
+base graph and any transaction-local overlay state at query time.
+
+The layered runtime is used across the graph surfaces that need topology reads:
+
+- traversal APIs
+- unweighted shortest path
+- weighted shortest path
+- connected components
+- GQL relationship expansion
+- query-time catch-up for mutable graph writes
+
+Projection maintenance is now represented as explicit operations. Segment
+ingestion records committed changes, compaction bounds segment fanout, dirty
+base chunk rewrite repairs source-node ranges, recovery validates and restores
+projection generations, and GC removes obsolete files only after retention and
+active-generation checks pass.
+
+### New SQL Operations And Diagnostics
+
+`v0.1.7` adds and documents durable projection administration entry points:
+
+- `graph.projection_status()` reports manifest, segment, chunk, heartbeat,
+  validation, operation timestamp, and recommendation diagnostics.
+- `graph.projection_gc()` runs generation-aware cleanup for obsolete projection
+  files.
+- `graph.projection_repair()` validates projection state and repairs targeted
+  chunk damage or restores a valid full rebuild when needed.
+- `graph.active_generation_count()` exposes how many active projection
+  generations are protected by backend heartbeats.
+- `graph.sync_health()` includes metadata-only durable projection
+  recommendations without changing the core source-table sync model.
+
+The release also adds `graph.projection_retention_generations` so operators can
+control how many valid projection generations are retained before GC can remove
+obsolete files.
+
+### GQL Relationship Behavior
+
+Before `v0.1.7`, a bidirectional edge matched through its reverse traversal
+path could be returned with endpoints ordered according to the path pattern.
+For example, if a relationship was registered from `account_a` to `account_b`,
+a reverse traversal from `account_b` back to `account_a` could expose the
+relationship value as though its start and end were reversed.
+
+Starting in `v0.1.7`, traversal direction and relationship identity are kept
+separate:
+
+- Path matching still honors bidirectional traversal.
+- Relationship values preserve the registered schema direction.
+- Path values preserve the matched node order for the path, while embedded
+  relationship records preserve the registered relationship direction.
+- `relationships(path)` returns relationship records with stable endpoint
+  orientation, even when a relationship was traversed in reverse.
+
+The fix is applied through edge storage, persisted graph artifacts, projection
+segments, transaction overlays, compaction, dirty chunk rewrite, and GQL
+materialization so schema-direction relationship values stay stable across the
+new durable projection paths.
+
+### Release And Packaging
+
+The release process was hardened alongside the projection work:
+
+- Package publishing now separates prepare and publish modes.
+- Docker release builds run natively per platform and then merge per-platform
+  digests into the prepared multi-arch tags.
+- Docker extension verification waits briefly before failing and prints
+  container logs on failure.
+- GHCR image naming is normalized to lowercase.
+- The local release gate now uses the same `pg17 development` feature set as
+  the maintained pgrx evidence command.
+- Projection manifest and segment fuzz seed corpora can be run outside a live
+  PostgreSQL backend through the release-gate script.
+- Documentation now includes the Homebrew install path and expanded durable
+  projection operation notes.
+
+### Compatibility
+
+Queries that only check reachability, filter by labels or properties, or return
+node values should behave the same as before. Queries that inspect relationship
+endpoint fields, compare path relationship values, or render directed edge
+arrows from `relationships(path)` may observe changed output for reverse
+matches on bidirectional relationships. The new output is the registered schema
+direction, not the reverse path-pattern direction.
+
+The persisted artifact formats changed for this release. Graph artifacts now
+use graph format v3, and projection segments now use segment format v2, so the
+schema-direction metadata can be loaded safely. Existing source tables and graph
+registrations do not need to be rewritten.
 
 ### Upgrade Note
 
@@ -29,12 +149,26 @@ values, or `relationships(path)`.
 the source of truth; PostgreSQL source tables remain authoritative.
 </Callout>
 
+Regenerating the derived artifact is the intended upgrade path:
+
+```sql
+SELECT graph.build();
+```
+
 ### Validation
 
-The PostgreSQL 17 release gate passed, including unit tests, pgrx SQL tests,
-package validation, install smoke, metadata audit, SQLSTATE/ACL checks,
-backup/restore, concurrency stress, playground query validation, pgbench sync
-stress, Docker smoke, and disposable crash recovery checks.
+The PostgreSQL 17 release gate passed for this release, including fmt, clippy,
+documentation checks, unit tests, pgrx SQL tests, package validation, install
+smoke, metadata audit, SQLSTATE/ACL boundary tests, backup/restore,
+advisory-lock regression coverage, concurrency stress, projection recovery,
+cross-backend durable projection checks, projection fuzz seed corpora,
+playground query validation, pgbench sync stress, Docker smoke, RSS
+measurement, and disposable crash recovery checks.
+
+The release also added benchmark and contract coverage for layered BFS, GQL
+relationship expansion, weighted paths, ingest publication, compaction, GC, and
+repair, and was checked against the public package metadata and documentation
+references for the `v0.1.7` tag.
 
 ## v0.1.6: GQL Path Patterns And Release Reliability
 

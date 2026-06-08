@@ -161,6 +161,33 @@ FROM graph.status();
 
 You should see three nodes and at least one edge type.
 
+## Choose A Projection Mode
+
+The quickstart and Docker image default to `csr_readonly`, the immutable
+read-mostly CSR projection. This is the best first choice for traversal and
+path queries over source tables that PostgreSQL owns.
+
+Use `mutable_overlay` when you want pgGraph's mapped GQL write features and
+durable projection segments for committed edge changes. It is opt-in:
+
+```sql
+SET graph.mutable_enabled = on;
+SELECT * FROM graph.build(mode := 'mutable_overlay');
+```
+
+To make future `graph.build()` calls use mutable mode by default in the current
+session:
+
+```sql
+SET graph.mutable_enabled = on;
+SET graph.default_projection_mode = 'mutable_overlay';
+SELECT * FROM graph.build();
+```
+
+Keep `csr_readonly` for simple read-mostly evaluation. Choose
+`mutable_overlay` deliberately when you are testing GQL writes or cross-backend
+durable overlay behavior.
+
 For composite keys, explicit labels, edge direction, weights, tenant columns,
 filter columns, and other modeling details, see
 [Schema Registration](/user_guide/schema-registration).
